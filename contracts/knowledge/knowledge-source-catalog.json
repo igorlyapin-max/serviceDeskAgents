@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "sources": [
+    {
+      "source_id": "local.knowledge",
+      "source_type": "local_files",
+      "display_name": "Локальная база знаний для разработки",
+      "enabled": true,
+      "connector_type": "local_files",
+      "sync_mode": "full",
+      "path": "knowledge",
+      "include_globs": [
+        "*.md",
+        "*.txt"
+      ],
+      "metadata": {
+        "environment": "dev",
+        "labels": [
+          "local"
+        ]
+      }
+    },
+    {
+      "source_id": "corp.wiki",
+      "source_type": "wiki",
+      "display_name": "Корпоративная wiki",
+      "enabled": false,
+      "disabled_reason": "Этап 7 определяет заготовку коннектора; живая синхронизация wiki требует URL источника, авторизацию и mapping ACL.",
+      "connector_type": "http_pull",
+      "sync_mode": "incremental",
+      "base_url_env": "CORP_WIKI_BASE_URL",
+      "auth_profile": "corp_wiki_readonly",
+      "metadata": {
+        "requires_acl_mapping": true
+      }
+    },
+    {
+      "source_id": "servicedesk.kb",
+      "source_type": "servicedesk_kb",
+      "display_name": "База знаний ServiceDesk",
+      "enabled": false,
+      "disabled_reason": "Этап 7 держит загрузку ServiceDesk KB как будущий источник, уже описанный в каталоге.",
+      "connector_type": "http_pull",
+      "sync_mode": "incremental",
+      "base_url_env": "SERVICEDESK_KB_BASE_URL",
+      "auth_profile": "servicedesk_kb_readonly",
+      "metadata": {}
+    },
+    {
+      "source_id": "cmdb.exports",
+      "source_type": "cmdb_export",
+      "display_name": "Экспорты CMDB",
+      "enabled": false,
+      "disabled_reason": "Этап 7 держит загрузку экспортов CMDB как будущий источник, уже описанный в каталоге.",
+      "connector_type": "database_export",
+      "sync_mode": "full",
+      "metadata": {}
+    }
+  ]
+}

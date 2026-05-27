@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/feedback/feedback-request.schema.json",
+  "title": "Feedback Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ticket_id",
+    "operator_id",
+    "rating",
+    "ticket_input",
+    "analysis_snapshot"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "rating": {
+      "type": "string",
+      "enum": [
+        "correct",
+        "incorrect",
+        "edited"
+      ]
+    },
+    "ticket_input": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "analysis_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "approval_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "operator_note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "corrected_response": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "rating": {
+            "const": "edited"
+          }
+        },
+        "required": [
+          "rating"
+        ]
+      },
+      "then": {
+        "required": [
+          "corrected_response"
+        ]
+      }
+    }
+  ]
+}

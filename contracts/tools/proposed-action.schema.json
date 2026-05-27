@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/tools/proposed-action.schema.json",
+  "title": "Proposed Action",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool_name",
+    "action_id",
+    "action_type",
+    "parameters",
+    "reason",
+    "risk_level",
+    "expected_effect",
+    "requires_state_change"
+  ],
+  "properties": {
+    "tool_name": {
+      "type": "string",
+      "enum": [
+        "check_zabbix_status",
+        "query_cmdb_object",
+        "get_service_owner",
+        "search_known_incidents",
+        "start_systemcenter_runbook"
+      ]
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "action_type": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "action"
+      ]
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "expected_effect": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "requires_state_change": {
+      "type": "boolean"
+    },
+    "risk_notes": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

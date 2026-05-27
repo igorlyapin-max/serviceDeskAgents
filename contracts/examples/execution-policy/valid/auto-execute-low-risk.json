@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "action_id": "refresh_readonly_cache_dev",
+  "tool_name": "start_systemcenter_runbook",
+  "execution_mode": "auto_execute",
+  "allowed": true,
+  "approval_required": false,
+  "policy_rule_id": "runbooks.future.dev.low_risk.auto_execute",
+  "reason": "Пример будущей policy для development-ранбука с низким риском из allowlist.",
+  "risk_level": "low"
+}

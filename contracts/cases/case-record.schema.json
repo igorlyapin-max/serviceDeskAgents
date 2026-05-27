@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/cases/case-record.schema.json",
+  "title": "Case Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "ticket_id",
+    "ticket_input",
+    "current_workflow_state",
+    "tool_trace",
+    "tool_results",
+    "action_gate_ids",
+    "feedback_ids",
+    "created_at",
+    "updated_at",
+    "event_count"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^case-[a-f0-9]{12}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "ticket_input": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "current_workflow_state": {
+      "$ref": "https://servicedeskagents.local/contracts/workflow/workflow-state.schema.json"
+    },
+    "ai_decision": {
+      "anyOf": [
+        {
+          "$ref": "https://servicedeskagents.local/contracts/decisions/ai-decision.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "analysis_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "rag_trace": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "tool_trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "tool_results": {
+      "type": "array",
+      "items": {
+        "$ref": "https://servicedeskagents.local/contracts/tools/tool-result.schema.json"
+      }
+    },
+    "action_gate_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "uniqueItems": true
+    },
+    "feedback_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "uniqueItems": true
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_state_id",
+        "category",
+        "terminal",
+        "updated_at"
+      ],
+      "properties": {
+        "workflow_state_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "event_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

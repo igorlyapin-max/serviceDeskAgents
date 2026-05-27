@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/cases/case-timeline.schema.json",
+  "title": "Case Timeline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "ticket_id",
+    "events"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^case-[a-f0-9]{12}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "https://servicedeskagents.local/contracts/cases/case-event.schema.json"
+      }
+    }
+  }
+}

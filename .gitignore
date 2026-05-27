@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+node_modules/
+dist/
+build/
+.DS_Store
+
+# Local runtime data should live in Docker volumes, not in the repository.
+data/
+logs/
+state/

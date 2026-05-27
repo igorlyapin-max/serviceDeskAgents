@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "rules": [
+    {
+      "when": {
+        "decision_type": "answer_proposed"
+      },
+      "state_id": "resolved"
+    },
+    {
+      "when": {
+        "decision_type": "clarification_needed"
+      },
+      "state_id": "waiting_for_user"
+    },
+    {
+      "when": {
+        "decision_type": "escalation_needed"
+      },
+      "state_id": "escalation_required"
+    },
+    {
+      "when": {
+        "decision_type": "action_proposed",
+        "execution_mode": "operator_approval"
+      },
+      "state_id": "pending_approval"
+    },
+    {
+      "when": {
+        "decision_type": "action_proposed",
+        "execution_mode": "auto_execute"
+      },
+      "state_id": "auto_execution_ready"
+    },
+    {
+      "when": {
+        "decision_type": "action_proposed",
+        "execution_mode": "blocked"
+      },
+      "state_id": "policy_blocked"
+    },
+    {
+      "when": {
+        "approval_decision": "rejected"
+      },
+      "state_id": "approval_rejected"
+    },
+    {
+      "when": {
+        "tool_status": "success"
+      },
+      "state_id": "action_execution_succeeded"
+    },
+    {
+      "when": {
+        "tool_status": "dry_run_completed"
+      },
+      "state_id": "action_execution_succeeded"
+    },
+    {
+      "when": {
+        "tool_status": "error"
+      },
+      "state_id": "action_execution_failed"
+    },
+    {
+      "when": {
+        "tool_status": "blocked"
+      },
+      "state_id": "policy_blocked"
+    },
+    {
+      "when": {
+        "failure_state": "model_output_invalid"
+      },
+      "state_id": "model_output_invalid"
+    }
+  ]
+}

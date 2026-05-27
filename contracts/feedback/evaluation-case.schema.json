@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/feedback/evaluation-case.schema.json",
+  "title": "Evaluation Case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "source_feedback_id",
+    "ticket_input",
+    "expected",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "source_feedback_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "ticket_input": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rating"
+      ],
+      "properties": {
+        "rating": {
+          "type": "string",
+          "enum": [
+            "correct",
+            "incorrect",
+            "edited"
+          ]
+        },
+        "corrected_response": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "operator_note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "analysis_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "approval_snapshot": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

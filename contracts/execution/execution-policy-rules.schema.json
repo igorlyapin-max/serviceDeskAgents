@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/execution/execution-policy-rules.schema.json",
+  "title": "Execution Policy Rules",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rules",
+    "default_result"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    },
+    "default_result": {
+      "$ref": "#/$defs/result_template"
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_rule_id",
+        "match",
+        "result"
+      ],
+      "properties": {
+        "policy_rule_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "tool_name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "action_type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "risk_level": {
+              "type": "string",
+              "minLength": 1
+            },
+            "environment": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "result": {
+          "$ref": "#/$defs/result_template"
+        }
+      }
+    },
+    "result_template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_mode",
+        "allowed",
+        "approval_required",
+        "policy_rule_id",
+        "reason"
+      ],
+      "properties": {
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "manual_only",
+            "operator_approval",
+            "auto_execute",
+            "dry_run",
+            "blocked"
+          ]
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "approval_required": {
+          "type": "boolean"
+        },
+        "policy_rule_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        }
+      }
+    }
+  }
+}

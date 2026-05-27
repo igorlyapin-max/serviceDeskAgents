@@ -1,0 +1,109 @@
+{
+  "schema_version": "1.0",
+  "states": [
+    {
+      "id": "resolved",
+      "category": "terminal",
+      "terminal": true,
+      "can_advance": false,
+      "requires_operator_action": false,
+      "description": "На заявку можно ответить без дополнительных шагов workflow."
+    },
+    {
+      "id": "waiting_for_user",
+      "category": "waiting",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Workflow ожидает недостающую информацию от автора заявки или оператора."
+    },
+    {
+      "id": "escalation_required",
+      "category": "handoff",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Заявку нужно эскалировать в другую группу поддержки."
+    },
+    {
+      "id": "pending_approval",
+      "category": "waiting",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Предложенное действие ожидает согласования оператора."
+    },
+    {
+      "id": "approval_rejected",
+      "category": "handoff",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Оператор отклонил предложенное действие, заявка требует ручной обработки."
+    },
+    {
+      "id": "action_execution_succeeded",
+      "category": "terminal",
+      "terminal": true,
+      "can_advance": false,
+      "requires_operator_action": false,
+      "description": "Согласованное действие успешно завершилось."
+    },
+    {
+      "id": "action_execution_failed",
+      "category": "error",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Согласованное действие завершилось ошибкой и требует проверки оператора."
+    },
+    {
+      "id": "model_output_invalid",
+      "category": "error",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Выход модели не прошел валидацию контракта."
+    },
+    {
+      "id": "policy_blocked",
+      "category": "blocked",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Execution policy заблокировала предложенное действие."
+    },
+    {
+      "id": "auto_execution_ready",
+      "category": "action",
+      "terminal": false,
+      "can_advance": true,
+      "requires_operator_action": false,
+      "description": "Будущая policy разрешила автоматическое выполнение действия."
+    },
+    {
+      "id": "auto_execution_running",
+      "category": "action",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": false,
+      "description": "Автоматически согласованное действие выполняется."
+    },
+    {
+      "id": "auto_execution_succeeded",
+      "category": "terminal",
+      "terminal": true,
+      "can_advance": false,
+      "requires_operator_action": false,
+      "description": "Автоматически согласованное действие успешно завершилось."
+    },
+    {
+      "id": "auto_execution_failed",
+      "category": "error",
+      "terminal": false,
+      "can_advance": false,
+      "requires_operator_action": true,
+      "description": "Автоматически согласованное действие завершилось ошибкой и требует проверки."
+    }
+  ]
+}

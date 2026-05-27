@@ -1,0 +1,350 @@
+{
+  "schema_version": "1.0",
+  "tools": [
+    {
+      "tool_name": "check_zabbix_status",
+      "action_type": "read_only",
+      "description": "Получить краткий статус здоровья сервиса из диагностического endpoint Zabbix.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.diagnostics",
+          "operation_id": "check_zabbix_status"
+        },
+        {
+          "profile": "n8n",
+          "endpoint_id": "n8n.diagnostics",
+          "operation_id": "check_zabbix_status"
+        },
+        {
+          "profile": "direct_http",
+          "endpoint_id": "direct.zabbix.disabled",
+          "operation_id": "check_zabbix_status"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "required": [
+          "service_name",
+          "environment"
+        ],
+        "properties": {
+          "service_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "service_status",
+          "message"
+        ],
+        "properties": {
+          "service_status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 5,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": false,
+        "auto_execution_eligible": false,
+        "max_risk_level": "low"
+      }
+    },
+    {
+      "tool_name": "query_cmdb_object",
+      "action_type": "read_only",
+      "description": "Запросить metadata объекта CMDB по сервису или идентификатору объекта.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.cmdb",
+          "operation_id": "query_cmdb_object"
+        },
+        {
+          "profile": "direct_http",
+          "endpoint_id": "direct.cmdb.disabled",
+          "operation_id": "query_cmdb_object"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "required": [
+          "object_ref"
+        ],
+        "properties": {
+          "object_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "object_found",
+          "message"
+        ],
+        "properties": {
+          "object_found": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 5,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": false,
+        "auto_execution_eligible": false,
+        "max_risk_level": "low"
+      }
+    },
+    {
+      "tool_name": "get_service_owner",
+      "action_type": "read_only",
+      "description": "Определить владельца сервиса или metadata группы поддержки.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.ownership",
+          "operation_id": "get_service_owner"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "required": [
+          "service_name"
+        ],
+        "properties": {
+          "service_name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "owner_team",
+          "message"
+        ],
+        "properties": {
+          "owner_team": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 5,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": false,
+        "auto_execution_eligible": false,
+        "max_risk_level": "low"
+      }
+    },
+    {
+      "tool_name": "search_known_incidents",
+      "action_type": "read_only",
+      "description": "Найти сводки известных инцидентов с похожими симптомами сервиса.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.known_incidents",
+          "operation_id": "search_known_incidents"
+        },
+        {
+          "profile": "queue",
+          "endpoint_id": "queue.known_incidents",
+          "operation_id": "search_known_incidents"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "service_name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "matches",
+          "message"
+        ],
+        "properties": {
+          "matches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 5,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": false,
+        "auto_execution_eligible": false,
+        "max_risk_level": "low"
+      }
+    },
+    {
+      "tool_name": "start_systemcenter_runbook",
+      "action_type": "action",
+      "description": "Запустить ранбук System Center через настроенный integration endpoint.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.runbooks",
+          "operation_id": "start_systemcenter_runbook"
+        },
+        {
+          "profile": "n8n",
+          "endpoint_id": "n8n.systemcenter.runbooks",
+          "operation_id": "start_systemcenter_runbook"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "required": [
+          "runbook_name",
+          "service_name",
+          "environment"
+        ],
+        "properties": {
+          "runbook_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "service_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "runbook_status",
+          "message"
+        ],
+        "properties": {
+          "runbook_status": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 15,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": true,
+        "auto_execution_eligible": false,
+        "max_risk_level": "medium"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "action_proposed",
+    "summary": "Вызвать неизвестный инструмент.",
+    "confidence": 0.7
+  },
+  "operator_message": "Выполнить неизвестное действие.",
+  "proposed_actions": [
+    {
+      "tool_name": "restart_everything",
+      "action_id": "unknown_restart",
+      "action_type": "action",
+      "parameters": {},
+      "reason": "Модель предположила несуществующий инструмент.",
+      "risk_level": "critical",
+      "expected_effect": "Неизвестно.",
+      "requires_state_change": true
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Оператор ServiceDesk</title>
+    <link rel="stylesheet" href="/operator/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Оператор ServiceDesk</h1>
+          <div class="subhead" id="apiStatus">API ожидается</div>
+        </div>
+        <div class="operator-strip">
+          <label for="operatorId">Оператор</label>
+          <input id="operatorId" name="operatorId" value="operator-1" autocomplete="off">
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="ticket-pane" aria-labelledby="ticket-title">
+          <div class="section-head">
+            <h2 id="ticket-title">Заявка</h2>
+            <button class="primary" id="analyzeButton" type="button">Анализировать</button>
+          </div>
+
+          <form id="ticketForm" class="ticket-form">
+            <label>
+              Пользователь
+              <input name="user" value="ivan" autocomplete="off">
+            </label>
+            <label>
+              Сервис
+              <input name="service" value="billing-worker" autocomplete="off">
+            </label>
+            <label>
+              Среда
+              <select name="environment">
+                <option value="test" selected>test</option>
+                <option value="prod">prod</option>
+                <option value="dev">dev</option>
+              </select>
+            </label>
+            <label>
+              Приоритет
+              <select name="priority">
+                <option value="p3" selected>p3</option>
+                <option value="p2">p2</option>
+                <option value="p1">p1</option>
+              </select>
+            </label>
+            <label>
+              Сценарий
+              <select name="scenario">
+                <option value="">авто</option>
+                <option value="answer">ответ</option>
+                <option value="clarification">уточнение</option>
+                <option value="escalation">эскалация</option>
+                <option value="runbook" selected>ранбук</option>
+              </select>
+            </label>
+            <label class="span-all">
+              Описание
+              <textarea name="description" rows="6">перезапустить billing-worker через ранбук</textarea>
+            </label>
+          </form>
+        </section>
+
+        <section class="knowledge-pane" aria-labelledby="knowledge-title">
+          <div class="section-head">
+            <h2 id="knowledge-title">База знаний</h2>
+            <button id="rebuildButton" type="button">Перестроить</button>
+          </div>
+          <div id="knowledgeStatus" class="status-grid"></div>
+        </section>
+
+        <section class="result-pane" aria-labelledby="result-title">
+          <div class="section-head">
+            <h2 id="result-title">Результат</h2>
+            <button id="copyButton" type="button" disabled>Копировать</button>
+          </div>
+          <div id="summaryView" class="summary-grid"></div>
+          <div id="caseView" class="case-panel">
+            <div id="caseStatus" class="case-status">Нет кейса</div>
+            <div id="caseTimeline" class="timeline-list"></div>
+          </div>
+          <div id="approvalView" class="approval-list"></div>
+          <div id="feedbackView" class="feedback-panel">
+            <div class="feedback-actions">
+              <button type="button" data-feedback-rating="correct" disabled>Верно</button>
+              <button type="button" data-feedback-rating="incorrect" disabled>Неверно</button>
+              <button type="button" data-feedback-rating="edited" disabled>Исправлено</button>
+            </div>
+            <textarea id="feedbackNote" rows="3" placeholder="Заметка оператора"></textarea>
+            <textarea id="correctedResponse" rows="4" placeholder="Исправленный ответ для варианта «Исправлено»"></textarea>
+            <div id="feedbackStatus" class="feedback-status">Обратная связь не сохранена</div>
+          </div>
+          <pre id="copyText" class="copy-text" aria-live="polite"></pre>
+        </section>
+
+        <section class="trace-pane" aria-labelledby="trace-title">
+          <div class="section-head">
+            <h2 id="trace-title">Трассировка</h2>
+            <div class="tabs" role="tablist" aria-label="Виды трассировки">
+              <button class="tab active" data-tab="rag" type="button">RAG</button>
+              <button class="tab" data-tab="tools" type="button">Инструменты</button>
+              <button class="tab" data-tab="json" type="button">JSON</button>
+            </div>
+          </div>
+          <div id="traceView" class="trace-view"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/operator/static/app.js"></script>
+  </body>
+</html>

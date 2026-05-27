@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "rules": [
+    {
+      "policy_rule_id": "tools.critical_risk.block",
+      "match": {
+        "risk_level": "critical"
+      },
+      "result": {
+        "execution_mode": "blocked",
+        "allowed": false,
+        "approval_required": false,
+        "policy_rule_id": "tools.critical_risk.block",
+        "reason": "Предложения инструментов с критическим риском заблокированы в MVP."
+      }
+    },
+    {
+      "policy_rule_id": "runbooks.mvp.require_operator_approval",
+      "match": {
+        "tool_name": "start_systemcenter_runbook"
+      },
+      "result": {
+        "execution_mode": "operator_approval",
+        "allowed": true,
+        "approval_required": true,
+        "policy_rule_id": "runbooks.mvp.require_operator_approval",
+        "reason": "MVP policy требует согласование оператора для всех ранбуков System Center."
+      }
+    },
+    {
+      "policy_rule_id": "tools.read_only.stage5.dry_run",
+      "match": {
+        "action_type": "read_only"
+      },
+      "result": {
+        "execution_mode": "dry_run",
+        "allowed": true,
+        "approval_required": false,
+        "policy_rule_id": "tools.read_only.stage5.dry_run",
+        "reason": "Этап 5 держит read-only интеграции в режиме dry-run/mock, если profile явно не сопоставлен с adapter."
+      }
+    }
+  ],
+  "default_result": {
+    "execution_mode": "manual_only",
+    "allowed": false,
+    "approval_required": false,
+    "policy_rule_id": "tools.default.manual_only",
+    "reason": "Ни одно правило execution policy не подошло к предложенному действию."
+  }
+}

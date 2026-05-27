@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/integrations/integration-callback.schema.json",
+  "title": "Integration Callback",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "action_id",
+    "tool_name",
+    "endpoint_id",
+    "adapter_type",
+    "operation_id",
+    "status",
+    "policy_rule_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^case-[a-f0-9]{12}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "endpoint_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "adapter_type": {
+      "type": "string",
+      "enum": [
+        "mock",
+        "n8n_webhook",
+        "direct_http",
+        "queue"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "error",
+        "skipped",
+        "pending_approval",
+        "dry_run_completed",
+        "blocked"
+      ]
+    },
+    "policy_rule_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "received_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  ]
+}

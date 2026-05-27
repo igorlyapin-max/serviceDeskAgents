@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/workflow/workflow-state-catalog.schema.json",
+  "title": "Workflow State Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "states"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "states": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "workflow-state.schema.json"
+      }
+    }
+  }
+}

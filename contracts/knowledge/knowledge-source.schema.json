@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/knowledge/knowledge-source.schema.json",
+  "title": "Knowledge Source",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_id",
+    "source_type",
+    "display_name",
+    "enabled",
+    "connector_type",
+    "sync_mode"
+  ],
+  "properties": {
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "local_files",
+        "wiki",
+        "servicedesk_kb",
+        "cmdb_export",
+        "git_repository",
+        "api_pull"
+      ]
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "disabled_reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "connector_type": {
+      "type": "string",
+      "enum": [
+        "local_files",
+        "http_pull",
+        "git_clone",
+        "database_export"
+      ]
+    },
+    "sync_mode": {
+      "type": "string",
+      "enum": [
+        "full",
+        "incremental"
+      ]
+    },
+    "base_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "base_url_env": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "include_globs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "uniqueItems": true
+    },
+    "auth_profile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

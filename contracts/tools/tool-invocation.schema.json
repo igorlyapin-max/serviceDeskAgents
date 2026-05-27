@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/tools/tool-invocation.schema.json",
+  "title": "Tool Invocation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "invocation_id",
+    "action_id",
+    "tool_name",
+    "action_type",
+    "endpoint_id",
+    "adapter_type",
+    "operation_id",
+    "parameters",
+    "execution_mode",
+    "allowed",
+    "approval_required",
+    "approved_by_operator",
+    "policy_rule_id",
+    "timeout_seconds",
+    "retry_policy"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "invocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "ticket_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^case-[a-f0-9]{12}$"
+    },
+    "action_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "action_type": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "action"
+      ]
+    },
+    "endpoint_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "adapter_type": {
+      "type": "string",
+      "enum": [
+        "mock",
+        "n8n_webhook",
+        "direct_http",
+        "queue"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": [
+        "manual_only",
+        "operator_approval",
+        "auto_execute",
+        "dry_run",
+        "blocked"
+      ]
+    },
+    "allowed": {
+      "type": "boolean"
+    },
+    "approval_required": {
+      "type": "boolean"
+    },
+    "approved_by_operator": {
+      "type": "boolean"
+    },
+    "operator_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "policy_rule_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "retry_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_attempts",
+        "backoff_seconds"
+      ],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "backoff_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

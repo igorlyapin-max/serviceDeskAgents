@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "workflow_state": {
+    "id": "model_output_invalid",
+    "category": "error",
+    "terminal": false,
+    "can_advance": false,
+    "requires_operator_action": true,
+    "description": "Выход модели не прошел валидацию контракта."
+  },
+  "can_advance": false,
+  "errors": [
+    "ai_decision.execution_mode является состоянием policy/execution и не разрешен в AI output"
+  ]
+}

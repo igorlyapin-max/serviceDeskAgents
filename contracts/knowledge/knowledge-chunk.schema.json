@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/knowledge/knowledge-chunk.schema.json",
+  "title": "Knowledge Chunk",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "chunk_id",
+    "document_id",
+    "source_id",
+    "source_type",
+    "title",
+    "uri",
+    "content",
+    "content_checksum",
+    "chunk_index",
+    "metadata"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "chunk_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 700
+    },
+    "document_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "source_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "uri": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "content": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_checksum": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128
+    },
+    "chunk_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

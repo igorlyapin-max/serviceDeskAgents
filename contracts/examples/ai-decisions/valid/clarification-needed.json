@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "clarification_needed",
+    "missing_fields": [
+      "service_name",
+      "environment"
+    ],
+    "question": "Уточните затронутый сервис и среду.",
+    "confidence": 0.91
+  },
+  "operator_message": "Запросите название затронутого сервиса и среду перед продолжением.",
+  "internal_reasoning_summary": "В заявке отсутствуют обязательные поля маршрутизации.",
+  "citations": [],
+  "proposed_actions": []
+}

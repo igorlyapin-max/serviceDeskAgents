@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "action_proposed",
+    "summary": "Перезапустить тестовый worker-сервис через ранбук System Center.",
+    "confidence": 0.82
+  },
+  "operator_message": "Проверьте предложенный ранбук перед выполнением.",
+  "internal_reasoning_summary": "Симптомы совпадают с известной проблемой worker-сервиса в непроизводственной среде, где допустим перезапуск.",
+  "citations": [],
+  "proposed_actions": [
+    {
+      "tool_name": "start_systemcenter_runbook",
+      "action_id": "restart_billing_worker_test",
+      "action_type": "action",
+      "parameters": {
+        "runbook_name": "Restart-Service",
+        "service_name": "billing-worker",
+        "environment": "test"
+      },
+      "reason": "Worker не обрабатывает задания, и этот ранбук является известным способом восстановления.",
+      "risk_level": "medium",
+      "expected_effect": "Сервис billing-worker будет перезапущен в test.",
+      "requires_state_change": true,
+      "risk_notes": "Перезапуск может прервать активные тестовые задания."
+    }
+  ]
+}

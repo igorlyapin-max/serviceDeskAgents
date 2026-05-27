@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "answer_proposed",
+    "summary": "На заявку можно ответить без внешнего действия.",
+    "confidence": 0.78
+  },
+  "operator_message": "Попросите пользователя повторить действие после уже завершенного окна обслуживания.",
+  "internal_reasoning_summary": "Заявка совпадает с известным симптомом после окна обслуживания.",
+  "citations": [],
+  "proposed_actions": []
+}

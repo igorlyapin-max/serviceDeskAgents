@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "action_proposed",
+    "summary": "Автоматически перезапустить сервис.",
+    "confidence": 0.86
+  },
+  "operator_message": "Сервис будет автоматически перезапущен.",
+  "execution_mode": "auto_execute",
+  "proposed_actions": [
+    {
+      "tool_name": "start_systemcenter_runbook",
+      "action_id": "restart_billing_worker_test",
+      "action_type": "action",
+      "parameters": {
+        "runbook_name": "Restart-Service",
+        "service_name": "billing-worker",
+        "environment": "test"
+      },
+      "reason": "Worker завис.",
+      "risk_level": "medium",
+      "expected_effect": "Сервис будет перезапущен.",
+      "requires_state_change": true
+    }
+  ]
+}

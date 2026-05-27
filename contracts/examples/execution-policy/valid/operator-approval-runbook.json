@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "action_id": "restart_billing_worker_test",
+  "tool_name": "start_systemcenter_runbook",
+  "execution_mode": "operator_approval",
+  "allowed": true,
+  "approval_required": true,
+  "policy_rule_id": "runbooks.mvp.require_operator_approval",
+  "reason": "MVP policy требует согласование оператора для всех ранбуков System Center.",
+  "risk_level": "medium"
+}

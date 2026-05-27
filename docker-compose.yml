@@ -1,0 +1,130 @@
+name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-servicedesk}
+      POSTGRES_USER: ${POSTGRES_USER:-servicedesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-servicedesk_dev_password}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:-n8n}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-n8n_dev_password}
+      N8N_PORT: 5678
+      N8N_HOST: 0.0.0.0
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://localhost:${N8N_PORT:-5678}/
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-replace_with_32_plus_chars_dev_key}
+      N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:-replace_with_dev_webhook_token}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      GENERIC_TIMEZONE: Europe/Moscow
+      TZ: Europe/Moscow
+    ports:
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n-data:/home/node/.n8n
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-litellm
+    restart: unless-stopped
+    profiles:
+      - llm
+    depends_on:
+      vllm-cpu:
+        condition: service_started
+    command: ["--config", "/app/config/litellm.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-litellm-master-key}
+      LITELLM_MODEL_ALIAS: ${LITELLM_MODEL_ALIAS:-local-opt-125m}
+      LITELLM_UPSTREAM_MODEL: ${LITELLM_UPSTREAM_MODEL:-hosted_vllm/facebook/opt-125m}
+      VLLM_BASE_URL: http://vllm-cpu:8000/v1
+      VLLM_MODEL: ${VLLM_MODEL:-facebook/opt-125m}
+    ports:
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+    volumes:
+      - ./infra/litellm/litellm.yaml:/app/config/litellm.yaml:ro
+
+  vllm-cpu:
+    image: vllm/vllm-openai-cpu:latest-x86_64
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-vllm-cpu
+    restart: unless-stopped
+    profiles:
+      - llm
+    shm_size: 4gb
+    cap_add:
+      - SYS_NICE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      VLLM_CPU_KVCACHE_SPACE: ${VLLM_CPU_KVCACHE_SPACE:-4}
+      VLLM_CPU_NUM_OF_RESERVED_CPU: ${VLLM_CPU_NUM_OF_RESERVED_CPU:-1}
+      HF_HOME: /root/.cache/huggingface
+    command:
+      - ${VLLM_MODEL:-facebook/opt-125m}
+      - --dtype
+      - ${VLLM_DTYPE:-float32}
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-2048}
+      - --max-num-seqs
+      - ${VLLM_MAX_NUM_SEQS:-1}
+      - --enforce-eager
+      - --chat-template
+      - ${VLLM_CHAT_TEMPLATE:-/app/vllm/simple-chat-template.jinja}
+      - --chat-template-content-format
+      - string
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "127.0.0.1:${VLLM_PORT:-8000}:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - ./infra/vllm/simple-chat-template.jinja:/app/vllm/simple-chat-template.jinja:ro
+
+volumes:
+  postgres-data:
+  redis-data:
+  n8n-data:
+  hf-cache:

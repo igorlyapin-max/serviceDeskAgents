@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/integrations/integration-endpoint-catalog.schema.json",
+  "title": "Integration Endpoint Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "endpoints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "integration-endpoint.schema.json"
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "escalation_needed",
+    "summary": "billing-api недоступен в production.",
+    "reason": "Инцидент может требовать диагностики L2 и подтверждения владельца.",
+    "target_team": "L2-platform",
+    "confidence": 0.84
+  },
+  "operator_message": "Эскалируйте в L2-platform со сводкой инцидента.",
+  "internal_reasoning_summary": "Заявленное влияние распространяется на production, безопасный ранбук пока не известен.",
+  "citations": [],
+  "proposed_actions": []
+}

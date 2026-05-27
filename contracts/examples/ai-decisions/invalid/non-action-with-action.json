@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "decision": {
+    "type": "answer_proposed",
+    "summary": "Ответить и одновременно запустить инструмент.",
+    "confidence": 0.8
+  },
+  "operator_message": "Ответьте на заявку и запустите проверку.",
+  "proposed_actions": [
+    {
+      "tool_name": "check_zabbix_status",
+      "action_id": "check_status",
+      "action_type": "read_only",
+      "parameters": {
+        "host": "billing-api"
+      },
+      "reason": "Проверить статус мониторинга.",
+      "risk_level": "low",
+      "expected_effect": "Статус мониторинга будет получен.",
+      "requires_state_change": false
+    }
+  ]
+}
