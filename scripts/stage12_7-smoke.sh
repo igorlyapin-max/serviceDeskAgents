@@ -16,7 +16,6 @@ INDEX_PATH="${STAGE12_7_INDEX_PATH:-/tmp/servicedesk-stage12-7-knowledge-${PORT}
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
 SECURITY_AUTH_MODE="${SECURITY_AUTH_MODE:-dev_header}" \
 SECURITY_DEV_ACTOR="${SECURITY_DEV_ACTOR:-admin-1}" \
 SECURITY_RATE_LIMIT_PER_MINUTE="${SECURITY_RATE_LIMIT_PER_MINUTE:-600}" \
@@ -79,36 +78,36 @@ else:
 admin_js = request("/admin/static/app.js", parse_json=False)
 operator_js = request("/operator/static/app.js", parse_json=False)
 for expected in [
-    "Политика неоднозначности",
-    "Промежуточные атрибуты",
-    "Следующий шаг при неоднозначности",
-    "Пакет передачи Л1",
-    "mini-workflow",
+    "Признаки для поиска",
+    "Операция разрешения атрибута",
+    "Матрица решений",
+    "Как оценивать результат операции",
+    "Пакет передачи человеку",
+    "Пороги внутри профиля",
     "function formatList",
 ]:
     assert expected in admin_js, expected
 for expected in [
     "resolution_state",
-    "Текущий шаг",
-    "Пакет Л1",
+    "Операция разрешения",
+    "Пакет передачи",
     "resolutionProgressText",
 ]:
     assert expected in operator_js, expected
-print("assets mini-workflow проверены")
+print("assets resolver-профиля проверены")
 
 profiles_active = request("/admin/config/active/attribute_resolution_profiles")
 payload = profiles_active["payload"]
 login_profile = next(profile for profile in payload["profiles"] if profile["profile_id"] == "profile.password_reset.login_from_ad")
-assert login_profile["resolution_mode"] == "branching", login_profile
-assert login_profile["attempt_scope"] == "profile", login_profile
-assert "ad_candidates" in login_profile["intermediate_attributes"], login_profile
-assert login_profile["ambiguity_policy"]["action"] == "clarification", login_profile
-assert login_profile["ambiguity_policy"]["candidate_count_attribute"] == "ad_candidates", login_profile
+assert login_profile["candidate_source"]["source_type"] == "react_call", login_profile
+assert login_profile["candidate_source"]["operation_id"] == "search_ad_users", login_profile
+assert login_profile["result_policy"]["result_type"] == "list", login_profile
+assert login_profile["result_policy"]["list_path"] == "users", login_profile
+assert login_profile["result_policy"]["output_mapping"]["user_id"] == "user_id", login_profile
+assert login_profile["decision_policy"]["multiple_results"] == "ask_disambiguation", login_profile
+assert "department" in login_profile["clarification_policy"]["ask_for_attributes"], login_profile
 assert login_profile["confidence_thresholds"]["auto_fill"] >= login_profile["confidence_thresholds"]["clarification"], login_profile
-assert any(step["type"] == "rag_search" for step in login_profile["steps"]), login_profile
-assert any(step.get("on_ambiguous_step") == "ask_identity_hint" for step in login_profile["steps"]), login_profile
-assert any(step["type"] == "operator_handoff" for step in login_profile["steps"]), login_profile
-print("default mini-workflow проверен")
+print("default resolver-профиль проверен")
 
 simulation = request(
     "/admin/scenarios/password_reset/simulate",
@@ -119,13 +118,12 @@ simulation = request(
 )
 state = simulation["resolution_state"]["user_login"]
 assert state["status"] == "question_required", simulation
-assert state["current_step_id"] == "ask_identity_hint", simulation
 assert state["attempt"] == 1 and state["max_attempts"] == 2, simulation
-assert "ad_candidates" in state["intermediate_attributes"], simulation
-assert state["candidate_summary"]["source_attribute"] == "ad_candidates", simulation
+assert state["effective_confidence_thresholds"]["auto_accept_confidence"] >= state["effective_confidence_thresholds"]["clarification_confidence"], simulation
 assert "должность" in state["pending_question"].lower(), simulation
-assert any(step["step_id"] == "search_history_hint" for step in state["completed_steps"]), simulation
-print("dry-run состояния разрешения слота проверен")
+assert state["decision"] == "ask_clarification", simulation
+assert state["candidate_source"]["tool_name"] == "search_ad_users", simulation
+print("dry-run состояния resolver-профиля проверен")
 
 
 def validate_payload(candidate, label):
@@ -144,18 +142,18 @@ def validate_payload(candidate, label):
     )
 
 
-bad_transition = copy.deepcopy(payload)
-bad_transition["profiles"][0]["steps"][0]["on_ambiguous_step"] = "missing_step"
-validated = validate_payload(bad_transition, "bad-transition")
+bad_mapping = copy.deepcopy(payload)
+bad_mapping["profiles"][0]["candidate_source"]["parameter_mapping"]["login"] = "attribute:missing_identity_marker"
+validated = validate_payload(bad_mapping, "bad-mapping")
 assert validated["validation"]["status"] == "invalid", validated
-assert any("on_ambiguous_step" in error for error in validated["validation"]["errors"]), validated
+assert any("missing_identity_marker" in error for error in validated["validation"]["errors"]), validated
 
-bad_attribute = copy.deepcopy(payload)
-bad_attribute["profiles"][0]["steps"][0]["outputs"].append("undeclared_identity_marker")
-validated = validate_payload(bad_attribute, "bad-attribute")
+bad_output = copy.deepcopy(payload)
+bad_output["profiles"][0]["result_policy"]["output_mapping"]["undeclared_identity_marker"] = "login"
+validated = validate_payload(bad_output, "bad-output")
 assert validated["validation"]["status"] == "invalid", validated
 assert any("undeclared_identity_marker" in error for error in validated["validation"]["errors"]), validated
-print("валидация mini-workflow проверена")
+print("валидация resolver-профиля проверена")
 
 print("Smoke-проверка этапа 12.7 завершена.")
 PY

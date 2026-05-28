@@ -7,33 +7,34 @@
       "description": "Получить краткий статус здоровья сервиса из диагностического endpoint Zabbix.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.diagnostics",
-          "operation_id": "check_zabbix_status"
+          "endpoint_id": "mock",
+          "operation_id": "check_zabbix_status",
+          "parameter_mapping": {
+            "target_ref": "react:target_ref"
+          }
         },
         {
-          "profile": "n8n",
-          "endpoint_id": "n8n.diagnostics",
-          "operation_id": "check_zabbix_status"
+          "endpoint_id": "n8n",
+          "operation_id": "check_zabbix_status",
+          "parameter_mapping": {
+            "target_ref": "react:target_ref"
+          }
         },
         {
-          "profile": "direct_http",
           "endpoint_id": "direct.zabbix.disabled",
-          "operation_id": "check_zabbix_status"
+          "operation_id": "check_zabbix_status",
+          "parameter_mapping": {
+            "target_ref": "react:target_ref"
+          }
         }
       ],
       "parameters_schema": {
         "type": "object",
         "required": [
-          "service_name",
-          "environment"
+          "target_ref"
         ],
         "properties": {
-          "service_name": {
-            "type": "string",
-            "minLength": 1
-          },
-          "environment": {
+          "target_ref": {
             "type": "string",
             "minLength": 1
           }
@@ -64,12 +65,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": false,
         "auto_execution_eligible": false,
         "max_risk_level": "low"
@@ -81,14 +76,28 @@
       "description": "Найти пользователей Active Directory по логину, ФИО или уточняющим атрибутам.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.identity",
-          "operation_id": "search_ad_users"
+          "endpoint_id": "mock",
+          "operation_id": "search_ad_users",
+          "parameter_mapping": {
+            "login": "react:login",
+            "last_name": "react:last_name",
+            "first_name": "react:first_name",
+            "middle_name": "react:middle_name",
+            "department": "react:department",
+            "employee_number": "react:employee_number"
+          }
         },
         {
-          "profile": "n8n",
-          "endpoint_id": "n8n.identity",
-          "operation_id": "search_ad_users"
+          "endpoint_id": "n8n",
+          "operation_id": "search_ad_users",
+          "parameter_mapping": {
+            "login": "react:login",
+            "last_name": "react:last_name",
+            "first_name": "react:first_name",
+            "middle_name": "react:middle_name",
+            "department": "react:department",
+            "employee_number": "react:employee_number"
+          }
         }
       ],
       "parameters_schema": {
@@ -153,12 +162,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": false,
         "auto_execution_eligible": false,
         "max_risk_level": "low"
@@ -170,14 +173,18 @@
       "description": "Запросить metadata объекта CMDB по сервису или идентификатору объекта.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.cmdb",
-          "operation_id": "query_cmdb_object"
+          "endpoint_id": "mock",
+          "operation_id": "query_cmdb_object",
+          "parameter_mapping": {
+            "object_ref": "react:object_ref"
+          }
         },
         {
-          "profile": "direct_http",
           "endpoint_id": "direct.cmdb.disabled",
-          "operation_id": "query_cmdb_object"
+          "operation_id": "query_cmdb_object",
+          "parameter_mapping": {
+            "object_ref": "react:object_ref"
+          }
         }
       ],
       "parameters_schema": {
@@ -185,16 +192,12 @@
         "required": [
           "object_ref"
         ],
-        "properties": {
-          "object_ref": {
-            "type": "string",
-            "minLength": 1
+          "properties": {
+            "object_ref": {
+              "type": "string",
+              "minLength": 1
+            }
           },
-          "environment": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
         "additionalProperties": true
       },
       "result_schema": {
@@ -220,12 +223,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": false,
         "auto_execution_eligible": false,
         "max_risk_level": "low"
@@ -237,18 +234,20 @@
       "description": "Определить владельца сервиса или metadata группы поддержки.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.ownership",
-          "operation_id": "get_service_owner"
+          "endpoint_id": "mock",
+          "operation_id": "get_service_owner",
+          "parameter_mapping": {
+            "target_ref": "react:target_ref"
+          }
         }
       ],
       "parameters_schema": {
         "type": "object",
         "required": [
-          "service_name"
+          "target_ref"
         ],
         "properties": {
-          "service_name": {
+          "target_ref": {
             "type": "string",
             "minLength": 1
           }
@@ -279,12 +278,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": false,
         "auto_execution_eligible": false,
         "max_risk_level": "low"
@@ -296,14 +289,18 @@
       "description": "Найти сводки известных инцидентов с похожими симптомами сервиса.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.known_incidents",
-          "operation_id": "search_known_incidents"
+          "endpoint_id": "mock",
+          "operation_id": "search_known_incidents",
+          "parameter_mapping": {
+            "query": "react:query"
+          }
         },
         {
-          "profile": "queue",
           "endpoint_id": "queue.known_incidents",
-          "operation_id": "search_known_incidents"
+          "operation_id": "search_known_incidents",
+          "parameter_mapping": {
+            "query": "react:query"
+          }
         }
       ],
       "parameters_schema": {
@@ -311,16 +308,12 @@
         "required": [
           "query"
         ],
-        "properties": {
-          "query": {
-            "type": "string",
-            "minLength": 1
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1
+            }
           },
-          "service_name": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
         "additionalProperties": true
       },
       "result_schema": {
@@ -350,12 +343,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": false,
         "auto_execution_eligible": false,
         "max_risk_level": "low"
@@ -367,33 +354,63 @@
       "description": "Запустить ранбук System Center через настроенный integration endpoint.",
       "endpoint_bindings": [
         {
-          "profile": "mock",
-          "endpoint_id": "mock.runbooks",
-          "operation_id": "start_systemcenter_runbook"
+          "endpoint_id": "mock",
+          "operation_id": "start_systemcenter_runbook",
+          "parameter_mapping": {
+            "runbook_code": "react:runbook_code",
+            "login": "react:user_login",
+            "account_type": "react:account_type",
+            "device_name": "react:device_name",
+            "app_name": "react:app_name",
+            "error_text": "react:error_text"
+          }
         },
         {
-          "profile": "n8n",
-          "endpoint_id": "n8n.systemcenter.runbooks",
-          "operation_id": "start_systemcenter_runbook"
+          "endpoint_id": "n8n",
+          "operation_id": "start_systemcenter_runbook",
+          "parameter_mapping": {
+            "runbook_code": "react:runbook_code",
+            "login": "react:user_login",
+            "account_type": "react:account_type",
+            "device_name": "react:device_name",
+            "app_name": "react:app_name",
+            "error_text": "react:error_text"
+          }
         }
       ],
       "parameters_schema": {
         "type": "object",
         "required": [
-          "runbook_name",
-          "service_name",
-          "environment"
+          "runbook_code"
         ],
         "properties": {
-          "runbook_name": {
+          "runbook_code": {
+            "title": "Код ранбука",
             "type": "string",
             "minLength": 1
           },
-          "service_name": {
+          "user_login": {
+            "title": "Логин пользователя",
             "type": "string",
             "minLength": 1
           },
-          "environment": {
+          "account_type": {
+            "title": "Тип учетной записи",
+            "type": "string",
+            "minLength": 1
+          },
+          "device_name": {
+            "title": "Имя устройства",
+            "type": "string",
+            "minLength": 1
+          },
+          "app_name": {
+            "title": "Приложение",
+            "type": "string",
+            "minLength": 1
+          },
+          "error_text": {
+            "title": "Текст ошибки",
             "type": "string",
             "minLength": 1
           }
@@ -424,12 +441,6 @@
           "max_attempts": 1,
           "backoff_seconds": 0
         },
-        "allowed_environments": [
-          "dev",
-          "test",
-          "stage",
-          "prod"
-        ],
         "approval_required_hint": true,
         "auto_execution_eligible": false,
         "max_risk_level": "medium"

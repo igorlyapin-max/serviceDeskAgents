@@ -2,31 +2,70 @@
   "schema_version": "1.0",
   "endpoints": [
     {
-      "endpoint_id": "mock.diagnostics",
+      "endpoint_id": "mock",
       "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции диагностики",
+      "display_name": "Тестовое подключение интеграций",
       "enabled": true,
       "operations": {
         "check_zabbix_status": {
+          "display_name": "Проверить статус Zabbix",
+          "description": "Тестовая операция проверки доступности сервиса через диагностическое подключение.",
           "method": "POST",
           "path": "/mock/diagnostics/zabbix-status",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "target_ref"
+            ],
+            "properties": {
+              "target_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "service_status": "ok",
             "message": "Тестовая диагностика завершена."
           }
-        }
-      }
-    },
-    {
-      "endpoint_id": "mock.identity",
-      "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции Active Directory",
-      "enabled": true,
-      "operations": {
+        },
         "search_ad_users": {
+          "display_name": "Найти пользователей AD",
+          "description": "Тестовая операция поиска пользователя по логину, ФИО или уточняющим атрибутам.",
           "method": "POST",
           "path": "/mock/identity/search-users",
+          "request_schema": {
+            "type": "object",
+            "properties": {
+              "login": {
+                "type": "string",
+                "minLength": 1
+              },
+              "last_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "first_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "middle_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "department": {
+                "type": "string",
+                "minLength": 1
+              },
+              "employee_number": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "candidate_count": 1,
@@ -40,69 +79,123 @@
             ],
             "message": "Тестовый поиск пользователя в AD завершен."
           }
-        }
-      }
-    },
-    {
-      "endpoint_id": "mock.cmdb",
-      "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции CMDB",
-      "enabled": true,
-      "operations": {
+        },
         "query_cmdb_object": {
+          "display_name": "Запросить объект CMDB",
+          "description": "Тестовая операция чтения metadata объекта CMDB.",
           "method": "POST",
           "path": "/mock/cmdb/query-object",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "object_ref"
+            ],
+            "properties": {
+              "object_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "object_found": true,
             "message": "Тестовый поиск объекта CMDB завершен."
           }
-        }
-      }
-    },
-    {
-      "endpoint_id": "mock.ownership",
-      "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции владельцев",
-      "enabled": true,
-      "operations": {
+        },
         "get_service_owner": {
+          "display_name": "Получить владельца сервиса",
+          "description": "Тестовая операция определения ответственной команды или владельца сервиса.",
           "method": "POST",
           "path": "/mock/ownership/service-owner",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "target_ref"
+            ],
+            "properties": {
+              "target_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "owner_team": "L2-platform",
             "message": "Тестовый поиск владельца завершен."
           }
-        }
-      }
-    },
-    {
-      "endpoint_id": "mock.known_incidents",
-      "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции известных инцидентов",
-      "enabled": true,
-      "operations": {
+        },
         "search_known_incidents": {
+          "display_name": "Найти известные инциденты",
+          "description": "Тестовая операция поиска похожих известных инцидентов.",
           "method": "POST",
           "path": "/mock/incidents/search",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "matches": [],
             "message": "Тестовый поиск известных инцидентов завершен."
           }
-        }
-      }
-    },
-    {
-      "endpoint_id": "mock.runbooks",
-      "adapter_type": "mock",
-      "display_name": "Тестовая точка интеграции ранбуков",
-      "enabled": true,
-      "operations": {
+        },
         "start_systemcenter_runbook": {
+          "display_name": "Запустить ранбук System Center",
+          "description": "Тестовая операция принятия запуска ранбука без обращения к реальному System Center.",
           "method": "POST",
           "path": "/mock/runbooks/start",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "runbook_code"
+            ],
+            "properties": {
+              "runbook_code": {
+                "title": "Код ранбука",
+                "type": "string",
+                "minLength": 1
+              },
+              "login": {
+                "title": "Логин пользователя",
+                "type": "string",
+                "minLength": 1
+              },
+              "account_type": {
+                "title": "Тип учетной записи",
+                "type": "string",
+                "minLength": 1
+              },
+              "device_name": {
+                "title": "Имя устройства",
+                "type": "string",
+                "minLength": 1
+              },
+              "app_name": {
+                "title": "Приложение",
+                "type": "string",
+                "minLength": 1
+              },
+              "error_text": {
+                "title": "Текст ошибки",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 5,
           "mock_output": {
             "runbook_status": "accepted",
@@ -112,9 +205,9 @@
       }
     },
     {
-      "endpoint_id": "n8n.systemcenter.runbooks",
+      "endpoint_id": "n8n",
       "adapter_type": "n8n_webhook",
-      "display_name": "n8n webhook ранбуков System Center",
+      "display_name": "n8n webhook AI ServiceDesk",
       "enabled": true,
       "base_url": "http://127.0.0.1:5678/webhook",
       "base_url_env": "N8N_WEBHOOK_BASE_URL",
@@ -125,48 +218,106 @@
       },
       "operations": {
         "start_systemcenter_runbook": {
+          "display_name": "Запустить ранбук System Center",
+          "description": "Вызвать n8n webhook запуска ранбука System Center.",
           "method": "POST",
           "path": "/servicedesk/runbook/start",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "runbook_code"
+            ],
+            "properties": {
+              "runbook_code": {
+                "title": "Код ранбука",
+                "type": "string",
+                "minLength": 1
+              },
+              "login": {
+                "title": "Логин пользователя",
+                "type": "string",
+                "minLength": 1
+              },
+              "account_type": {
+                "title": "Тип учетной записи",
+                "type": "string",
+                "minLength": 1
+              },
+              "device_name": {
+                "title": "Имя устройства",
+                "type": "string",
+                "minLength": 1
+              },
+              "app_name": {
+                "title": "Приложение",
+                "type": "string",
+                "minLength": 1
+              },
+              "error_text": {
+                "title": "Текст ошибки",
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 15
-        }
-      }
-    },
-    {
-      "endpoint_id": "n8n.identity",
-      "adapter_type": "n8n_webhook",
-      "display_name": "n8n webhook поиска пользователей Active Directory",
-      "enabled": true,
-      "base_url": "http://127.0.0.1:5678/webhook",
-      "base_url_env": "N8N_WEBHOOK_BASE_URL",
-      "auth": {
-        "type": "header_token",
-        "header_name": "X-ServiceDesk-Token",
-        "token_env": "N8N_WEBHOOK_TOKEN"
-      },
-      "operations": {
+        },
         "search_ad_users": {
+          "display_name": "Найти пользователей AD",
+          "description": "Вызвать n8n webhook поиска пользователя в Active Directory.",
           "method": "POST",
           "path": "/servicedesk/identity/search-users",
+          "request_schema": {
+            "type": "object",
+            "properties": {
+              "login": {
+                "type": "string",
+                "minLength": 1
+              },
+              "last_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "first_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "middle_name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "department": {
+                "type": "string",
+                "minLength": 1
+              },
+              "employee_number": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 15
-        }
-      }
-    },
-    {
-      "endpoint_id": "n8n.diagnostics",
-      "adapter_type": "n8n_webhook",
-      "display_name": "n8n webhook диагностики",
-      "enabled": true,
-      "base_url": "http://127.0.0.1:5678/webhook",
-      "base_url_env": "N8N_WEBHOOK_BASE_URL",
-      "auth": {
-        "type": "header_token",
-        "header_name": "X-ServiceDesk-Token",
-        "token_env": "N8N_WEBHOOK_TOKEN"
-      },
-      "operations": {
+        },
         "check_zabbix_status": {
+          "display_name": "Проверить статус Zabbix",
+          "description": "Вызвать n8n webhook диагностики статуса сервиса.",
           "method": "POST",
           "path": "/servicedesk/diagnostics/zabbix-status",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "target_ref"
+            ],
+            "properties": {
+              "target_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 15
         }
       }
@@ -184,8 +335,23 @@
       },
       "operations": {
         "check_zabbix_status": {
+          "display_name": "Проверить статус Zabbix напрямую",
+          "description": "Заготовка прямого вызова Zabbix API для проверки статуса сервиса.",
           "method": "POST",
           "path": "/api/zabbix/status",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "target_ref"
+            ],
+            "properties": {
+              "target_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 10
         }
       }
@@ -203,8 +369,23 @@
       },
       "operations": {
         "query_cmdb_object": {
+          "display_name": "Запросить объект CMDB напрямую",
+          "description": "Заготовка прямого вызова CMDB API для чтения metadata объекта.",
           "method": "POST",
           "path": "/api/cmdb/object",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "object_ref"
+            ],
+            "properties": {
+              "object_ref": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 10
         }
       }
@@ -216,8 +397,23 @@
       "enabled": true,
       "operations": {
         "search_known_incidents": {
+          "display_name": "Найти известные инциденты через очередь",
+          "description": "Поставить задачу поиска известных инцидентов в очередь.",
           "method": "POST",
           "path": "servicedesk.known-incidents.search",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
           "timeout_seconds": 10
         }
       }

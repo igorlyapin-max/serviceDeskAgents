@@ -21,7 +21,7 @@ from .integrations import IntegrationDispatcher, ToolRegistry
 from .knowledge import KnowledgeIndexer, KnowledgeRetriever
 
 
-REQUIRED_TICKET_FIELDS = ("user", "service", "environment", "description", "priority")
+REQUIRED_TICKET_FIELDS = ("user", "service", "description", "priority")
 POLICY_RULES_PATH = CONTRACTS_ROOT / "execution" / "execution-policy-rules.json"
 
 
@@ -279,7 +279,6 @@ class TicketWorkflow:
                 ],
             },
             "integrations": {
-                "profile": self.tool_registry.profile,
                 "endpoint_count": len(self.contracts.integration_endpoint_catalog["endpoints"]),
                 "enabled_endpoint_count": sum(
                     1
@@ -331,9 +330,9 @@ class TicketWorkflow:
             "workflow_transitions",
             "n8n_workflows",
         ):
-            active_version = self.config_store.active_version(domain)
-            if active_version:
-                self.apply_config_payload(domain, active_version["payload"])
+            active_config = self.config_store.active_config(domain)
+            if active_config["source"] == "active_version":
+                self.apply_config_payload(domain, active_config["payload"])
 
     def apply_config_payload(self, domain: str, payload: dict[str, Any]) -> None:
         if domain == "tools":
@@ -761,14 +760,13 @@ class TicketWorkflow:
     def _classify_by_description(self, ticket: dict[str, Any]) -> dict[str, Any]:
         description = str(ticket.get("description") or "").lower()
         priority = str(ticket.get("priority") or "").lower()
-        environment = str(ticket.get("environment") or "").lower()
 
         if any(token in description for token in ["runbook", "restart", "перезапуск"]):
             return self._runbook_decision(ticket)
         if (
             any(token in description for token in ["escalat", "эскала", "l2"])
             or priority in {"p1", "critical", "критический"}
-            or ("prod" in environment and "down" in description)
+            or "down" in description
         ):
             return self._escalation_decision(ticket)
         return self._answer_decision(ticket)
@@ -812,12 +810,12 @@ class TicketWorkflow:
             "schema_version": "1.0",
             "decision": {
                 "type": "escalation_needed",
-                "summary": f"{service}: требуется проверка L2.",
+                "summary": f"{service}: требуется проверка специалистом.",
                 "reason": "Детерминированная политика этапа 3 выбрала эскалацию для этого сценария.",
-                "target_team": "L2-platform",
+                "target_team": "configured-escalation-channel",
                 "confidence": 0.81,
             },
-            "operator_message": "Эскалируйте заявку в L2-platform с подготовленным описанием.",
+            "operator_message": "Эскалируйте заявку в настроенный канал с подготовленным описанием.",
             "internal_reasoning_summary": "Сценарий требует эскалации, а не локального решения.",
             "citations": [],
             "proposed_actions": [],
@@ -826,7 +824,6 @@ class TicketWorkflow:
     @staticmethod
     def _runbook_decision(ticket: dict[str, Any]) -> dict[str, Any]:
         service = ticket.get("service") or "billing-worker"
-        environment = ticket.get("environment") or "test"
         return {
             "schema_version": "1.0",
             "decision": {
@@ -840,16 +837,15 @@ class TicketWorkflow:
             "proposed_actions": [
                 {
                     "tool_name": "start_systemcenter_runbook",
-                    "action_id": f"restart_{service}_{environment}".replace("-", "_"),
+                    "action_id": f"restart_{service}".replace("-", "_"),
                     "action_type": "action",
                     "parameters": {
-                        "runbook_name": "Restart-Service",
-                        "service_name": service,
-                        "environment": environment,
+                        "runbook_code": "restart_service",
+                        "app_name": service,
                     },
                     "reason": "Заявка соответствует сценарию перезапуска через ранбук.",
                     "risk_level": "medium",
-                    "expected_effect": f"{service} будет перезапущен в среде {environment}.",
+                    "expected_effect": f"Для {service} будет запущена настроенная операция восстановления.",
                     "requires_state_change": True,
                     "risk_notes": "Политика MVP требует согласования оператора перед выполнением.",
                 }

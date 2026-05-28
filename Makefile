@@ -192,6 +192,61 @@ stage13-check:
 stage13-smoke:
 	./scripts/stage13-smoke.sh
 
+.PHONY: stage13_5-check
+stage13_5-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13_5-smoke
+stage13_5-smoke:
+	./scripts/stage13_5-smoke.sh
+
+.PHONY: stage13_6-check
+stage13_6-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13_6-smoke
+stage13_6-smoke:
+	./scripts/stage13_6-smoke.sh
+
+.PHONY: stage13_7-check
+stage13_7-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13_7-smoke
+stage13_7-smoke:
+	./scripts/stage13_7-smoke.sh
+
+.PHONY: stage13_8-check
+stage13_8-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13_8-smoke
+stage13_8-smoke:
+	./scripts/stage13_8-smoke.sh
+
+.PHONY: stage13_9-check
+stage13_9-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13_9-smoke
+stage13_9-smoke:
+	./scripts/stage13_9-smoke.sh
+
 .PHONY: stage0-ps
 stage0-ps:
 	$(COMPOSE) ps

@@ -17,7 +17,6 @@ CALLBACK_TOKEN="${INTEGRATION_CALLBACK_TOKEN:-dev-callback-token}"
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
 INTEGRATION_CALLBACK_TOKEN="${CALLBACK_TOKEN}" \
   "${PYTHON_BIN}" -m uvicorn apps.orchestrator.app.main:app --host "${HOST}" --port "${PORT}" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
@@ -84,7 +83,6 @@ ticket_input = {
     "ticket_id": "stage10-ticket",
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "restart billing-worker using the runbook",
     "priority": "p3",
     "scenario": "runbook",

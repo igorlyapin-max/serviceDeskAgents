@@ -17,14 +17,8 @@
   "properties": {
     "tool_name": {
       "type": "string",
-      "enum": [
-        "check_zabbix_status",
-        "search_ad_users",
-        "query_cmdb_object",
-        "get_service_owner",
-        "search_known_incidents",
-        "start_systemcenter_runbook"
-      ]
+      "minLength": 1,
+      "maxLength": 200
     },
     "action_id": {
       "type": "string",

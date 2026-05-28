@@ -45,7 +45,7 @@
                 "parameter_bindings",
                 "execution_level",
                 "target_execution_level",
-                "endpoint_profile",
+                "endpoint_id",
                 "operation_id",
                 "risk_level",
                 "audit_required",
@@ -81,7 +81,7 @@
                   "minLength": 1,
                   "maxLength": 120
                 },
-                "endpoint_profile": {
+                "endpoint_id": {
                   "$ref": "#/$defs/id"
                 },
                 "operation_id": {

@@ -12,6 +12,9 @@
     "schema_version": {
       "const": "1.0"
     },
+    "confidence_defaults": {
+      "$ref": "#/$defs/confidence_thresholds"
+    },
     "policies": {
       "type": "array",
       "minItems": 1,
@@ -24,7 +27,7 @@
           "max_iterations",
           "consecutive_tool_errors_to_escalate",
           "stop_conditions",
-          "allowed_tool_classes"
+          "allowed_react_action_groups"
         ],
         "properties": {
           "policy_id": {
@@ -51,24 +54,28 @@
             "items": {
               "type": "string",
               "enum": [
-                "user_confirmed_success",
-                "waiting_for_user",
-                "tool_errors_limit",
+                "all_required_slots_filled",
+                "tool_success",
+                "clarification_required",
+                "handoff_required",
                 "iteration_limit",
-                "low_confidence",
-                "major_incident"
+                "consecutive_tool_errors"
               ]
             },
             "uniqueItems": true
           },
-          "allowed_tool_classes": {
+          "allowed_react_action_groups": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "string",
               "enum": [
-                "read_only",
-                "action"
+                "read_diagnostics",
+                "knowledge_search",
+                "external_status_check",
+                "action_preparation",
+                "state_changing_actions",
+                "communication_handoff"
               ]
             },
             "uniqueItems": true
@@ -78,6 +85,38 @@
     }
   },
   "$defs": {
+    "confidence_thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auto_accept_confidence",
+        "clarification_confidence",
+        "operator_handoff_confidence",
+        "min_extraction_confidence"
+      ],
+      "properties": {
+        "auto_accept_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "clarification_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "operator_handoff_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_extraction_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
     "id": {
       "type": "string",
       "minLength": 1,

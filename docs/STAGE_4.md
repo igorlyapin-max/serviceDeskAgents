@@ -85,7 +85,7 @@ Workflow template:
 
 - `infra/n8n/workflows/stage4-runbook-webhook.json`
 
-Локальный профиль по умолчанию: `mock`. Переключайте `INTEGRATION_ENDPOINT_PROFILE=n8n` только после import/activation n8n workflow и передачи `N8N_WEBHOOK_TOKEN` в environment контейнера n8n.
+Локальное подключение по умолчанию: `mock`. Для перехода на n8n измените привязку ReAct-вызова в каталоге tools на `endpoint_id=n8n` после импорта и активации n8n workflow и передачи `N8N_WEBHOOK_TOKEN` в окружение контейнера n8n.
 
 ## API surface
 

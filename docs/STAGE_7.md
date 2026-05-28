@@ -36,7 +36,7 @@
 - `content`
 - `content_version` или checksum
 - `updated_at`
-- metadata: service, environment, labels, owner team, security labels
+- metadata: service, labels, owner team, security labels
 
 Поиск и workflow должны работать с нормализованными документами и фрагментами, а не с payload конкретного коннектора.
 

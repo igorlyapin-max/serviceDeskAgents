@@ -13,9 +13,8 @@
       "action_id": "restart_billing_worker_test",
       "action_type": "action",
       "parameters": {
-        "runbook_name": "Restart-Service",
-        "service_name": "billing-worker",
-        "environment": "test"
+        "runbook_code": "restart_service",
+        "app_name": "billing-worker"
       },
       "reason": "Worker завис.",
       "risk_level": "medium",

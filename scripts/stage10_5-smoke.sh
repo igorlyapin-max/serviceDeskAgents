@@ -16,7 +16,6 @@ INDEX_PATH="${STAGE10_5_INDEX_PATH:-/tmp/servicedesk-stage10_5-knowledge-${PORT}
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
   "${PYTHON_BIN}" -m uvicorn apps.orchestrator.app.main:app --host "${HOST}" --port "${PORT}" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 
@@ -72,7 +71,7 @@ else:
 dashboard_before = request("/admin/dashboard")
 assert dashboard_before["schema_version"] == "1.0", dashboard_before
 assert dashboard_before["cases"]["total"] == 0, dashboard_before
-assert dashboard_before["integrations"]["profile"] == "mock", dashboard_before
+assert dashboard_before["integrations"]["enabled_endpoint_count"] >= 1, dashboard_before
 print("admin dashboard initial ok")
 
 catalog = request("/admin/catalog")
@@ -105,7 +104,6 @@ ticket_input = {
     "ticket_id": "stage10_5-ticket",
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "перезапустить billing-worker через ранбук",
     "priority": "p3",
     "scenario": "runbook",

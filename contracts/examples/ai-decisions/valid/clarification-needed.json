@@ -3,13 +3,12 @@
   "decision": {
     "type": "clarification_needed",
     "missing_fields": [
-      "service_name",
-      "environment"
+      "app_name"
     ],
-    "question": "Уточните затронутый сервис и среду.",
+    "question": "Уточните приложение или компонент, для которого нужно выполнить диагностику.",
     "confidence": 0.91
   },
-  "operator_message": "Запросите название затронутого сервиса и среду перед продолжением.",
+  "operator_message": "Запросите приложение или компонент перед продолжением.",
   "internal_reasoning_summary": "В заявке отсутствуют обязательные поля маршрутизации.",
   "citations": [],
   "proposed_actions": []

@@ -113,15 +113,33 @@
                 "resolution_profile_id": {
                   "$ref": "#/$defs/id"
                 },
-                "question": {
+                "user_question": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 600
                 },
-                "auto_fill_ref": {
+                "case_source_ref": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 200
+                },
+                "extraction_instruction": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1000
+                },
+                "fallback_question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 600
+                },
+                "operator_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 600
+                },
+                "confidence_overrides": {
+                  "$ref": "#/$defs/confidence_overrides"
                 },
                 "examples": {
                   "type": "array",
@@ -144,6 +162,32 @@
       "minLength": 1,
       "maxLength": 160,
       "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "confidence_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_accept_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "clarification_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "operator_handoff_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_extraction_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
     },
     "id_list": {
       "type": "array",

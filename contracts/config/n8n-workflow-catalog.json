@@ -5,8 +5,8 @@
       "workflow_id": "provider_channel_failure",
       "display_name": "Сбой канала провайдера",
       "business_scenario": "provider_channel_failure",
-      "endpoint_id": "n8n.systemcenter.runbooks",
-      "callback_endpoint_id": "n8n.systemcenter.runbooks",
+      "endpoint_id": "n8n",
+      "callback_endpoint_id": "n8n",
       "enabled": true,
       "operations": [
         "start_systemcenter_runbook"
@@ -21,8 +21,8 @@
       "workflow_id": "zabbix_problem_processing",
       "display_name": "Обработка проблемы Zabbix",
       "business_scenario": "zabbix_problem_processing",
-      "endpoint_id": "n8n.diagnostics",
-      "callback_endpoint_id": "n8n.diagnostics",
+      "endpoint_id": "n8n",
+      "callback_endpoint_id": "n8n",
       "enabled": true,
       "operations": [
         "check_zabbix_status"

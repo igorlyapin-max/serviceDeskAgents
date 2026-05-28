@@ -330,6 +330,43 @@ label {
   line-height: 1.35;
 }
 
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.choice-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.choice-card input[type="checkbox"] {
+  width: auto;
+  margin-top: 2px;
+}
+
+.choice-card strong,
+.choice-card small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.choice-card small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
 .scenario-editor-actions {
   display: flex;
   justify-content: flex-end;
@@ -396,6 +433,56 @@ label {
   padding: 12px;
 }
 
+.endpoint-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.endpoint-group {
+  box-shadow: none;
+}
+
+.endpoint-connection-list {
+  display: grid;
+  gap: 8px;
+}
+
+.endpoint-connection-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.endpoint-connection-card strong,
+.endpoint-connection-card span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.endpoint-connection-card span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.usage-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.usage-list li + li {
+  margin-top: 3px;
+}
+
 .launch-editor {
   display: grid;
   gap: 12px;
@@ -410,6 +497,67 @@ label {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.launch-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.launch-group + .launch-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.launch-group-head {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.parameter-binding-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.parameter-binding-header,
+.parameter-binding-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(150px, 0.8fr) minmax(220px, 1.2fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.parameter-binding-header {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.parameter-binding-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.parameter-binding-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.parameter-binding-meta strong,
+.parameter-binding-meta span {
+  overflow-wrap: anywhere;
+}
+
+.parameter-binding-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .scenario-title {
@@ -562,6 +710,8 @@ tr:last-child td {
   .toolbar,
   .toolbar.compact,
   .scenario-menu,
+  .parameter-binding-header,
+  .parameter-binding-row,
   .grid,
   .grid.two,
   .grid.three {

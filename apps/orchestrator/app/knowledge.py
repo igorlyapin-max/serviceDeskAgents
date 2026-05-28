@@ -107,7 +107,7 @@ class LocalFilesConnector:
             key, value = line.split(":", 1)
             normalized_key = key.strip().lower().replace(" ", "_")
             normalized_value = value.strip()
-            if normalized_key in {"service", "environment", "owner_team"} and normalized_value:
+            if normalized_key in {"service", "owner_team"} and normalized_value:
                 metadata[normalized_key] = normalized_value
             if normalized_key == "labels" and normalized_value:
                 metadata["labels"] = [
@@ -448,7 +448,6 @@ class KnowledgeRetriever:
     def build_query_from_ticket(self, ticket: dict[str, Any]) -> dict[str, Any]:
         parts = [
             str(ticket.get("service") or ""),
-            str(ticket.get("environment") or ""),
             str(ticket.get("description") or ""),
             str(ticket.get("priority") or ""),
         ]
@@ -456,8 +455,6 @@ class KnowledgeRetriever:
         filters = {}
         if ticket.get("service"):
             filters["service"] = str(ticket["service"])
-        if ticket.get("environment"):
-            filters["environment"] = str(ticket["environment"])
         result = {
             "schema_version": "1.0",
             "query": query,
@@ -518,7 +515,7 @@ class KnowledgeRetriever:
     def _metadata_boost(chunk: dict[str, Any], filters: dict[str, Any]) -> float:
         metadata = chunk.get("metadata", {})
         boost = 0.0
-        for key in ("service", "environment"):
+        for key in ("service",):
             expected = str(filters.get(key) or "").lower()
             actual = str(metadata.get(key) or "").lower()
             if expected and actual == expected:

@@ -203,6 +203,25 @@ label {
   width: auto;
 }
 
+.run-options {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.run-options summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.run-option-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .result-pane,
 .knowledge-pane,
 .trace-pane {

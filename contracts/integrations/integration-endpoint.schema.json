@@ -95,11 +95,24 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "display_name",
+        "description",
         "method",
         "path",
+        "request_schema",
         "timeout_seconds"
       ],
       "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
         "method": {
           "type": "string",
           "enum": [
@@ -111,6 +124,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 1000
+        },
+        "request_schema": {
+          "type": "object",
+          "additionalProperties": true
         },
         "timeout_seconds": {
           "type": "integer",

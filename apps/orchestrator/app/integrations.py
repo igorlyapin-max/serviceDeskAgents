@@ -14,13 +14,13 @@ from jsonschema import Draft202012Validator
 from .contracts import ContractRegistry, ContractValidationError
 
 
-DEFAULT_INTEGRATION_PROFILE = "mock"
 RISK_ORDER = ["low", "medium", "high", "critical"]
 
 
 @dataclass(frozen=True)
 class EndpointBinding:
     tool: dict[str, Any]
+    binding: dict[str, Any]
     endpoint: dict[str, Any]
     operation_id: str
     operation: dict[str, Any]
@@ -44,10 +44,6 @@ class ToolRegistry:
         profile: str | None = None,
     ):
         self.contracts = contracts
-        self.profile = profile or os.getenv(
-            "INTEGRATION_ENDPOINT_PROFILE",
-            DEFAULT_INTEGRATION_PROFILE,
-        )
         self.tools_by_name = {
             tool["tool_name"]: tool
             for tool in self.contracts.tool_catalog["tools"]
@@ -67,6 +63,7 @@ class ToolRegistry:
         operation = endpoint["operations"][binding["operation_id"]]
         return EndpointBinding(
             tool=tool,
+            binding=binding,
             endpoint=endpoint,
             operation_id=binding["operation_id"],
             operation=operation,
@@ -87,6 +84,15 @@ class ToolRegistry:
 
         binding = self.resolve(action["tool_name"])
         self._validate_action_against_tool(action, binding.tool)
+        operation_parameters = self._build_operation_parameters(
+            action["parameters"],
+            binding.binding,
+        )
+        self._validate_operation_parameters(
+            action["tool_name"],
+            binding.operation,
+            operation_parameters,
+        )
 
         invocation = {
             "schema_version": "1.0",
@@ -98,6 +104,7 @@ class ToolRegistry:
             "adapter_type": binding.endpoint["adapter_type"],
             "operation_id": binding.operation_id,
             "parameters": action["parameters"],
+            "operation_parameters": operation_parameters,
             "execution_mode": policy_result["execution_mode"],
             "allowed": policy_result["allowed"],
             "approval_required": policy_result["approval_required"],
@@ -136,9 +143,11 @@ class ToolRegistry:
             raise ContractValidationError("tool_result", errors)
 
     def _select_binding(self, tool: dict[str, Any]) -> dict[str, Any]:
-        for binding in tool["endpoint_bindings"]:
-            if binding["profile"] == self.profile:
-                return binding
+        if not tool["endpoint_bindings"]:
+            raise ContractValidationError(
+                "tool_catalog",
+                [f"{tool['tool_name']} не содержит привязку endpoint/operation"],
+            )
         return tool["endpoint_bindings"][0]
 
     @staticmethod
@@ -162,13 +171,6 @@ class ToolRegistry:
             prefix = f"parameters.{path}" if path else "parameters"
             errors.append(f"{prefix}: {error.message}")
 
-        environment = str(action.get("parameters", {}).get("environment", "")).strip()
-        allowed_environments = tool["policy"]["allowed_environments"]
-        if environment and environment not in allowed_environments:
-            errors.append(
-                f"parameters.environment {environment} не разрешен для {action['tool_name']}"
-            )
-
         max_risk_level = tool["policy"]["max_risk_level"]
         risk_level = action.get("risk_level")
         if (
@@ -183,10 +185,52 @@ class ToolRegistry:
             raise ContractValidationError("tool_invocation", errors)
 
     @staticmethod
-    def _format_jsonschema_error(error: Any) -> str:
+    def _build_operation_parameters(
+        react_parameters: dict[str, Any],
+        binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = {}
+        for operation_parameter, source_ref in (binding.get("parameter_mapping") or {}).items():
+            source, separator, source_value = str(source_ref).partition(":")
+            if separator != ":" or not source_value:
+                continue
+            if source == "react":
+                if source_value in react_parameters:
+                    result[operation_parameter] = react_parameters[source_value]
+            elif source == "constant":
+                result[operation_parameter] = source_value
+            elif source == "secret":
+                secret_value = os.getenv(source_value, "")
+                if secret_value:
+                    result[operation_parameter] = secret_value
+        return result
+
+    @classmethod
+    def _validate_operation_parameters(
+        cls,
+        tool_name: str,
+        operation: dict[str, Any],
+        operation_parameters: dict[str, Any],
+    ) -> None:
+        validator = Draft202012Validator(operation["request_schema"])
+        errors = [
+            cls._format_jsonschema_error(error, prefix="operation_parameters")
+            for error in sorted(
+                validator.iter_errors(operation_parameters),
+                key=lambda item: list(item.path),
+            )
+        ]
+        if errors:
+            raise ContractValidationError(
+                "tool_invocation",
+                [f"{tool_name}: {error}" for error in errors],
+            )
+
+    @staticmethod
+    def _format_jsonschema_error(error: Any, prefix: str = "output") -> str:
         path = ".".join(str(part) for part in error.path)
-        prefix = f"output.{path}" if path else "output"
-        return f"{prefix}: {error.message}"
+        location = f"{prefix}.{path}" if path else prefix
+        return f"{location}: {error.message}"
 
 
 class IntegrationDispatcher:
@@ -451,7 +495,8 @@ class N8nWebhookAdapter:
         payload = {
             "schema_version": "1.0",
             "invocation": invocation,
-            "parameters": invocation["parameters"],
+            "parameters": invocation["operation_parameters"],
+            "react_parameters": invocation["parameters"],
         }
         request = Request(
             url,

@@ -116,8 +116,8 @@ export function validateProposedAction(action, path = 'proposed_actions[0]') {
     if (action.requires_state_change !== true) {
       errors.push(`${path}.requires_state_change must be true for start_systemcenter_runbook`);
     }
-    if (!isObject(action.parameters) || !isNonEmptyString(action.parameters.runbook_name)) {
-      errors.push(`${path}.parameters.runbook_name is required for start_systemcenter_runbook`);
+    if (!isObject(action.parameters) || !isNonEmptyString(action.parameters.runbook_code)) {
+      errors.push(`${path}.parameters.runbook_code is required for start_systemcenter_runbook`);
     }
   }
 

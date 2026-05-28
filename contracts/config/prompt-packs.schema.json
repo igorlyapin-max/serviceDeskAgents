@@ -20,7 +20,6 @@
         "additionalProperties": false,
         "required": [
           "prompt_pack_id",
-          "scenario_id",
           "display_name",
           "status",
           "active_version",
@@ -28,9 +27,6 @@
         ],
         "properties": {
           "prompt_pack_id": {
-            "$ref": "#/$defs/id"
-          },
-          "scenario_id": {
             "$ref": "#/$defs/id"
           },
           "display_name": {

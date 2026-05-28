@@ -28,7 +28,8 @@
           "orchestrator_policy_id",
           "tool_launch_matrix_id",
           "prompt_pack_id",
-          "escalation_policy_id"
+          "escalation_policy_id",
+          "default_channel_id"
         ],
         "properties": {
           "scenario_id": {
@@ -71,6 +72,19 @@
           "escalation_policy_id": {
             "$ref": "#/$defs/id"
           },
+          "default_channel_id": {
+            "$ref": "#/$defs/id"
+          },
+          "allowed_channel_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/id"
+            },
+            "uniqueItems": true
+          },
+          "confidence_overrides": {
+            "$ref": "#/$defs/confidence_overrides"
+          },
           "tags": {
             "type": "array",
             "items": {
@@ -83,6 +97,32 @@
     }
   },
   "$defs": {
+    "confidence_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_accept_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "clarification_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "operator_handoff_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_extraction_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
     "id": {
       "type": "string",
       "minLength": 1,

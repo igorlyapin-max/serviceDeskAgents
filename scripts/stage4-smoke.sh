@@ -12,7 +12,6 @@ PORT="${ORCHESTRATOR_PORT:-18089}"
 BASE_URL="http://${HOST}:${PORT}"
 LOG_FILE="${STAGE4_LOG_FILE:-/tmp/servicedesk-stage4-orchestrator.log}"
 
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
   "${PYTHON_BIN}" -m uvicorn apps.orchestrator.app.main:app --host "${HOST}" --port "${PORT}" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 
@@ -59,7 +58,6 @@ else:
 ticket = {
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "restart service through runbook",
     "priority": "p3",
     "scenario": "runbook",
@@ -70,10 +68,10 @@ approval_request = analysis["approval_requests"][0]
 approval_id = approval_request["approval_id"]
 pending_result = analysis["tool_results"][0]
 assert pending_result["status"] == "pending_approval", pending_result
-assert pending_result["endpoint_id"] == "mock.runbooks", pending_result
+assert pending_result["endpoint_id"] == "mock", pending_result
 assert pending_result["adapter_type"] == "mock", pending_result
 assert pending_result["extensions"]["gate_id"] == approval_id, pending_result
-print("analyze runbook ok: pending_approval through mock.runbooks")
+print("analyze runbook ok: pending_approval through mock")
 
 action = analysis["ai_decision"]["proposed_actions"][0]
 policy_result = analysis["execution_policy_results"][0]
@@ -98,7 +96,7 @@ dispatch_approved = request(
 )
 approved_result = dispatch_approved["tool_result"]
 assert approved_result["status"] == "success", approved_result
-assert approved_result["endpoint_id"] == "mock.runbooks", approved_result
+assert approved_result["endpoint_id"] == "mock", approved_result
 assert dispatch_approved["workflow_state"]["id"] == "action_execution_succeeded", dispatch_approved
 print("approval approved ok: mock runbook success")
 
@@ -107,8 +105,7 @@ read_only_action = {
     "action_id": "check_billing_worker_test",
     "action_type": "read_only",
     "parameters": {
-        "service_name": "billing-worker",
-        "environment": "test",
+        "target_ref": "billing-worker",
     },
     "reason": "Smoke-проверка этапа 4: read-only диагностика.",
     "risk_level": "low",
@@ -136,8 +133,8 @@ read_only_dispatch = request(
 )
 read_only_result = read_only_dispatch["tool_result"]
 assert read_only_result["status"] == "dry_run_completed", read_only_result
-assert read_only_result["endpoint_id"] == "mock.diagnostics", read_only_result
-print("dispatch read-only ok: dry_run_completed through mock.diagnostics")
+assert read_only_result["endpoint_id"] == "mock", read_only_result
+print("dispatch read-only ok: dry_run_completed through mock")
 
 print("Smoke-проверка этапа 4 завершена.")
 PY

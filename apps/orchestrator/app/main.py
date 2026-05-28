@@ -34,7 +34,6 @@ from .workflow import TicketWorkflow
 class TicketAnalyzeRequest(BaseModel):
     user: str | None = Field(default=None)
     service: str | None = Field(default=None)
-    environment: str | None = Field(default=None)
     description: str | None = Field(default=None)
     priority: str | None = Field(default=None)
     scenario: str | None = Field(default=None)
@@ -119,6 +118,11 @@ class AdminScenarioSimulationRequest(BaseModel):
     text: str = Field()
     provided_slots: dict[str, Any] | None = Field(default=None)
     operator_id: str = Field(default="admin-1")
+    run_mode: str | None = Field(default=None)
+    allow_llm: bool | None = Field(default=None)
+    allow_readonly_integrations: bool | None = Field(default=None)
+    allow_mock_integrations: bool | None = Field(default=None)
+    allow_action_with_approval: bool | None = Field(default=None)
 
 
 class AdminModelSecretUpdateRequest(BaseModel):
@@ -131,6 +135,11 @@ class OperatorScenarioSimulationRequest(BaseModel):
     text: str = Field()
     provided_slots: dict[str, Any] | None = Field(default=None)
     operator_id: str = Field(default="operator-1")
+    run_mode: str = Field(default="config_check")
+    allow_llm: bool | None = Field(default=None)
+    allow_readonly_integrations: bool | None = Field(default=None)
+    allow_mock_integrations: bool | None = Field(default=None)
+    allow_action_with_approval: bool | None = Field(default=None)
 
 
 class IntegrationCallbackRequest(BaseModel):
@@ -585,6 +594,11 @@ def operator_simulate_scenario(
             scenario_id,
             text=request.text,
             provided_slots=request.provided_slots,
+            run_mode=request.run_mode,
+            allow_llm=request.allow_llm,
+            allow_readonly_integrations=request.allow_readonly_integrations,
+            allow_mock_integrations=request.allow_mock_integrations,
+            allow_action_with_approval=request.allow_action_with_approval,
         )
         audit_success(
             context,
@@ -1416,6 +1430,11 @@ def admin_simulate_scenario(
             scenario_id,
             text=request.text,
             provided_slots=request.provided_slots,
+            run_mode=request.run_mode,
+            allow_llm=request.allow_llm,
+            allow_readonly_integrations=request.allow_readonly_integrations,
+            allow_mock_integrations=request.allow_mock_integrations,
+            allow_action_with_approval=request.allow_action_with_approval,
         )
         audit_success(
             context,

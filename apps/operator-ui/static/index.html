@@ -39,6 +39,36 @@
               <input id="dryRunToggle" type="checkbox" checked>
               <span>Тестовый прогон сценария</span>
             </label>
+            <label class="span-all">
+              Режим тестового прогона
+              <select id="testRunMode" name="testRunMode">
+                <option value="config_check">Проверка конфигурации</option>
+                <option value="llm">С моделью</option>
+                <option value="llm_readonly">С моделью и безопасными интеграциями</option>
+                <option value="approval_debug">Отладочный запуск с подтверждениями</option>
+              </select>
+            </label>
+            <details class="run-options span-all">
+              <summary>Разрешения тестового прогона</summary>
+              <div class="run-option-grid">
+                <label class="checkbox-row">
+                  <input id="allowLlmToggle" type="checkbox">
+                  <span>Вызывать модель для извлечения слотов</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="allowReadonlyToggle" type="checkbox">
+                  <span>Разрешить read-only интеграции</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="allowMockToggle" type="checkbox">
+                  <span>Разрешить mock-интеграции</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="allowActionApprovalToggle" type="checkbox">
+                  <span>Доходить до action-вызовов с подтверждением</span>
+                </label>
+              </div>
+            </details>
             <div class="button-row span-all">
               <button id="loadScenarioButton" type="button">Обновить сценарий</button>
               <button id="enrichButton" type="button">Проверить слоты</button>

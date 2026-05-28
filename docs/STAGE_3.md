@@ -18,7 +18,6 @@
 
 - `user`
 - `service`
-- `environment`
 - `description`
 - `priority`
 
@@ -97,7 +96,7 @@ FastAPI должен загружать и валидировать через `
 
 ## Команды
 
-Установить зависимости в локальное virtual environment:
+Установить зависимости в локальное виртуальное окружение:
 
 ```bash
 make stage3-install

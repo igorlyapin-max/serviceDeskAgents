@@ -32,9 +32,29 @@ def action(tool_name, action_type, parameters, risk_level="low", requires_state_
     }
 
 
-def dispatch(profile, tool_action, policy_result=None, approved=False):
-    registry = ToolRegistry(contracts, profile=profile)
-    dispatcher = IntegrationDispatcher(contracts, registry)
+def dispatch(endpoint_id, tool_action, policy_result=None, approved=False):
+    local_contracts = ContractRegistry()
+    tool = next(
+        (
+            item
+            for item in local_contracts.tool_catalog["tools"]
+            if item["tool_name"] == tool_action["tool_name"]
+        ),
+        None,
+    )
+    if tool:
+        binding = next(
+            (
+                item
+                for item in tool["endpoint_bindings"]
+                if item["endpoint_id"] == endpoint_id
+            ),
+            None,
+        )
+        if binding:
+            tool["endpoint_bindings"] = [binding]
+    registry = ToolRegistry(local_contracts)
+    dispatcher = IntegrationDispatcher(local_contracts, registry)
     effective_policy = policy_result or policy.evaluate(tool_action)
     invocation = registry.build_invocation(
         tool_action,
@@ -59,22 +79,22 @@ read_only_cases = [
     action(
         "check_zabbix_status",
         "read_only",
-        {"service_name": "billing-worker", "environment": "test"},
+        {"target_ref": "billing-worker"},
     ),
     action(
         "query_cmdb_object",
         "read_only",
-        {"object_ref": "billing-worker", "environment": "test"},
+        {"object_ref": "billing-worker"},
     ),
     action(
         "get_service_owner",
         "read_only",
-        {"service_name": "billing-worker"},
+        {"target_ref": "billing-worker"},
     ),
     action(
         "search_known_incidents",
         "read_only",
-        {"query": "billing worker lag", "service_name": "billing-worker"},
+        {"query": "billing worker lag"},
     ),
 ]
 
@@ -90,9 +110,8 @@ runbook_action = action(
     "start_systemcenter_runbook",
     "action",
     {
-        "runbook_name": "Restart-Service",
-        "service_name": "billing-worker",
-        "environment": "test",
+        "runbook_code": "restart_service",
+        "app_name": "billing-worker",
     },
     risk_level="medium",
     requires_state_change=True,
@@ -124,7 +143,7 @@ if blocked_result["status"] != "blocked":
     raise SystemExit(f"blocked policy failed: {blocked_result}")
 print("blocked policy ok")
 
-disabled_result = dispatch("direct_http", read_only_cases[0])
+disabled_result = dispatch("direct.zabbix.disabled", read_only_cases[0])
 if disabled_result["status"] != "error" or disabled_result["error"]["code"] != "endpoint_disabled":
     raise SystemExit(f"disabled endpoint failed: {disabled_result}")
 print("disabled endpoint ok")
@@ -134,7 +153,7 @@ queue_action = action(
     "read_only",
     {"query": "billing worker lag"},
 )
-unsupported_result = dispatch("queue", queue_action)
+unsupported_result = dispatch("queue.known_incidents", queue_action)
 if unsupported_result["status"] != "error" or unsupported_result["error"]["code"] != "adapter_not_supported":
     raise SystemExit(f"unsupported adapter failed: {unsupported_result}")
 print("unsupported adapter ok")
@@ -143,7 +162,7 @@ expect_contract_error(
     "missing parameter",
     lambda: dispatch(
         "mock",
-        action("check_zabbix_status", "read_only", {"service_name": "billing-worker"}),
+        action("check_zabbix_status", "read_only", {}),
     ),
 )
 
@@ -151,8 +170,31 @@ expect_contract_error(
     "unknown tool",
     lambda: dispatch(
         "mock",
-        action("restart_everything", "action", {"environment": "test"}, requires_state_change=True),
+        action("restart_everything", "action", {"target_ref": "billing-worker"}, requires_state_change=True),
     ),
+)
+
+def dispatch_with_missing_operation_mapping():
+    local_contracts = ContractRegistry()
+    tool = next(item for item in local_contracts.tool_catalog["tools"] if item["tool_name"] == "start_systemcenter_runbook")
+    binding = next(item for item in tool["endpoint_bindings"] if item["endpoint_id"] == "mock")
+    binding["parameter_mapping"].pop("runbook_code", None)
+    tool["endpoint_bindings"] = [binding]
+    registry = ToolRegistry(local_contracts)
+    dispatcher = IntegrationDispatcher(local_contracts, registry)
+    invocation = registry.build_invocation(
+        runbook_action,
+        runbook_policy,
+        ticket_id="stage5-smoke",
+        approved_by_operator=True,
+        operator_id="operator-1",
+    )
+    return dispatcher.dispatch(invocation)
+
+
+expect_contract_error(
+    "missing operation parameter mapping",
+    dispatch_with_missing_operation_mapping,
 )
 
 previous_token = os.environ.pop("N8N_WEBHOOK_TOKEN", None)

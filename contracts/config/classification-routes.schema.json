@@ -50,9 +50,9 @@
             "type": "string",
             "enum": [
               "auto_agent",
-              "agent_l1",
-              "l1_hint",
-              "l2_major_incident",
+              "agent_with_confirmation",
+              "human_review",
+              "major_incident",
               "approver"
             ]
           },

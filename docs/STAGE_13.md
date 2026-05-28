@@ -20,7 +20,8 @@
   - `workflow_transitions`;
   - `prompts`;
   - `model_routing`;
-  - `n8n_workflows`.
+  - `n8n_workflows`;
+  - `interaction_channels`.
 - Неизменяемые версии конфигурации.
 - Откат указателя активной версии на ранее активированную версию.
 - Валидация по JSON Schema перед активацией.
@@ -40,6 +41,21 @@
   - связь workflow с бизнес-сценарием;
   - ссылка на callback endpoint;
   - флаги управления.
+- Каналы взаимодействия:
+  - мессенджер-бот для онлайн-диалога с пользователем;
+  - сервисдеск для офлайн-обсуждения и создания наряда;
+  - отладочный режим для локального MVP;
+  - доставка вопросов, таймауты ожидания, действие при отсутствии ответа и действие эскалации;
+  - профили действий канала для обычной передачи, отсутствия ответа, Major Incident и policy blocked;
+  - блок `5. Решение и эскалация` задает только условия решения, а профиль действия выбирается автоматически по `event_type` канала.
+- Блок `5. Решение и эскалация`:
+  - условия передачи выбираются чекбоксами в `handoff_conditions`;
+  - состав пакета передачи выбирается чекбоксами в `handoff_package`;
+  - старые поля `l2_conditions` и `escalation_package` не поддерживаются.
+- Блок `3. ReAct-планирование`:
+  - группы действий выбираются чекбоксами в `allowed_react_action_groups`;
+  - стоп-условия выбираются чекбоксами в `stop_conditions`;
+  - старое поле `allowed_tool_classes` не поддерживается.
 - Защитные endpoint'ы для n8n restart/cancel без реального исполнения в локальном MVP.
 - Раздел `Модели` переделан в реальную форму настройки:
   - активное подключение LiteLLM: базовые `vLLM CPU` и `OpenAI API` плюс пользовательские подключения;
@@ -65,6 +81,7 @@
 - `contracts/config/model-routing.schema.json`.
 - `contracts/config/n8n-workflow-catalog.schema.json`.
 - `contracts/config/n8n-workflow-catalog.json`.
+- `contracts/config/interaction-channels.schema.json`.
 
 ## Новые Admin API
 
@@ -89,6 +106,7 @@
 - `prompts`: `prompts.read` / `prompts.manage`.
 - `model_routing`: `models.read` / `models.manage`.
 - `n8n_workflows`: `tools.read` / `tools.manage`.
+- `interaction_channels`: `workflow.read` / `workflow.manage`.
 - `service_scenarios`, `slot_schemas`, `classification_routes`, `orchestrator_policy`, `escalation_policies`: `workflow.read` / `workflow.manage`.
 - `attribute_resolution_profiles`: `workflow.read` / `workflow.manage`.
 - `tool_launch_matrix`: `tools.read` / `tools.manage`.
@@ -103,6 +121,7 @@
 - каталог состояний рабочего процесса;
 - правила переходов рабочего процесса;
 - каталог workflow n8n;
+- каналы взаимодействия;
 - представление каталога промптов;
 - представление маршрутизации моделей.
 
@@ -113,6 +132,16 @@
 ```bash
 PYTHON=.venv/bin/python make stage13-check
 ./scripts/stage13-smoke.sh
+PYTHON=.venv/bin/python make stage13_5-check
+./scripts/stage13_5-smoke.sh
+PYTHON=.venv/bin/python make stage13_6-check
+./scripts/stage13_6-smoke.sh
+PYTHON=.venv/bin/python make stage13_7-check
+./scripts/stage13_7-smoke.sh
+PYTHON=.venv/bin/python make stage13_8-check
+./scripts/stage13_8-smoke.sh
+PYTHON=.venv/bin/python make stage13_9-check
+./scripts/stage13_9-smoke.sh
 ```
 
 ## URL

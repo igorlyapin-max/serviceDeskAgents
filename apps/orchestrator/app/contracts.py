@@ -160,6 +160,9 @@ class ContractRegistry:
             "n8n_workflow_catalog": self.contracts_root
             / "config"
             / "n8n-workflow-catalog.schema.json",
+            "interaction_channels": self.contracts_root
+            / "config"
+            / "interaction-channels.schema.json",
             "attribute_resolution_profiles": self.contracts_root
             / "config"
             / "attribute-resolution-profiles.schema.json",
@@ -230,10 +233,6 @@ class ContractRegistry:
         self._validate_n8n_workflow_catalog()
 
     def _validate_tool_catalog_references(self) -> None:
-        allowed_tool_names = set(
-            self.entries["proposed_action"]
-            .schema["properties"]["tool_name"]["enum"]
-        )
         endpoint_by_id = {
             endpoint["endpoint_id"]: endpoint
             for endpoint in self.integration_endpoint_catalog["endpoints"]
@@ -252,12 +251,14 @@ class ContractRegistry:
         for endpoint_id in duplicate_endpoint_ids:
             errors.append(f"Дублируется endpoint_id: {endpoint_id}")
 
-        missing_tool_names = sorted(allowed_tool_names - {
-            tool["tool_name"]
-            for tool in self.tool_catalog["tools"]
-        })
-        for tool_name in missing_tool_names:
-            errors.append(f"Нет записи tool_catalog для proposed-action tool: {tool_name}")
+        for endpoint in self.integration_endpoint_catalog["endpoints"]:
+            for operation_id, operation in endpoint["operations"].items():
+                try:
+                    Draft202012Validator.check_schema(operation["request_schema"])
+                except SchemaError as error:
+                    errors.append(
+                        f"{endpoint['endpoint_id']}/{operation_id} request_schema невалидна: {error.message}"
+                    )
 
         seen_tool_names: set[str] = set()
         for tool in self.tool_catalog["tools"]:
@@ -265,9 +266,6 @@ class ContractRegistry:
             if tool_name in seen_tool_names:
                 errors.append(f"Дублируется tool_name: {tool_name}")
             seen_tool_names.add(tool_name)
-
-            if tool_name not in allowed_tool_names:
-                errors.append(f"tool_name не разрешен схемой proposed-action: {tool_name}")
 
             try:
                 Draft202012Validator.check_schema(tool["parameters_schema"])
@@ -290,6 +288,15 @@ class ContractRegistry:
                         f"{tool_name} ссылается на неизвестный operation_id "
                         f"{binding['operation_id']} для endpoint {binding['endpoint_id']}"
                     )
+                    continue
+                operation = endpoint["operations"][binding["operation_id"]]
+                mapping = binding.get("parameter_mapping", {})
+                for required_parameter in operation["request_schema"].get("required", []):
+                    if required_parameter not in mapping:
+                        errors.append(
+                            f"{tool_name} не заполняет обязательный параметр операции "
+                            f"{binding['endpoint_id']}/{binding['operation_id']}: {required_parameter}"
+                        )
 
         if errors:
             raise ContractValidationError("tool_catalog", errors)
@@ -373,18 +380,26 @@ class ContractRegistry:
         for workflow_id in self._duplicates(workflow_ids):
             errors.append(f"Дублируется workflow_id: {workflow_id}")
 
-        endpoint_ids = {
-            endpoint["endpoint_id"]
+        endpoint_by_id = {
+            endpoint["endpoint_id"]: endpoint
             for endpoint in self.integration_endpoint_catalog["endpoints"]
         }
         for workflow in self.n8n_workflow_catalog["workflows"]:
-            if workflow["endpoint_id"] not in endpoint_ids:
+            endpoint = endpoint_by_id.get(workflow["endpoint_id"])
+            if not endpoint:
                 errors.append(
                     f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный endpoint_id: "
                     f"{workflow['endpoint_id']}"
                 )
+            else:
+                for operation_id in workflow.get("operations", []):
+                    if operation_id not in endpoint["operations"]:
+                        errors.append(
+                            f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестную operation "
+                            f"{operation_id} для endpoint {workflow['endpoint_id']}"
+                        )
             callback_endpoint_id = workflow.get("callback_endpoint_id")
-            if callback_endpoint_id and callback_endpoint_id not in endpoint_ids:
+            if callback_endpoint_id and callback_endpoint_id not in endpoint_by_id:
                 errors.append(
                     f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный "
                     f"callback_endpoint_id: {callback_endpoint_id}"

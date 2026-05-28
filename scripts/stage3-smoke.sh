@@ -33,7 +33,7 @@ assert_scenario() {
   local scenario="$1"
   local expected_state="$2"
   local payload
-  payload="$(printf '{"user":"ivan","service":"billing-worker","environment":"test","description":"Smoke-проверка этапа 3: %s","priority":"p3","scenario":"%s"}' "${scenario}" "${scenario}")"
+  payload="$(printf '{"user":"ivan","service":"billing-worker","description":"Smoke-проверка этапа 3: %s","priority":"p3","scenario":"%s"}' "${scenario}" "${scenario}")"
 
   response="$(curl -fsS \
     -H "Content-Type: application/json" \

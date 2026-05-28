@@ -16,7 +16,6 @@ INDEX_PATH="${STAGE12_6_INDEX_PATH:-/tmp/servicedesk-stage12-6-knowledge-${PORT}
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
 SECURITY_AUTH_MODE="${SECURITY_AUTH_MODE:-dev_header}" \
 SECURITY_DEV_ACTOR="${SECURITY_DEV_ACTOR:-admin-1}" \
 SECURITY_RATE_LIMIT_PER_MINUTE="${SECURITY_RATE_LIMIT_PER_MINUTE:-600}" \
@@ -78,26 +77,35 @@ else:
 
 html = request("/admin", parse_json=False)
 assert "Разрешение атрибутов" in html, html[:300]
-assert "0. Разрешение атрибутов" in html, html[:300]
+assert "1. Разрешение атрибутов" in html, html[:300]
+assert "0. Слоты" in html, html[:300]
 assert "Сценарии обработки" in html, html[:300]
 js = request("/admin/static/app.js", parse_json=False)
 for expected in [
     "renderResolutionProfiles",
     "resolution-operation",
     "resolution-profile-editor",
-    "renderResolutionStepCard",
-    "resolution-step-add",
-    "resolution-step-remove",
     "attribute_resolution_profiles",
     "Способ заполнения",
+    "из данных обращения",
+    "Значение уже есть в текущем обращении",
+    "Путь в данных обращения",
+    "Инструкция для модели",
+    "Подсказка оператору",
     "Профиль разрешения атрибута",
-    "Фильтр истории заявок",
-    "Привязка параметров инструмента",
+    "Пороги внутри профиля",
+    "Признаки для поиска",
+    "Операция разрешения атрибута",
+    "Матрица решений",
+    "Как оценивать результат операции",
 ]:
     assert expected in js, expected
 for removed in [
     "Упорядоченные шаги, JSON",
     "Сводка профилей",
+    "renderResolutionStepCard",
+    "resolution-step-add",
+    "resolution-step-remove",
 ]:
     assert removed not in js, removed
 print("assets разрешения атрибутов проверены")
@@ -110,9 +118,11 @@ profiles_active = request("/admin/config/active/attribute_resolution_profiles")
 profiles = profiles_active["payload"]["profiles"]
 assert any(profile["profile_id"] == "profile.password_reset.login_from_ad" for profile in profiles), profiles_active
 login_profile = next(profile for profile in profiles if profile["profile_id"] == "profile.password_reset.login_from_ad")
-assert login_profile["steps"][0]["type"] == "llm_extract", login_profile
-assert any(step["type"] == "tool_call" and step["tool_name"] == "search_ad_users" for step in login_profile["steps"]), login_profile
-assert any(step["type"] == "clarification" for step in login_profile["steps"]), login_profile
+assert login_profile["candidate_source"]["tool_name"] == "search_ad_users", login_profile
+assert login_profile["result_policy"]["result_type"] == "list", login_profile
+assert login_profile["result_policy"]["list_path"] == "users", login_profile
+assert login_profile["decision_policy"]["single_result"] == "auto_fill_if_confident", login_profile
+assert any(attribute["attribute_id"] == "last_name" for attribute in login_profile["input_attributes"]), login_profile
 print("default-профили проверены")
 
 detail = request("/admin/scenarios/password_reset")
@@ -129,7 +139,9 @@ simulation = request(
     },
 )
 assert simulation["attribute_resolution"], simulation
-assert simulation["slot_values"]["user_login"]["status"] == "resolution_pending", simulation
+assert simulation["slot_values"]["user_login"]["status"] == "question_required", simulation
+assert simulation["slot_values"]["user_login"]["effective_confidence_thresholds"]["auto_accept_confidence"] >= 0.75, simulation
+assert simulation["resolution_state"]["user_login"]["effective_confidence_thresholds"]["operator_handoff_confidence"] == 0.5, simulation
 assert "user_login" in simulation["missing_slots"], simulation
 assert "должность" in simulation["next_question"].lower() or "табель" in simulation["next_question"].lower(), simulation
 print("dry-run разрешения атрибутов проверен")
@@ -187,7 +199,6 @@ temporary["profile_id"] = "profile.ui_temp.resolution"
 temporary["display_name"] = "Временный профиль UI"
 temporary["status"] = "draft"
 temporary["target_slot_id"] = "user_login"
-temporary["input_slots"] = []
 payload["profiles"].append(temporary)
 activate_config_payload("attribute_resolution_profiles", payload, "create")
 created = request("/admin/config/active/attribute_resolution_profiles")
@@ -215,8 +226,7 @@ assert not any(profile["profile_id"] == "profile.ui_temp.resolution" for profile
 print("создание, модификация и удаление профилей проверены")
 
 bad_payload = copy.deepcopy(deleted["payload"])
-first_tool_step = next(step for step in bad_payload["profiles"][0]["steps"] if step["type"] == "tool_call")
-first_tool_step["tool_name"] = "unknown_tool"
+bad_payload["profiles"][0]["candidate_source"]["tool_name"] = "unknown_tool"
 bad_draft = request(
     "/admin/config/drafts",
     {

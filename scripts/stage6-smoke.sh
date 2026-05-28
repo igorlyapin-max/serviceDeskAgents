@@ -14,7 +14,6 @@ LOG_FILE="${STAGE6_LOG_FILE:-/tmp/servicedesk-stage6-orchestrator.log}"
 STATE_DB="${STAGE6_STATE_DB:-/tmp/servicedesk-stage6-orchestrator-${PORT}-$$.sqlite}"
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
   "${PYTHON_BIN}" -m uvicorn apps.orchestrator.app.main:app --host "${HOST}" --port "${PORT}" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 
@@ -73,7 +72,6 @@ ticket = {
     "ticket_id": "stage6-approve-ticket",
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "restart service through runbook",
     "priority": "p3",
     "scenario": "runbook",
@@ -92,7 +90,7 @@ print("approval request ok: pending operator gate")
 stored_gate = request(f"/approvals/{approval_id}")
 assert stored_gate["gate_id"] == approval_id, stored_gate
 assert stored_gate["status"] == "pending", stored_gate
-assert stored_gate["action"]["parameters"]["runbook_name"] == "Restart-Service", stored_gate
+assert stored_gate["action"]["parameters"]["runbook_code"] == "restart_service", stored_gate
 print("approval lookup ok")
 
 action = analysis["ai_decision"]["proposed_actions"][0]
@@ -124,7 +122,7 @@ assert approved["workflow_state"]["id"] == "action_execution_succeeded", approve
 assert approved["gate"]["status"] == "succeeded", approved
 assert approved["gate"]["decision"]["actor_id"] == "operator-1", approved
 assert approved["tool_result"]["status"] == "success", approved
-assert approved["tool_result"]["endpoint_id"] == "mock.runbooks", approved
+assert approved["tool_result"]["endpoint_id"] == "mock", approved
 print("approval decision ok: mock runbook executed")
 
 duplicate = request(
@@ -147,7 +145,6 @@ reject_ticket = {
     "ticket_id": "stage6-reject-ticket",
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "restart service through runbook",
     "priority": "p3",
     "scenario": "runbook",

@@ -14,6 +14,7 @@
     "adapter_type",
     "operation_id",
     "parameters",
+    "operation_parameters",
     "execution_mode",
     "allowed",
     "approval_required",
@@ -79,6 +80,10 @@
       "maxLength": 200
     },
     "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "operation_parameters": {
       "type": "object",
       "additionalProperties": true
     },

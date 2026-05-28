@@ -17,7 +17,6 @@ CALLBACK_TOKEN="${INTEGRATION_CALLBACK_TOKEN:-dev-callback-token}"
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
-INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
 SECURITY_AUTH_MODE="${SECURITY_AUTH_MODE:-dev_header}" \
 SECURITY_DEV_ACTOR="${SECURITY_DEV_ACTOR:-admin-1}" \
 SECURITY_RATE_LIMIT_PER_MINUTE="${SECURITY_RATE_LIMIT_PER_MINUTE:-600}" \
@@ -141,7 +140,6 @@ ticket_input = {
     "ticket_id": "stage11-ticket",
     "user": "ivan",
     "service": "billing-worker",
-    "environment": "test",
     "description": "перезапустить billing-worker через ранбук",
     "priority": "p3",
     "scenario": "runbook",

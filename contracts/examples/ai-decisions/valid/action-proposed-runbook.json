@@ -6,7 +6,7 @@
     "confidence": 0.82
   },
   "operator_message": "Проверьте предложенный ранбук перед выполнением.",
-  "internal_reasoning_summary": "Симптомы совпадают с известной проблемой worker-сервиса в непроизводственной среде, где допустим перезапуск.",
+  "internal_reasoning_summary": "Симптомы совпадают с известной проблемой worker-компонента, где допустим запуск операции восстановления.",
   "citations": [],
   "proposed_actions": [
     {
@@ -14,13 +14,12 @@
       "action_id": "restart_billing_worker_test",
       "action_type": "action",
       "parameters": {
-        "runbook_name": "Restart-Service",
-        "service_name": "billing-worker",
-        "environment": "test"
+        "runbook_code": "restart_service",
+        "app_name": "billing-worker"
       },
       "reason": "Worker не обрабатывает задания, и этот ранбук является известным способом восстановления.",
       "risk_level": "medium",
-      "expected_effect": "Сервис billing-worker будет перезапущен в test.",
+      "expected_effect": "Для billing-worker будет запущена настроенная операция восстановления.",
       "requires_state_change": true,
       "risk_notes": "Перезапуск может прервать активные тестовые задания."
     }

@@ -100,7 +100,7 @@ docker compose down -v
 ## Критерии выхода этапа 0
 
 - `docker compose config` проходит.
-- `.env.example` задает обязательные environment variables.
+- `.env.example` задает обязательные переменные окружения.
 - Имена и порты основных сервисов задокументированы.
 - LLM runtime можно включить отдельно через профиль `llm`.
 
