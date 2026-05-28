@@ -57,6 +57,8 @@ await validateJsonFiles('contracts/workflow');
 await validateJsonFiles('contracts/knowledge');
 await validateJsonFiles('contracts/feedback');
 await validateJsonFiles('contracts/cases');
+await validateJsonFiles('contracts/security');
+await validateJsonFiles('contracts/config');
 
 await runCases({
   relativeDir: 'contracts/examples/ai-decisions/valid',
@@ -153,5 +155,66 @@ for (const source of knowledgeSourceCatalog.sources) {
   }
 }
 console.log('knowledge source catalog ok: source ids and connector metadata are valid');
+
+const securityCatalog = await readJson('contracts/security/security-catalog.json');
+const permissionIds = new Set();
+for (const permission of securityCatalog.permissions) {
+  if (permissionIds.has(permission.permission_id)) {
+    throw new Error(`duplicate permission_id: ${permission.permission_id}`);
+  }
+  permissionIds.add(permission.permission_id);
+}
+const roleIds = new Set();
+for (const role of securityCatalog.roles) {
+  if (roleIds.has(role.role_id)) {
+    throw new Error(`duplicate role_id: ${role.role_id}`);
+  }
+  roleIds.add(role.role_id);
+  for (const permissionId of role.permissions) {
+    if (!permissionIds.has(permissionId)) {
+      throw new Error(`role ${role.role_id} references unknown permission_id: ${permissionId}`);
+    }
+  }
+}
+const userIds = new Set();
+for (const user of securityCatalog.users) {
+  if (userIds.has(user.user_id)) {
+    throw new Error(`duplicate user_id: ${user.user_id}`);
+  }
+  userIds.add(user.user_id);
+  for (const roleId of user.roles) {
+    if (!roleIds.has(roleId)) {
+      throw new Error(`user ${user.user_id} references unknown role_id: ${roleId}`);
+    }
+  }
+}
+const secretIds = new Set();
+for (const secret of securityCatalog.secret_references) {
+  if (secretIds.has(secret.secret_id)) {
+    throw new Error(`duplicate secret_id: ${secret.secret_id}`);
+  }
+  secretIds.add(secret.secret_id);
+}
+console.log('security catalog ok: roles, users and secret references are valid');
+
+const n8nWorkflowCatalog = await readJson('contracts/config/n8n-workflow-catalog.json');
+const workflowIds = new Set();
+for (const workflow of n8nWorkflowCatalog.workflows) {
+  if (workflowIds.has(workflow.workflow_id)) {
+    throw new Error(`duplicate n8n workflow_id: ${workflow.workflow_id}`);
+  }
+  workflowIds.add(workflow.workflow_id);
+  if (!endpointById.has(workflow.endpoint_id)) {
+    throw new Error(
+      `n8n workflow ${workflow.workflow_id} references unknown endpoint_id: ${workflow.endpoint_id}`,
+    );
+  }
+  if (workflow.callback_endpoint_id && !endpointById.has(workflow.callback_endpoint_id)) {
+    throw new Error(
+      `n8n workflow ${workflow.workflow_id} references unknown callback_endpoint_id: ${workflow.callback_endpoint_id}`,
+    );
+  }
+}
+console.log('n8n workflow catalog ok: workflow mappings reference known endpoints');
 
 console.log('Contract validation completed.');

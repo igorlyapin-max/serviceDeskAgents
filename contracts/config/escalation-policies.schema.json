@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/escalation-policies.schema.json",
+  "title": "Escalation Policies",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policies"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "policies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policy_id",
+          "display_name",
+          "auto_close",
+          "waiting",
+          "l2_conditions",
+          "major_incident",
+          "escalation_package",
+          "user_notification_template"
+        ],
+        "properties": {
+          "policy_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "auto_close": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requires_tool_success",
+              "requires_user_confirmation"
+            ],
+            "properties": {
+              "requires_tool_success": {
+                "type": "boolean"
+              },
+              "requires_user_confirmation": {
+                "type": "boolean"
+              }
+            }
+          },
+          "waiting": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pause_sla",
+              "auto_close_after_hours"
+            ],
+            "properties": {
+              "pause_sla": {
+                "type": "boolean"
+              },
+              "auto_close_after_hours": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 168
+              }
+            }
+          },
+          "l2_conditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "two_tool_errors",
+                "iteration_limit",
+                "confidence_below_050",
+                "affected_users_threshold",
+                "policy_blocked"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "major_incident": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "affected_users_threshold",
+              "notify_on_call"
+            ],
+            "properties": {
+              "affected_users_threshold": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+              },
+              "notify_on_call": {
+                "type": "boolean"
+              }
+            }
+          },
+          "escalation_package": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "slots",
+                "react_history",
+                "tool_results",
+                "agent_hypothesis",
+                "sla_remaining",
+                "user_notification"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "user_notification_template": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    }
+  }
+}

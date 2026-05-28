@@ -157,3 +157,150 @@ PYTHON=.venv/bin/python make stage10-check
 - `POST /integrations/callbacks/{endpoint_id}`
 
 `POST /tickets/analyze` остается совместимым и создает запись кейса внутри.
+
+## Локальные команды этапа 10.5
+
+Запустить проверки основы Admin API и операций оценки:
+
+```bash
+PYTHON=.venv/bin/python make stage10_5-check
+```
+
+Запустить smoke-сценарии Admin API:
+
+```bash
+./scripts/stage10_5-smoke.sh
+```
+
+Этап 10.5 добавляет административные endpoint'ы:
+
+- `GET /admin/dashboard`
+- `GET /admin/knowledge/status`
+- `GET /admin/knowledge/sources`
+- `POST /admin/knowledge/rebuild`
+- `GET /admin/knowledge/chunks`
+- `POST /admin/knowledge/retrieval/test`
+- `GET /admin/catalog`
+- `GET /admin/models/config`
+- `POST /admin/evaluations/promote-feedback`
+- `POST /admin/evaluations/run`
+
+## Локальные команды этапа 11
+
+Запустить проверки RBAC, аудита и контрактов безопасности:
+
+```bash
+PYTHON=.venv/bin/python make stage11-check
+```
+
+Запустить smoke-сценарии основы безопасности:
+
+```bash
+./scripts/stage11-smoke.sh
+```
+
+Этап 11 добавляет endpoint'ы безопасности:
+
+- `GET /admin/security/session`
+- `GET /admin/security/catalog`
+- `GET /admin/security/secret-references`
+- `GET /admin/security/audit`
+- `GET /admin/security/audit/summary`
+
+Dev auth использует `X-ServiceDesk-Actor`. Если header не задан, применяется `SECURITY_DEV_ACTOR`, по умолчанию `admin-1`.
+
+Integration callback endpoint `POST /integrations/callbacks/{endpoint_id}` теперь требует `X-ServiceDesk-Callback-Token`, значение берется из `INTEGRATION_CALLBACK_TOKEN`.
+
+## Локальные команды этапа 12
+
+Запустить проверки MVP консоли администратора:
+
+```bash
+PYTHON=.venv/bin/python make stage12-check
+```
+
+Запустить smoke-сценарии интерфейса администратора и Admin API:
+
+```bash
+./scripts/stage12-smoke.sh
+```
+
+Этап 12 добавляет интерфейс администратора:
+
+- `GET /admin`
+- `GET /admin/static/app.js`
+- `GET /admin/static/styles.css`
+
+Новые Admin API:
+
+- `GET /admin/prompts/catalog`
+- `GET /admin/feedback`
+- `GET /admin/evaluations/runs`
+
+Откройте `http://127.0.0.1:18088/admin`.
+
+## Локальные команды этапа 12.5
+
+Запустить проверки сценарной модели оркестратора:
+
+```bash
+PYTHON=.venv/bin/python make stage12_5-check
+```
+
+Запустить smoke-сценарии сценарной консоли:
+
+```bash
+./scripts/stage12_5-smoke.sh
+```
+
+Этап 12.5 добавляет Admin API:
+
+- `GET /admin/scenarios`
+- `GET /admin/scenarios/{scenario_id}`
+- `POST /admin/scenarios/{scenario_id}/simulate`
+
+В интерфейсе администратора используйте раздел `Сценарии`.
+
+## Локальные команды этапа 12.7
+
+Запустить проверки mini-workflow разрешения слота:
+
+```bash
+PYTHON=.venv/bin/python make stage12_7-check
+```
+
+Запустить smoke-сценарии неоднозначности, промежуточных атрибутов и dry-run состояния:
+
+```bash
+./scripts/stage12_7-smoke.sh
+```
+
+Этап 12.7 расширяет `Сценарии обработки -> 0. Разрешение атрибутов`: профиль заполняет слот как mini-workflow с переходом при неоднозначности, промежуточными атрибутами, вопросом уточнения и пакетом передачи Л1.
+
+## Локальные команды этапа 13
+
+Запустить проверки реестра конфигурации и расширенной консоли администратора:
+
+```bash
+PYTHON=.venv/bin/python make stage13-check
+```
+
+Запустить smoke-сценарии draft/validate/regression/activate/rollback:
+
+```bash
+./scripts/stage13-smoke.sh
+```
+
+Этап 13 добавляет Admin API:
+
+- `GET /admin/config/domains`
+- `GET /admin/config/active/{domain}`
+- `POST /admin/config/drafts`
+- `POST /admin/config/drafts/{draft_id}/validate`
+- `POST /admin/config/drafts/{draft_id}/regression`
+- `POST /admin/config/drafts/{draft_id}/activate`
+- `GET /admin/config/versions`
+- `POST /admin/config/versions/{version_id}/rollback`
+- `GET /admin/n8n/workflows`
+
+В интерфейсе администратора используйте раздел `Изменения конфигурации`.

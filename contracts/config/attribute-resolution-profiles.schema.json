@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/attribute-resolution-profiles.schema.json",
+  "title": "Attribute Resolution Profiles",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profiles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "profile_id",
+          "display_name",
+          "status",
+          "description",
+          "target_slot_id",
+          "input_slots",
+          "output_slots",
+          "steps",
+          "fallback",
+          "confidence_threshold",
+          "max_attempts",
+          "audit_required",
+          "log_required"
+        ],
+        "properties": {
+          "profile_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "planned",
+              "disabled"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1200
+          },
+          "target_slot_id": {
+            "$ref": "#/$defs/id"
+          },
+          "resolution_mode": {
+            "type": "string",
+            "enum": [
+              "sequential",
+              "branching"
+            ]
+          },
+          "attempt_scope": {
+            "type": "string",
+            "enum": [
+              "profile",
+              "step"
+            ]
+          },
+          "input_slots": {
+            "$ref": "#/$defs/id_list"
+          },
+          "output_slots": {
+            "$ref": "#/$defs/id_list"
+          },
+          "intermediate_attributes": {
+            "$ref": "#/$defs/id_list"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/$defs/step"
+            }
+          },
+          "fallback": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "ask_user",
+                  "operator_handoff",
+                  "escalate",
+                  "leave_empty"
+                ]
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600
+              }
+            }
+          },
+          "confidence_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "confidence_thresholds": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "auto_fill": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "clarification": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "operator_handoff": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "ambiguity_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "clarification",
+                  "operator_handoff",
+                  "escalate",
+                  "leave_empty"
+                ]
+              },
+              "candidate_count_attribute": {
+                "$ref": "#/$defs/id"
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 600
+              },
+              "ask_for_attributes": {
+                "$ref": "#/$defs/id_list"
+              }
+            }
+          },
+          "operator_handoff_package": {
+            "$ref": "#/$defs/id_list"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "audit_required": {
+            "type": "boolean"
+          },
+          "log_required": {
+            "type": "boolean"
+          },
+          "extensions": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "id_list": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "uniqueItems": true
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "type",
+        "display_name"
+      ],
+      "properties": {
+        "step_id": {
+          "$ref": "#/$defs/id"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "llm_extract",
+            "rag_search",
+            "case_read",
+            "tool_call",
+            "ticket_history_search",
+            "condition",
+            "clarification",
+            "fill_slot",
+            "operator_handoff",
+            "escalate"
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "inputs": {
+          "$ref": "#/$defs/id_list"
+        },
+        "outputs": {
+          "$ref": "#/$defs/id_list"
+        },
+        "tool_name": {
+          "$ref": "#/$defs/id"
+        },
+        "endpoint_profile": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "parameter_bindings": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(slot|attribute|constant|secret|case|context):.+$"
+          }
+        },
+        "condition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "ambiguity_condition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "clarification_question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "ask_for_attributes": {
+          "$ref": "#/$defs/id_list"
+        },
+        "fill_slot_id": {
+          "$ref": "#/$defs/id"
+        },
+        "from_attribute": {
+          "$ref": "#/$defs/id"
+        },
+        "history_filter": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "on_success_step": {
+          "$ref": "#/$defs/id"
+        },
+        "on_failure_step": {
+          "$ref": "#/$defs/id"
+        },
+        "on_ambiguous_step": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Администратор AI ServiceDesk</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/admin/static/styles.css">
+  </head>
+  <body>
+    <div class="admin-shell">
+      <aside class="sidebar" aria-label="Разделы администратора">
+        <div class="brand">
+          <div class="brand-title">AI ServiceDesk</div>
+          <div class="brand-subtitle">Консоль администратора</div>
+        </div>
+        <nav class="nav-list">
+          <button class="nav-item active" type="button" data-view="dashboard">Панель обзора</button>
+          <div class="nav-group" aria-label="Сценарии обработки">
+            <div class="nav-group-title">Сценарии обработки</div>
+            <div class="nav-sublist">
+              <button class="nav-item nav-subitem" type="button" data-view="scenarios">Сценарии</button>
+              <button class="nav-item nav-subitem" type="button" data-view="resolution">0. Разрешение атрибутов</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioSlots">1. Слоты</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioClassification">2. Классификация и маршрут</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioReact">3. ReAct-планирование</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioTools">4. Инструменты и матрица запуска</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioEscalation">5. Решение и эскалация</button>
+              <button class="nav-item nav-subitem" type="button" data-view="scenarioPrompts">6. Промпты</button>
+            </div>
+          </div>
+          <button class="nav-item" type="button" data-view="knowledge">База знаний</button>
+          <button class="nav-item" type="button" data-view="tools">Инструменты и интеграции</button>
+          <button class="nav-item" type="button" data-view="workflow">Рабочий процесс</button>
+          <button class="nav-item" type="button" data-view="models">Модели</button>
+          <button class="nav-item" type="button" data-view="quality">Контроль качества</button>
+          <button class="nav-item" type="button" data-view="audit">Аудит</button>
+          <button class="nav-item" type="button" data-view="security">Безопасность</button>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="viewTitle">Панель обзора</h1>
+            <div class="subhead" id="apiStatus">API ожидается</div>
+          </div>
+          <div class="admin-actions">
+            <label for="actorId">Инициатор</label>
+            <input id="actorId" value="admin-1" autocomplete="off">
+            <button id="refreshButton" type="button">Обновить</button>
+          </div>
+        </header>
+
+        <section id="notice" class="notice" hidden></section>
+        <section id="viewContent" class="view-content" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <script src="/admin/static/app.js?v=stage13_model_secret_input"></script>
+  </body>
+</html>

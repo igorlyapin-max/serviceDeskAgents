@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/config-version.schema.json",
+  "title": "Platform Config Version",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "version_id",
+    "domain",
+    "payload",
+    "source_draft_id",
+    "activated_by",
+    "activated_at",
+    "validation",
+    "regression"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "version_id": {
+      "type": "string",
+      "pattern": "^cfgver-[a-f0-9]{12}$"
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "payload": {
+      "type": "object"
+    },
+    "source_draft_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "previous_version_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "activated_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "activated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "regression": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

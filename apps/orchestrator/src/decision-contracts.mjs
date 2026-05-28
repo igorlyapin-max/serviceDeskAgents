@@ -7,6 +7,7 @@ const DECISION_TYPES = new Set([
 
 const TOOL_NAMES = new Set([
   'check_zabbix_status',
+  'search_ad_users',
   'query_cmdb_object',
   'get_service_owner',
   'search_known_incidents',

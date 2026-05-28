@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/security/security-catalog.schema.json",
+  "title": "Security Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "auth_mode_default",
+    "permissions",
+    "roles",
+    "users",
+    "secret_references"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "auth_mode_default": {
+      "type": "string",
+      "enum": [
+        "dev_header",
+        "disabled"
+      ]
+    },
+    "permissions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "permission_id",
+          "description"
+        ],
+        "properties": {
+          "permission_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[a-z][a-z0-9_.]*$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role_id",
+          "description",
+          "permissions"
+        ],
+        "properties": {
+          "role_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "display_name",
+          "roles",
+          "enabled"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "uniqueItems": true
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "secret_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "secret_id",
+          "secret_type",
+          "storage",
+          "reference",
+          "description"
+        ],
+        "properties": {
+          "secret_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[a-z][a-z0-9_.-]*$"
+          },
+          "secret_type": {
+            "type": "string",
+            "enum": [
+              "api_key",
+              "webhook_token",
+              "credential_reference",
+              "vault_reference"
+            ]
+          },
+          "storage": {
+            "type": "string",
+            "enum": [
+              "env",
+              "vault",
+              "external"
+            ]
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "uniqueItems": true
+          },
+          "rotation_required": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

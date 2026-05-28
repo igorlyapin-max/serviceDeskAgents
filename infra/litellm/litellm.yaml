@@ -4,6 +4,11 @@ model_list:
       model: os.environ/LITELLM_UPSTREAM_MODEL
       api_base: os.environ/VLLM_BASE_URL
       api_key: unused
+  - model_name: openai-primary
+    litellm_params:
+      model: os.environ/OPENAI_MODEL
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

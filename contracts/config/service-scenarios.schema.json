@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/service-scenarios.schema.json",
+  "title": "Service Scenarios",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scenarios"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scenario_id",
+          "display_name",
+          "status",
+          "description",
+          "slot_schema_id",
+          "classification_route_id",
+          "orchestrator_policy_id",
+          "tool_launch_matrix_id",
+          "prompt_pack_id",
+          "escalation_policy_id"
+        ],
+        "properties": {
+          "scenario_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "planned",
+              "disabled"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1200
+          },
+          "slot_schema_id": {
+            "$ref": "#/$defs/id"
+          },
+          "classification_route_id": {
+            "$ref": "#/$defs/id"
+          },
+          "orchestrator_policy_id": {
+            "$ref": "#/$defs/id"
+          },
+          "tool_launch_matrix_id": {
+            "$ref": "#/$defs/id"
+          },
+          "prompt_pack_id": {
+            "$ref": "#/$defs/id"
+          },
+          "escalation_policy_id": {
+            "$ref": "#/$defs/id"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/id"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    }
+  }
+}

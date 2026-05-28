@@ -163,6 +163,56 @@ class ActionGateStore:
             self.contracts.require_valid("action_gate_record", record)
         return records
 
+    def list_all(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select record_json
+                from action_gates
+                order by created_at desc, gate_id desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        records = [json.loads(row["record_json"]) for row in rows]
+        for record in records:
+            self.contracts.require_valid("action_gate_record", record)
+        return records
+
+    def summary(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            status_rows = connection.execute(
+                """
+                select status, count(*) as count
+                from action_gates
+                group by status
+                order by status
+                """
+            ).fetchall()
+            type_rows = connection.execute(
+                """
+                select gate_type, count(*) as count
+                from action_gates
+                group by gate_type
+                order by gate_type
+                """
+            ).fetchall()
+            tool_rows = connection.execute(
+                """
+                select tool_name, count(*) as count
+                from action_gates
+                group by tool_name
+                order by tool_name
+                """
+            ).fetchall()
+            total = connection.execute("select count(*) as count from action_gates").fetchone()
+        return {
+            "total": int(total["count"] if total else 0),
+            "by_status": self._counts(status_rows, "status"),
+            "by_gate_type": self._counts(type_rows, "gate_type"),
+            "by_tool": self._counts(tool_rows, "tool_name"),
+        }
+
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -201,3 +251,10 @@ class ActionGateStore:
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:
         return json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _counts(rows: list[sqlite3.Row], key: str) -> dict[str, int]:
+        return {
+            str(row[key]): int(row["count"])
+            for row in rows
+        }

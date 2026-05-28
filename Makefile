@@ -117,6 +117,81 @@ stage10-check:
 stage10-smoke:
 	./scripts/stage10-smoke.sh
 
+.PHONY: stage10_5-check
+stage10_5-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage10_5-smoke
+stage10_5-smoke:
+	./scripts/stage10_5-smoke.sh
+
+.PHONY: stage11-check
+stage11-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage11-smoke
+stage11-smoke:
+	./scripts/stage11-smoke.sh
+
+.PHONY: stage12-check
+stage12-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage12-smoke
+stage12-smoke:
+	./scripts/stage12-smoke.sh
+
+.PHONY: stage12_5-check
+stage12_5-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage12_5-smoke
+stage12_5-smoke:
+	./scripts/stage12_5-smoke.sh
+
+.PHONY: stage12_6-check
+stage12_6-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage12_6-smoke
+stage12_6-smoke:
+	./scripts/stage12_6-smoke.sh
+
+.PHONY: stage12_7-check
+stage12_7-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage12_7-smoke
+stage12_7-smoke:
+	./scripts/stage12_7-smoke.sh
+
+.PHONY: stage13-check
+stage13-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+
+.PHONY: stage13-smoke
+stage13-smoke:
+	./scripts/stage13-smoke.sh
+
 .PHONY: stage0-ps
 stage0-ps:
 	$(COMPOSE) ps

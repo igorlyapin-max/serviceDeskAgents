@@ -150,7 +150,7 @@ class ToolRegistry:
         if action["action_type"] != tool["action_type"]:
             errors.append(
                 f"{action['tool_name']} action_type {action['action_type']} "
-                f"does not match catalog action_type {tool['action_type']}"
+                f"не совпадает с action_type в каталоге {tool['action_type']}"
             )
 
         validator = Draft202012Validator(tool["parameters_schema"])
@@ -166,7 +166,7 @@ class ToolRegistry:
         allowed_environments = tool["policy"]["allowed_environments"]
         if environment and environment not in allowed_environments:
             errors.append(
-                f"parameters.environment {environment} is not allowed for {action['tool_name']}"
+                f"parameters.environment {environment} не разрешен для {action['tool_name']}"
             )
 
         max_risk_level = tool["policy"]["max_risk_level"]
@@ -176,7 +176,7 @@ class ToolRegistry:
             and RISK_ORDER.index(risk_level) > RISK_ORDER.index(max_risk_level)
         ):
             errors.append(
-                f"risk_level {risk_level} exceeds catalog max_risk_level {max_risk_level}"
+                f"risk_level {risk_level} превышает catalog max_risk_level {max_risk_level}"
             )
 
         if errors:

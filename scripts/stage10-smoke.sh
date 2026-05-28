@@ -13,10 +13,12 @@ BASE_URL="http://${HOST}:${PORT}"
 LOG_FILE="${STAGE10_LOG_FILE:-/tmp/servicedesk-stage10-orchestrator.log}"
 STATE_DB="${STAGE10_STATE_DB:-/tmp/servicedesk-stage10-orchestrator-${PORT}-$$.sqlite}"
 INDEX_PATH="${STAGE10_INDEX_PATH:-/tmp/servicedesk-stage10-knowledge-${PORT}-$$.json}"
+CALLBACK_TOKEN="${INTEGRATION_CALLBACK_TOKEN:-dev-callback-token}"
 
 ORCHESTRATOR_STATE_DB="${STATE_DB}" \
 KNOWLEDGE_INDEX_PATH="${INDEX_PATH}" \
 INTEGRATION_ENDPOINT_PROFILE="${INTEGRATION_ENDPOINT_PROFILE:-mock}" \
+INTEGRATION_CALLBACK_TOKEN="${CALLBACK_TOKEN}" \
   "${PYTHON_BIN}" -m uvicorn apps.orchestrator.app.main:app --host "${HOST}" --port "${PORT}" >"${LOG_FILE}" 2>&1 &
 SERVER_PID="$!"
 
@@ -25,7 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BASE_URL="${BASE_URL}" "${PYTHON_BIN}" - <<'PY'
+BASE_URL="${BASE_URL}" INTEGRATION_CALLBACK_TOKEN="${CALLBACK_TOKEN}" "${PYTHON_BIN}" - <<'PY'
 import json
 import os
 import time
@@ -33,9 +35,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 base_url = os.environ["BASE_URL"]
+callback_headers = {"X-ServiceDesk-Callback-Token": os.environ["INTEGRATION_CALLBACK_TOKEN"]}
 
 
-def request(path, payload=None, expected_status=200, parse_json=True):
+def request(path, payload=None, expected_status=200, parse_json=True, headers_extra=None):
     data = None
     method = "GET"
     headers = {}
@@ -43,6 +46,8 @@ def request(path, payload=None, expected_status=200, parse_json=True):
         data = json.dumps(payload).encode("utf-8")
         method = "POST"
         headers["Content-Type"] = "application/json"
+    if headers_extra:
+        headers.update(headers_extra)
     req = Request(f"{base_url}{path}", data=data, headers=headers, method=method)
     try:
         with urlopen(req, timeout=5) as response:
@@ -129,6 +134,7 @@ mismatch = request(
         },
     },
     expected_status=400,
+    headers_extra=callback_headers,
 )
 assert mismatch["detail"]["code"] == "endpoint_id_mismatch", mismatch
 print("callback endpoint mismatch rejected ok")
@@ -173,6 +179,7 @@ callback = request(
             "smoke": "stage10"
         },
     },
+    headers_extra=callback_headers,
 )
 assert callback["accepted"] is True, callback
 assert callback["case"]["case_id"] == case_id, callback

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/classification-routes.schema.json",
+  "title": "Classification Routes",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "routes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "routes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "route_id",
+          "display_name",
+          "priority",
+          "route",
+          "action",
+          "workflow_state_id",
+          "confidence",
+          "rules"
+        ],
+        "properties": {
+          "route_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "P2",
+              "P3",
+              "P4"
+            ]
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "auto_agent",
+              "agent_l1",
+              "l1_hint",
+              "l2_major_incident",
+              "approver"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
+          },
+          "workflow_state_id": {
+            "$ref": "#/$defs/id"
+          },
+          "confidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rules_min",
+              "llm_min",
+              "human_handoff_below"
+            ],
+            "properties": {
+              "rules_min": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "llm_min": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "human_handoff_below": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          "rules": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "keywords"
+            ],
+            "properties": {
+              "keywords": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "uniqueItems": true
+              },
+              "negative_keywords": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "uniqueItems": true
+              }
+            }
+          },
+          "top_categories_on_low_confidence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    }
+  }
+}

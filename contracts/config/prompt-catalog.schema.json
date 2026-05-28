@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/prompt-catalog.schema.json",
+  "title": "Prompt Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "storage",
+    "activation_mode",
+    "prompts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "storage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "activation_mode": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "prompts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "prompt_id",
+          "prompt_type",
+          "display_name",
+          "active_version",
+          "status",
+          "description"
+        ],
+        "properties": {
+          "prompt_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[a-z][a-z0-9_.-]*$"
+          },
+          "prompt_type": {
+            "type": "string",
+            "enum": [
+              "system",
+              "classification",
+              "escalation",
+              "summarization",
+              "tool_selection"
+            ]
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "active_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "template": {
+            "type": "string",
+            "maxLength": 20000
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

@@ -179,6 +179,62 @@ class CaseStore:
         self.contracts.require_valid("case_record", record)
         return record
 
+    def list_all(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select record_json
+                from cases
+                order by created_at desc, case_id desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        records = [json.loads(row["record_json"]) for row in rows]
+        for record in records:
+            self.contracts.require_valid("case_record", record)
+        return records
+
+    def summary(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            total = connection.execute("select count(*) as count from cases").fetchone()
+            state_rows = connection.execute(
+                """
+                select workflow_state_id, count(*) as count
+                from cases
+                group by workflow_state_id
+                order by workflow_state_id
+                """
+            ).fetchall()
+            event_rows = connection.execute(
+                """
+                select event_type, count(*) as count
+                from case_events
+                group by event_type
+                order by event_type
+                """
+            ).fetchall()
+        records = self.list_all(limit=10000)
+        terminal_count = sum(
+            1
+            for record in records
+            if record.get("current_workflow_state", {}).get("terminal") is True
+        )
+        tool_status_counts: dict[str, int] = {}
+        for record in records:
+            for result in record.get("tool_results", []):
+                status = str(result.get("status") or "unknown")
+                tool_status_counts[status] = tool_status_counts.get(status, 0) + 1
+
+        return {
+            "total": int(total["count"] if total else 0),
+            "terminal": terminal_count,
+            "non_terminal": max(int(total["count"] if total else 0) - terminal_count, 0),
+            "by_workflow_state": self._counts(state_rows, "workflow_state_id"),
+            "by_event_type": self._counts(event_rows, "event_type"),
+            "tool_results_by_status": tool_status_counts,
+        }
+
     def by_correlation(self, key: str, value: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -338,6 +394,8 @@ class CaseStore:
             return None
 
         now = utc_now()
+        if feedback["feedback_id"] in record.get("feedback_ids", []):
+            return self.require(record["case_id"])
         self._append_unique(record["feedback_ids"], feedback["feedback_id"])
         record["updated_at"] = now
         self._save(record)
@@ -658,3 +716,10 @@ class CaseStore:
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:
         return json.dumps(record, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _counts(rows: list[sqlite3.Row], key: str) -> dict[str, int]:
+        return {
+            str(row[key]): int(row["count"])
+            for row in rows
+        }

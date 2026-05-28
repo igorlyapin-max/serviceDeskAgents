@@ -8,13 +8,30 @@ const state = {
   casePoll: null,
   knowledge: null,
   activeTab: 'rag',
+  scenarios: [],
+  scenarioId: 'password_reset',
+  scenarioDetail: null,
+  scenarioSimulation: null,
+  dryRunEnabled: true,
+  providedSlots: {},
+  scenarioSimulationTimer: null,
 };
 
 const elements = {
   apiStatus: document.getElementById('apiStatus'),
   operatorId: document.getElementById('operatorId'),
   ticketForm: document.getElementById('ticketForm'),
+  ticketText: document.getElementById('ticketText'),
+  scenarioSelect: document.getElementById('scenarioSelect'),
+  dryRunToggle: document.getElementById('dryRunToggle'),
+  loadScenarioButton: document.getElementById('loadScenarioButton'),
+  enrichButton: document.getElementById('enrichButton'),
+  resetSlotsButton: document.getElementById('resetSlotsButton'),
   analyzeButton: document.getElementById('analyzeButton'),
+  questionView: document.getElementById('questionView'),
+  slotAnswers: document.getElementById('slotAnswers'),
+  scenarioSummary: document.getElementById('scenarioSummary'),
+  stepsView: document.getElementById('stepsView'),
   rebuildButton: document.getElementById('rebuildButton'),
   copyButton: document.getElementById('copyButton'),
   summaryView: document.getElementById('summaryView'),
@@ -33,11 +50,81 @@ const elements = {
   tabs: Array.from(document.querySelectorAll('.tab')),
 };
 
-function compactObject(value) {
-  return Object.fromEntries(
-    Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ''),
-  );
-}
+const visibleLabels = {
+  active: 'активно',
+  auto: 'авто',
+  auto_agent: 'автоагент',
+  auto_fill_candidate: 'кандидат автозаполнения',
+  blocked: 'заблокировано',
+  continue_slot_filling: 'нужно обогащение',
+  draft: 'черновик',
+  error: 'ошибка',
+  failed: 'ошибка',
+  incomplete: 'неполно',
+  info: 'информация',
+  l1_hint: 'Л1 + подсказка',
+  l2_major_incident: 'Л2 + Major Incident',
+  missing: 'требуется ответ',
+  operator_approval: 'согласование оператора',
+  operator_handoff: 'передать оператору',
+  operator_manual: 'ручное заполнение оператором',
+  optional: 'необязательный',
+  p1: 'P1',
+  p2: 'P2',
+  p3: 'P3',
+  p4: 'P4',
+  partial: 'частично',
+  pending: 'ожидает',
+  planned: 'запланировано',
+  provided: 'заполнено',
+  ready: 'готово',
+  ready_for_react: 'готово к ReAct',
+  required: 'обязательный',
+  resolution_pending: 'ожидает разрешения',
+  question_required: 'нужно уточнение',
+  resolution_profile: 'профиль разрешения',
+  dry_run_simulated: 'смоделировано',
+  success: 'успешно',
+  unavailable: 'недоступно',
+  user_question: 'вопрос пользователю',
+  case: 'текущий кейс',
+  llm_extraction: 'извлечение моделью',
+  llm_extract: 'извлечение из текста',
+  rag_search: 'поиск в базе знаний',
+  case_read: 'чтение кейса',
+  tool_call: 'вызов инструмента',
+  ticket_history_search: 'поиск по истории',
+  condition: 'условие',
+  clarification: 'уточнение',
+  fill_slot: 'заполнение слота',
+  operator_handoff: 'передача Л1',
+  escalate: 'эскалация',
+};
+
+const priorityGroupLabels = {
+  who: 'кто',
+  what: 'что',
+  when: 'когда',
+  where: 'где',
+  context: 'контекст',
+};
+
+const fillMethodLabels = {
+  user_question: 'вопрос пользователю',
+  case: 'текущий кейс',
+  llm_extraction: 'извлечение моделью',
+  resolution_profile: 'профиль разрешения',
+  operator_manual: 'ручное заполнение оператором',
+};
+
+const stopConditionLabels = {
+  user_confirmed_success: 'пользователь подтвердил успех',
+  waiting_for_user: 'ожидание пользователя',
+  tool_errors_limit: 'лимит ошибок инструментов',
+  iteration_limit: 'лимит итераций',
+  low_confidence: 'низкая уверенность',
+  major_incident: 'Major Incident',
+};
 
 const eventTypeLabels = {
   case_created: 'Кейс создан',
@@ -47,25 +134,41 @@ const eventTypeLabels = {
   tool_result_recorded: 'Результат инструмента записан',
   integration_callback_received: 'Получен callback интеграции',
   feedback_recorded: 'Обратная связь записана',
+  evaluation_result_recorded: 'Результат оценки записан',
 };
 
 const actorTypeLabels = {
   system: 'система',
   system_policy: 'политика',
   operator: 'оператор',
+  admin: 'администратор',
   endpoint: 'endpoint',
   callback: 'callback',
 };
 
+function compactObject(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ''),
+  );
+}
+
+function apiHeaders(extra = {}) {
+  const actorId = elements.operatorId.value.trim() || 'operator-1';
+  return {
+    'Content-Type': 'application/json',
+    'X-ServiceDesk-Actor': actorId,
+    'X-ServiceDesk-Session': `operator-ui:${actorId}`,
+    ...extra,
+  };
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
     ...options,
+    headers: apiHeaders(options.headers || {}),
   });
-  const body = await response.json().catch(() => ({}));
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message = body.detail?.message || body.detail?.errors?.join('; ') || response.statusText;
     throw new Error(message);
@@ -73,21 +176,19 @@ async function api(path, options = {}) {
   return body;
 }
 
-function formPayload() {
-  const data = new FormData(elements.ticketForm);
-  return compactObject({
-    user: data.get('user'),
-    service: data.get('service'),
-    environment: data.get('environment'),
-    priority: data.get('priority'),
-    scenario: data.get('scenario'),
-    description: data.get('description'),
-  });
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
 }
 
 function badge(status) {
-  const normalized = String(status || 'info').replace(/[^a-z0-9_-]/gi, '_').toLowerCase();
-  return `<span class="badge ${normalized}">${escapeHtml(status || 'н/д')}</span>`;
+  const label = String(status || 'info');
+  const normalized = label.replace(/[^a-zа-яё0-9_-]/gi, '_').toLowerCase();
+  return `<span class="badge ${escapeHtml(normalized)}">${escapeHtml(visibleLabels[normalized] || label)}</span>`;
 }
 
 function metric(label, value) {
@@ -97,6 +198,491 @@ function metric(label, value) {
       <div class="metric-value">${value}</div>
     </div>
   `;
+}
+
+function table(headers, rows) {
+  if (!rows.length) {
+    return '<div class="empty">Нет данных</div>';
+  }
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function stepBlock(number, title, status, body) {
+  return `
+    <details class="step-block" open>
+      <summary>
+        <span class="step-number">${number}</span>
+        <span class="step-title">${escapeHtml(title)}</span>
+        ${status ? badge(status) : ''}
+      </summary>
+      <div class="step-body">${body}</div>
+    </details>
+  `;
+}
+
+function formatList(items, mapper = (item) => item) {
+  const values = (items || []).map(mapper).filter(Boolean);
+  return values.length ? values.map(escapeHtml).join(', ') : 'н/д';
+}
+
+function scenarioName() {
+  return state.scenarioDetail?.scenario?.display_name || state.scenarioId || 'н/д';
+}
+
+function orderedSlots(slotSchema) {
+  const slots = slotSchema?.slots || [];
+  const byId = Object.fromEntries(slots.map((slot) => [slot.slot_id, slot]));
+  const ordered = (slotSchema?.question_order || []).map((slotId) => byId[slotId]).filter(Boolean);
+  const rest = slots.filter((slot) => !ordered.some((orderedSlot) => orderedSlot.slot_id === slot.slot_id));
+  return [...ordered, ...rest];
+}
+
+function slotLabel(slotSchema, slotId) {
+  return (slotSchema?.slots || []).find((slot) => slot.slot_id === slotId)?.display_name || slotId;
+}
+
+function slotStatus(slot) {
+  const resolution = slotResolutionState(slot);
+  if (resolution?.status) return resolution.status;
+  const simulationValue = state.scenarioSimulation?.slot_values?.[slot.slot_id];
+  if (simulationValue?.status) return simulationValue.status;
+  if (!slot.required) return 'optional';
+  return 'missing';
+}
+
+function slotDisplayValue(slot) {
+  const simulationValue = state.scenarioSimulation?.slot_values?.[slot.slot_id];
+  if (simulationValue?.value !== undefined && simulationValue?.value !== null && simulationValue?.value !== '') {
+    return simulationValue.value;
+  }
+  const profile = slotResolutionProfile(slot);
+  if (profile) return profile.display_name;
+  if (slot.auto_fill_ref) return slot.auto_fill_ref;
+  return 'н/д';
+}
+
+function slotFillMethod(slot) {
+  if (slot.fill_method) return slot.fill_method;
+  if (slot.source === 'user_question') return 'user_question';
+  if (slot.source === 'case') return 'case';
+  if (slot.source === 'llm') return 'llm_extraction';
+  return 'resolution_profile';
+}
+
+function slotResolutionProfile(slot) {
+  return (state.scenarioDetail?.attribute_resolution_profiles || [])
+    .find((profile) => profile.profile_id === slot.resolution_profile_id);
+}
+
+function slotResolutionState(slot) {
+  return state.scenarioSimulation?.resolution_state?.[slot.slot_id] || null;
+}
+
+function resolutionQuestion(slot, simulation) {
+  const stateItem = slotResolutionState(slot);
+  return stateItem?.pending_question || simulation?.next_question || slot.question || `Уточните ${slot.slot_id}`;
+}
+
+function resolutionProgressText(item) {
+  if (!item) return 'н/д';
+  const completed = (item.completed_steps || [])
+    .map((step) => step.display_name)
+    .join(' -> ');
+  const current = item.current_step_name || 'ожидает запуска';
+  return completed ? `${completed} -> ${current}` : current;
+}
+
+function launchRuntimeStatus(launch) {
+  const ready = state.scenarioSimulation?.ready_tool_launches || [];
+  const blocked = state.scenarioSimulation?.blocked_tool_launches || [];
+  if (ready.some((item) => item.launch_id === launch.launch_id)) return 'ready';
+  if (blocked.some((item) => item.launch_id === launch.launch_id)) return 'blocked';
+  return 'pending';
+}
+
+function renderScenarioSelect() {
+  if (!state.scenarios.length) {
+    elements.scenarioSelect.innerHTML = '<option value="">нет сценариев</option>';
+    return;
+  }
+  elements.scenarioSelect.innerHTML = state.scenarios
+    .map(
+      (scenario) => `<option value="${escapeHtml(scenario.scenario_id)}" ${
+        scenario.scenario_id === state.scenarioId ? 'selected' : ''
+      }>${escapeHtml(scenario.display_name)}</option>`,
+    )
+    .join('');
+}
+
+function renderScenario() {
+  renderScenarioSummary();
+  renderQuestion();
+  renderSlotAnswers();
+  renderSteps();
+  syncAnalyzeButton();
+}
+
+function renderScenarioSummary() {
+  const detail = state.scenarioDetail;
+  const simulation = state.scenarioSimulation;
+  if (!detail) {
+    elements.scenarioSummary.textContent = 'Сценарий не загружен';
+    return;
+  }
+  const missingCount = simulation?.missing_slots?.length ?? 0;
+  const route = detail.route || {};
+  elements.scenarioSummary.innerHTML = [
+    `<span>${escapeHtml(detail.scenario.display_name)}</span>`,
+    badge(detail.readiness?.status),
+    badge(route.priority),
+    badge(simulation?.final_decision || 'pending'),
+    `<span>Недостающих слотов: ${escapeHtml(missingCount)}</span>`,
+  ].join(' ');
+}
+
+function renderQuestion() {
+  const simulation = state.scenarioSimulation;
+  const detail = state.scenarioDetail;
+  if (!simulation || !detail) {
+    elements.questionView.innerHTML = '<div class="empty">Вопрос появится после проверки слотов</div>';
+    return;
+  }
+  const slotId = simulation.missing_slots?.[0];
+  if (!slotId) {
+    elements.questionView.innerHTML = `
+      <div class="question-ready">
+        <div class="question-title">Данных достаточно для следующего шага</div>
+        <div class="question-meta">Оператор может запускать анализ, а сценарий перейдет к ReAct-планированию.</div>
+      </div>
+    `;
+    return;
+  }
+  const slot = (detail.slot_schema?.slots || []).find((item) => item.slot_id === slotId) || {};
+  const resolution = slotResolutionState(slot);
+  const resolutionMeta = resolution
+    ? `
+      <div class="question-meta">Профиль: ${escapeHtml(resolution.profile_name)} / шаг: ${escapeHtml(resolution.current_step_name || 'н/д')} / попытка: ${escapeHtml(`${resolution.attempt || 1}/${resolution.max_attempts || 1}`)}</div>
+      <div class="question-meta">${escapeHtml(resolution.reason || '')}</div>
+    `
+    : '';
+  elements.questionView.innerHTML = `
+    <div class="question-title">Нужно уточнение</div>
+    <div class="question-text">${escapeHtml(resolutionQuestion(slot, simulation))}</div>
+    <div class="question-meta">Слот: ${escapeHtml(slot.display_name || slotId)} / приоритет: ${
+      escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group || 'н/д')
+    }</div>
+    ${resolutionMeta}
+    <div class="question-input-row">
+      <input id="slotAnswerInput" autocomplete="off" placeholder="Ответ пользователя или оператора">
+      <button id="addSlotAnswerButton" class="primary" type="button">Записать ответ</button>
+    </div>
+  `;
+  document.getElementById('addSlotAnswerButton')?.addEventListener('click', addSlotAnswer);
+  document.getElementById('slotAnswerInput')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') addSlotAnswer();
+  });
+}
+
+function renderSlotAnswers() {
+  const detail = state.scenarioDetail;
+  if (!detail) {
+    elements.slotAnswers.innerHTML = '';
+    return;
+  }
+  const rows = orderedSlots(detail.slot_schema).map((slot) => `
+    <div class="slot-chip">
+      <div>
+        <strong>${escapeHtml(slot.display_name)}</strong>
+        <span>${escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group || 'н/д')}</span>
+      </div>
+      ${badge(slotStatus(slot))}
+      <div class="slot-value">${escapeHtml(slotDisplayValue(slot))}</div>
+    </div>
+  `);
+  elements.slotAnswers.innerHTML = rows.join('');
+}
+
+function renderSteps() {
+  const detail = state.scenarioDetail;
+  if (!detail) {
+    elements.stepsView.innerHTML = '<div class="empty">Сценарий не загружен</div>';
+    return;
+  }
+  const simulation = state.scenarioSimulation;
+  const slotSchema = detail.slot_schema || {};
+  const route = detail.route || {};
+  const policy = detail.orchestrator_policy || {};
+  const escalation = detail.escalation_policy || {};
+  const slotRows = orderedSlots(slotSchema).map((slot) => [
+    escapeHtml(slot.display_name),
+    escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group),
+    badge(slot.required ? 'required' : 'optional'),
+    escapeHtml(fillMethodLabels[slotFillMethod(slot)] || slotFillMethod(slot)),
+    badge(slotStatus(slot)),
+    escapeHtml(slot.question || slotResolutionProfile(slot)?.display_name || slot.auto_fill_ref || 'н/д'),
+  ]);
+  const resolutionRows = (simulation?.attribute_resolution || []).map((item) => [
+    escapeHtml(slotLabel(slotSchema, item.slot_id)),
+    escapeHtml(item.profile_name),
+    badge(item.status),
+    escapeHtml(item.current_step_name || 'н/д'),
+    escapeHtml(`${item.attempt || 1}/${item.max_attempts || 1}`),
+    escapeHtml(resolutionProgressText(item)),
+    escapeHtml(item.pending_question || item.fallback?.question || item.fallback?.action || 'н/д'),
+    escapeHtml(formatList(item.operator_handoff_package)),
+  ]);
+  const routeRows = [
+    ['Правила', `${escapeHtml(route.confidence?.rules_min ?? 'н/д')} / ${escapeHtml(formatList(route.rules?.keywords))}`],
+    ['LLM few-shot', escapeHtml(route.confidence?.llm_min ?? 'н/д')],
+    ['Человек Л1 ниже', escapeHtml(route.confidence?.human_handoff_below ?? 'н/д')],
+    ['Top категорий', escapeHtml(route.top_categories_on_low_confidence ?? 'н/д')],
+    ['Совпадения в тексте', escapeHtml(formatList(simulation?.classification?.keyword_hits))],
+  ];
+  const launchRows = (detail.tool_launches || []).map((launch) => [
+    badge(launchRuntimeStatus(launch)),
+    escapeHtml(launch.tool_name),
+    badge(launch.execution_level),
+    badge(launch.target_execution_level),
+    escapeHtml(formatList(launch.required_slots)),
+    escapeHtml(`${launch.endpoint_profile} / ${launch.operation_id}`),
+    badge(launch.risk_level),
+  ]);
+  const packageLabels = {
+    slots: 'собранные слоты',
+    react_history: 'история ReAct',
+    tool_results: 'результаты инструментов',
+    agent_hypothesis: 'гипотеза агента',
+    sla_remaining: 'остаток SLA',
+    user_notification: 'уведомление пользователя',
+  };
+  elements.stepsView.innerHTML = [
+    stepBlock(
+      1,
+      'Приём и нормализация',
+      simulation?.missing_slots?.length ? 'missing' : 'ready',
+      `<div class="grid">
+        ${metric('Сценарий', escapeHtml(scenarioName()))}
+        ${metric('Обязательные слоты', escapeHtml(formatList(slotSchema.required_slots)))}
+        ${metric('Автозаполнение', escapeHtml(formatList(slotSchema.auto_fill_slots)))}
+        ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
+      </div>
+      ${table(['Слот', 'Приоритет', 'Тип', 'Способ заполнения', 'Статус', 'Вопрос или профиль'], slotRows)}
+      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Текущий шаг', 'Попытка', 'Прогресс dry-run', 'Следующий вопрос', 'Пакет Л1'], resolutionRows) : ''}`,
+    ),
+    stepBlock(
+      2,
+      'Классификация и маршрутизация',
+      simulation?.classification?.confidence >= 0.85 ? 'ready' : 'partial',
+      `<div class="grid">
+        ${metric('Приоритет', badge(route.priority))}
+        ${metric('Маршрут', badge(route.route))}
+        ${metric('Workflow state', escapeHtml(route.workflow_state_id || 'н/д'))}
+        ${metric('Confidence dry-run', escapeHtml(simulation?.classification?.confidence ?? 'н/д'))}
+      </div>
+      ${table(['Уровень', 'Значение'], routeRows)}`,
+    ),
+    stepBlock(
+      3,
+      'Планирование ReAct',
+      'ready',
+      `<div class="grid">
+        ${metric('Лимит итераций', escapeHtml(policy.max_iterations || 'н/д'))}
+        ${metric('Ошибок до Л2', escapeHtml(policy.consecutive_tool_errors_to_escalate || 'н/д'))}
+        ${metric('Классы инструментов', escapeHtml(formatList(policy.allowed_tool_classes)))}
+        ${metric('Стоп-условия', escapeHtml(formatList(policy.stop_conditions, (item) => stopConditionLabels[item] || item)))}
+      </div>`,
+    ),
+    stepBlock(
+      4,
+      'Выполнение и инструменты',
+      simulation?.blocked_tool_launches?.length ? 'blocked' : 'ready',
+      `${table(['Готовность', 'Инструмент', 'Текущий запуск', 'Целевой запуск', 'Слоты', 'Endpoint / операция', 'Риск'], launchRows)}
+      <div class="hint">Action-инструменты в MVP запускаются через подтверждение оператора, даже если целевой режим уже отмечен как авто.</div>`,
+    ),
+    stepBlock(
+      5,
+      'Решение и эскалация',
+      simulation?.final_decision || 'pending',
+      `<div class="grid">
+        ${metric('Автозакрытие', escapeHtml(escalation.auto_close?.requires_user_confirmation ? 'после подтверждения пользователя' : 'по политике'))}
+        ${metric('Ожидание ответа', escapeHtml(`${escalation.waiting?.auto_close_after_hours || 'н/д'} ч`))}
+        ${metric('Major Incident', escapeHtml(`${escalation.major_incident?.affected_users_threshold || 'н/д'} пользователей`))}
+        ${metric('Пакет Л2', escapeHtml(formatList(escalation.escalation_package, (item) => packageLabels[item] || item)))}
+      </div>
+      <div class="message-block">
+        <div class="metric-label">Уведомление пользователю</div>
+        <p>${escapeHtml(escalation.user_notification_template || 'н/д')}</p>
+      </div>`,
+    ),
+  ].join('');
+}
+
+function syncAnalyzeButton() {
+  const missingSlots = state.dryRunEnabled ? (state.scenarioSimulation?.missing_slots || []) : [];
+  const disabled = !state.scenarioDetail || (state.dryRunEnabled && (!state.scenarioSimulation || missingSlots.length > 0));
+  elements.analyzeButton.disabled = disabled;
+  elements.analyzeButton.title = missingSlots.length
+    ? 'Сначала ответьте на вопрос обогащения заявки'
+    : '';
+}
+
+async function loadScenarios() {
+  try {
+    const overview = await api('/operator/scenarios');
+    state.scenarios = overview.scenarios || [];
+    if (!state.scenarios.some((scenario) => scenario.scenario_id === state.scenarioId)) {
+      state.scenarioId = state.scenarios[0]?.scenario_id || '';
+    }
+    renderScenarioSelect();
+    if (state.scenarioId) {
+      await loadScenarioDetail(state.scenarioId, { resetSlots: false });
+    }
+    elements.apiStatus.textContent = 'API готов';
+  } catch (error) {
+    elements.apiStatus.textContent = `Ошибка API: ${error.message}`;
+    elements.stepsView.innerHTML = '<div class="empty">Сценарии не загружены</div>';
+  }
+}
+
+async function loadScenarioDetail(scenarioId = state.scenarioId, options = {}) {
+  if (!scenarioId) return;
+  state.scenarioId = scenarioId;
+  if (options.resetSlots) state.providedSlots = {};
+  state.scenarioDetail = await api(`/operator/scenarios/${encodeURIComponent(scenarioId)}`);
+  state.scenarioSimulation = null;
+  renderScenario();
+  if (state.dryRunEnabled) {
+    await simulateScenario();
+  }
+}
+
+async function simulateScenario() {
+  if (!state.scenarioId) return;
+  if (!state.dryRunEnabled) {
+    state.scenarioSimulation = null;
+    renderScenario();
+    return;
+  }
+  elements.enrichButton.disabled = true;
+  try {
+    state.scenarioSimulation = await api(`/operator/scenarios/${encodeURIComponent(state.scenarioId)}/simulate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        text: elements.ticketText.value.trim(),
+        provided_slots: state.providedSlots,
+        operator_id: elements.operatorId.value.trim() || 'operator-1',
+      }),
+    });
+  } catch (error) {
+    state.scenarioSimulation = {
+      schema_version: '1.0',
+      scenario_id: state.scenarioId,
+      input_text: elements.ticketText.value.trim(),
+      slot_values: {},
+      missing_slots: [],
+      next_question: null,
+      attribute_resolution: [],
+      classification: {},
+      ready_tool_launches: [],
+      blocked_tool_launches: [],
+      final_decision: 'error',
+      dry_run: true,
+      error: { message: error.message },
+    };
+    elements.apiStatus.textContent = `Ошибка сценария: ${error.message}`;
+  } finally {
+    elements.enrichButton.disabled = !state.dryRunEnabled;
+    renderScenario();
+  }
+}
+
+function scheduleScenarioSimulation() {
+  if (!state.dryRunEnabled) return;
+  if (state.scenarioSimulationTimer) {
+    window.clearTimeout(state.scenarioSimulationTimer);
+  }
+  state.scenarioSimulationTimer = window.setTimeout(() => {
+    state.scenarioSimulationTimer = null;
+    simulateScenario();
+  }, 350);
+}
+
+function addSlotAnswer() {
+  const slotId = state.scenarioSimulation?.missing_slots?.[0];
+  const input = document.getElementById('slotAnswerInput');
+  const value = input?.value.trim();
+  if (!slotId || !value) return;
+  state.providedSlots[slotId] = value;
+  if (input) input.value = '';
+  simulateScenario();
+}
+
+function resetSlots() {
+  state.providedSlots = {};
+  simulateScenario();
+}
+
+function setDryRunEnabled(enabled) {
+  state.dryRunEnabled = enabled;
+  elements.enrichButton.disabled = !enabled;
+  if (state.scenarioSimulationTimer) {
+    window.clearTimeout(state.scenarioSimulationTimer);
+    state.scenarioSimulationTimer = null;
+  }
+  if (enabled) {
+    simulateScenario();
+  } else {
+    state.scenarioSimulation = null;
+    renderScenario();
+  }
+}
+
+function firstSlotValue(slotIds) {
+  for (const slotId of slotIds) {
+    const value = state.providedSlots[slotId];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function legacyScenarioForAnalyze() {
+  const route = state.scenarioDetail?.route?.route;
+  const hasLaunches = (state.scenarioDetail?.tool_launches || []).length > 0;
+  if ((state.scenarioSimulation?.missing_slots || []).length) return 'clarification';
+  if (route === 'l2_major_incident' || route === 'l1_hint') return 'escalation';
+  if (hasLaunches) return 'runbook';
+  return 'answer';
+}
+
+function formPayload() {
+  const text = elements.ticketText.value.trim();
+  const slotSummary = Object.entries(state.providedSlots)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join('; ');
+  const description = slotSummary ? `${text}\n\nСобранные слоты: ${slotSummary}` : text;
+  const routePriority = state.scenarioDetail?.route?.priority || 'P3';
+  const service = firstSlotValue(['app_name', 'resource_name', 'device_id', 'account_type', 'symptom', 'location'])
+    || state.scenarioDetail?.scenario?.display_name
+    || 'заявка';
+  return compactObject({
+    user: firstSlotValue(['user_login', 'user_id']) || 'не указан',
+    service,
+    environment: firstSlotValue(['environment']) || 'prod',
+    priority: routePriority.toLowerCase(),
+    scenario: legacyScenarioForAnalyze(),
+    description,
+  });
 }
 
 function renderKnowledge() {
@@ -327,9 +913,11 @@ function buildCopyText() {
     `Заявка: ${analysis.ticket_id}`,
     `Кейс: ${analysis.case_id || 'н/д'}`,
     `Состояние: ${analysis.workflow_state?.id || 'н/д'}`,
+    `Сценарий: ${scenarioName()}`,
     `Решение: ${decision?.type || 'н/д'}`,
     `Кратко: ${decision?.summary || decision?.question || decision?.reason || 'н/д'}`,
     `Сообщение оператору: ${analysis.operator_message || 'н/д'}`,
+    `Слоты: ${Object.entries(state.providedSlots).map(([key, value]) => `${key}=${value}`).join(', ') || 'нет'}`,
     citations.length ? `Источники: ${citations.map((item) => `${item.title} (${item.url})`).join('; ')}` : 'Источники: нет',
     toolResults.length ? `Результаты инструментов: ${toolResults.map((item) => `${item.tool_name}=${item.status}`).join(', ')}` : 'Результаты инструментов: нет',
     approvalResults.length
@@ -350,6 +938,10 @@ async function loadKnowledgeStatus() {
 }
 
 async function analyzeTicket() {
+  if ((state.scenarioSimulation?.missing_slots || []).length) {
+    renderQuestion();
+    return;
+  }
   elements.analyzeButton.disabled = true;
   const payload = formPayload();
   try {
@@ -379,7 +971,7 @@ async function analyzeTicket() {
       approval_requests: [],
     };
   } finally {
-    elements.analyzeButton.disabled = false;
+    syncAnalyzeButton();
     renderAnalysis();
   }
 }
@@ -398,8 +990,10 @@ async function submitFeedback(rating) {
     operator_note: elements.feedbackNote.value.trim(),
     corrected_response: rating === 'edited' ? correctedResponse || buildCopyText() : undefined,
     extensions: {
-      ui: 'operator-static-stage10',
+      ui: 'operator-static-orchestrator-steps',
       case_id: state.analysis.case_id,
+      scenario_id: state.scenarioId,
+      provided_slots: state.providedSlots,
     },
   });
   try {
@@ -514,15 +1108,16 @@ async function copyResult() {
   }
 }
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
+elements.loadScenarioButton.addEventListener('click', () => loadScenarioDetail(state.scenarioId, { resetSlots: false }));
+elements.enrichButton.addEventListener('click', simulateScenario);
+elements.resetSlotsButton.addEventListener('click', resetSlots);
+elements.scenarioSelect.addEventListener('change', (event) => loadScenarioDetail(event.target.value, { resetSlots: true }));
+elements.ticketText.addEventListener('input', scheduleScenarioSimulation);
+elements.dryRunToggle.addEventListener('change', (event) => setDryRunEnabled(event.target.checked));
+elements.operatorId.addEventListener('change', () => {
+  loadScenarios();
+  loadKnowledgeStatus();
+});
 elements.analyzeButton.addEventListener('click', analyzeTicket);
 elements.rebuildButton.addEventListener('click', rebuildKnowledge);
 elements.copyButton.addEventListener('click', copyResult);
@@ -537,4 +1132,6 @@ elements.tabs.forEach((tab) => {
 });
 
 renderAnalysis();
+renderScenario();
+loadScenarios();
 loadKnowledgeStatus();

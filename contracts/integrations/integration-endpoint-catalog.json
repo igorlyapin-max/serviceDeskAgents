@@ -19,6 +19,31 @@
       }
     },
     {
+      "endpoint_id": "mock.identity",
+      "adapter_type": "mock",
+      "display_name": "Тестовая точка интеграции Active Directory",
+      "enabled": true,
+      "operations": {
+        "search_ad_users": {
+          "method": "POST",
+          "path": "/mock/identity/search-users",
+          "timeout_seconds": 5,
+          "mock_output": {
+            "candidate_count": 1,
+            "users": [
+              {
+                "login": "ivanov",
+                "user_id": "u-1001",
+                "display_name": "Иванов Иван",
+                "department": "ИТ"
+              }
+            ],
+            "message": "Тестовый поиск пользователя в AD завершен."
+          }
+        }
+      }
+    },
+    {
       "endpoint_id": "mock.cmdb",
       "adapter_type": "mock",
       "display_name": "Тестовая точка интеграции CMDB",
@@ -102,6 +127,26 @@
         "start_systemcenter_runbook": {
           "method": "POST",
           "path": "/servicedesk/runbook/start",
+          "timeout_seconds": 15
+        }
+      }
+    },
+    {
+      "endpoint_id": "n8n.identity",
+      "adapter_type": "n8n_webhook",
+      "display_name": "n8n webhook поиска пользователей Active Directory",
+      "enabled": true,
+      "base_url": "http://127.0.0.1:5678/webhook",
+      "base_url_env": "N8N_WEBHOOK_BASE_URL",
+      "auth": {
+        "type": "header_token",
+        "header_name": "X-ServiceDesk-Token",
+        "token_env": "N8N_WEBHOOK_TOKEN"
+      },
+      "operations": {
+        "search_ad_users": {
+          "method": "POST",
+          "path": "/servicedesk/identity/search-users",
           "timeout_seconds": 15
         }
       }

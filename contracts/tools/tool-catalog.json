@@ -76,6 +76,95 @@
       }
     },
     {
+      "tool_name": "search_ad_users",
+      "action_type": "read_only",
+      "description": "Найти пользователей Active Directory по логину, ФИО или уточняющим атрибутам.",
+      "endpoint_bindings": [
+        {
+          "profile": "mock",
+          "endpoint_id": "mock.identity",
+          "operation_id": "search_ad_users"
+        },
+        {
+          "profile": "n8n",
+          "endpoint_id": "n8n.identity",
+          "operation_id": "search_ad_users"
+        }
+      ],
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "login": {
+            "type": "string",
+            "minLength": 1
+          },
+          "last_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "first_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "middle_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "department": {
+            "type": "string",
+            "minLength": 1
+          },
+          "employee_number": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "candidate_count",
+          "users",
+          "message"
+        ],
+        "properties": {
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": true
+      },
+      "policy": {
+        "default_timeout_seconds": 5,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_seconds": 0
+        },
+        "allowed_environments": [
+          "dev",
+          "test",
+          "stage",
+          "prod"
+        ],
+        "approval_required_hint": false,
+        "auto_execution_eligible": false,
+        "max_risk_level": "low"
+      }
+    },
+    {
       "tool_name": "query_cmdb_object",
       "action_type": "read_only",
       "description": "Запросить metadata объекта CMDB по сервису или идентификатору объекта.",

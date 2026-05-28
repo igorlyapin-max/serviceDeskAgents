@@ -14,6 +14,7 @@ from .action_gates import (
     utc_now,
 )
 from .cases import CaseStore, new_case_id
+from .config_registry import ConfigStore, default_model_routing, default_prompt_catalog
 from .contracts import CONTRACTS_ROOT, ContractRegistry, load_json
 from .feedback import FeedbackStore
 from .integrations import IntegrationDispatcher, ToolRegistry
@@ -105,8 +106,10 @@ class TicketWorkflow:
         knowledge_retriever: KnowledgeRetriever | None = None,
         feedback_store: FeedbackStore | None = None,
         case_store: CaseStore | None = None,
+        config_store: ConfigStore | None = None,
     ):
         self.contracts = contracts or ContractRegistry()
+        self.config_store = config_store
         self.policy = ExecutionPolicy(self.contracts)
         self.state_resolver = WorkflowStateResolver(self.contracts)
         self.tool_registry = ToolRegistry(self.contracts)
@@ -119,6 +122,8 @@ class TicketWorkflow:
         self.knowledge_retriever = knowledge_retriever or KnowledgeRetriever(self.contracts)
         self.feedback_store = feedback_store or FeedbackStore(self.contracts)
         self.case_store = case_store or CaseStore(self.contracts)
+        if self.config_store:
+            self.apply_active_config()
 
     def analyze(self, ticket: dict[str, Any]) -> dict[str, Any]:
         case_id = ticket.get("case_id") or new_case_id()
@@ -232,6 +237,22 @@ class TicketWorkflow:
     def knowledge_status(self) -> dict[str, Any]:
         return self.knowledge_indexer.status()
 
+    def knowledge_sources(self) -> dict[str, Any]:
+        return self.knowledge_indexer.source_catalog()
+
+    def knowledge_chunks(self, *, source_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        return self.knowledge_indexer.chunks(source_id=source_id, limit=limit)
+
+    def test_retrieval(self, query: dict[str, Any]) -> dict[str, Any]:
+        retrieval_query = {
+            key: value
+            for key, value in query.items()
+            if value is not None
+        }
+        if "schema_version" not in retrieval_query:
+            retrieval_query["schema_version"] = "1.0"
+        return self.knowledge_retriever.retrieve(retrieval_query)
+
     def submit_feedback(self, request: dict[str, Any]) -> dict[str, Any]:
         feedback = self.feedback_store.create(request)
         self.case_store.record_feedback(feedback)
@@ -242,6 +263,168 @@ class TicketWorkflow:
 
     def export_feedback_jsonl(self) -> str:
         return self.feedback_store.export_jsonl()
+
+    def admin_dashboard(self) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "cases": self.case_store.summary(),
+            "approvals": self.action_gate_store.summary(),
+            "feedback": self.feedback_store.summary(),
+            "knowledge": self.knowledge_status(),
+            "tools": {
+                "count": len(self.contracts.tool_catalog["tools"]),
+                "names": [
+                    tool["tool_name"]
+                    for tool in self.contracts.tool_catalog["tools"]
+                ],
+            },
+            "integrations": {
+                "profile": self.tool_registry.profile,
+                "endpoint_count": len(self.contracts.integration_endpoint_catalog["endpoints"]),
+                "enabled_endpoint_count": sum(
+                    1
+                    for endpoint in self.contracts.integration_endpoint_catalog["endpoints"]
+                    if endpoint["enabled"]
+                ),
+            },
+            "models": self.model_config(),
+        }
+
+    def catalog_inventory(self) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "tools": self.contracts.tool_catalog,
+            "integration_endpoints": self.contracts.integration_endpoint_catalog,
+            "workflow": {
+                "state_catalog": self.contracts.workflow_state_catalog,
+                "transition_rules": self.contracts.workflow_transition_rules,
+            },
+            "models": self.model_config(),
+        }
+
+    def model_config(self) -> dict[str, Any]:
+        if self.config_store:
+            return self.config_store.active_payload("model_routing")
+        return default_model_routing()
+
+    def prompt_catalog(self) -> dict[str, Any]:
+        if self.config_store:
+            return self.config_store.active_payload("prompts")
+        return default_prompt_catalog()
+
+    def n8n_workflow_catalog(self) -> dict[str, Any]:
+        if self.config_store:
+            return self.config_store.active_payload("n8n_workflows")
+        return self.contracts.n8n_workflow_catalog
+
+    def attach_config_store(self, config_store: ConfigStore) -> None:
+        self.config_store = config_store
+        self.apply_active_config()
+
+    def apply_active_config(self) -> None:
+        if not self.config_store:
+            return
+        for domain in (
+            "integration_endpoints",
+            "tools",
+            "workflow_states",
+            "workflow_transitions",
+            "n8n_workflows",
+        ):
+            active_version = self.config_store.active_version(domain)
+            if active_version:
+                self.apply_config_payload(domain, active_version["payload"])
+
+    def apply_config_payload(self, domain: str, payload: dict[str, Any]) -> None:
+        if domain == "tools":
+            self.contracts.tool_catalog = copy.deepcopy(payload)
+            self.tool_registry = ToolRegistry(self.contracts)
+            self.integration_dispatcher = IntegrationDispatcher(
+                self.contracts,
+                self.tool_registry,
+            )
+            return
+        if domain == "integration_endpoints":
+            self.contracts.integration_endpoint_catalog = copy.deepcopy(payload)
+            self.tool_registry = ToolRegistry(self.contracts)
+            self.integration_dispatcher = IntegrationDispatcher(
+                self.contracts,
+                self.tool_registry,
+            )
+            return
+        if domain == "workflow_states":
+            self.contracts.workflow_state_catalog = copy.deepcopy(payload)
+            self.state_resolver = WorkflowStateResolver(self.contracts)
+            return
+        if domain == "workflow_transitions":
+            self.contracts.workflow_transition_rules = copy.deepcopy(payload)
+            self.state_resolver = WorkflowStateResolver(self.contracts)
+            return
+        if domain == "n8n_workflows":
+            self.contracts.n8n_workflow_catalog = copy.deepcopy(payload)
+
+    def list_feedback(self, limit: int = 100) -> list[dict[str, Any]]:
+        records = self.feedback_store.list_all()
+        return list(reversed(records))[: max(limit, 0)]
+
+    def list_evaluation_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.feedback_store.list_evaluation_runs(limit=max(limit, 0))
+
+    def promote_feedback_to_evaluation_cases(
+        self,
+        *,
+        operator_id: str,
+        feedback_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.feedback_store.promote_to_evaluation_cases(
+            feedback_ids=feedback_ids,
+            promoted_by=operator_id,
+        )
+
+    def list_evaluation_cases(self, case_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        return self.feedback_store.list_evaluation_cases(case_ids)
+
+    def run_evaluation(
+        self,
+        *,
+        operator_id: str,
+        case_ids: list[str] | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        evaluation_cases = self.feedback_store.list_evaluation_cases(case_ids)
+        if limit is not None:
+            evaluation_cases = evaluation_cases[: max(limit, 0)]
+        run = self.feedback_store.create_evaluation_run(
+            operator_id=operator_id,
+            case_count=len(evaluation_cases),
+            extensions={
+                "case_ids": case_ids or [],
+                "execution_policy": "mock_or_dry_run",
+            },
+        )
+        results = []
+        for index, evaluation_case in enumerate(evaluation_cases, start=1):
+            result = self._run_evaluation_case(run["run_id"], index, evaluation_case)
+            results.append(self.feedback_store.save_evaluation_result(result))
+            self._record_evaluation_event(evaluation_case, result)
+
+        completed_run = self.feedback_store.complete_evaluation_run(run["run_id"], "completed")
+        return {
+            "schema_version": "1.0",
+            "run": completed_run,
+            "results": results,
+            "summary": self._evaluation_summary(results),
+        }
+
+    def get_evaluation_run(self, run_id: str) -> dict[str, Any] | None:
+        run = self.feedback_store.get_evaluation_run(run_id)
+        if run is None:
+            return None
+        return {
+            "schema_version": "1.0",
+            "run": run,
+            "results": self.feedback_store.list_evaluation_results(run_id),
+        }
 
     def get_case(self, case_id: str) -> dict[str, Any]:
         return self.case_store.require(case_id)
@@ -270,6 +453,150 @@ class TicketWorkflow:
             "workflow_state": workflow_state,
             "tool_result": tool_result,
         }
+
+    def _run_evaluation_case(
+        self,
+        run_id: str,
+        index: int,
+        evaluation_case: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        try:
+            ticket_input = copy.deepcopy(evaluation_case["ticket_input"])
+            ticket_input["ticket_id"] = f"{run_id}-{index}"
+            ticket_input.setdefault("scenario", ticket_input.get("scenario"))
+            actual = self.analyze(ticket_input)
+            status, error = self._score_evaluation_case(evaluation_case, actual)
+            result = {
+                "schema_version": "1.0",
+                "run_id": run_id,
+                "case_id": evaluation_case["case_id"],
+                "status": status,
+                "created_at": now,
+                "actual": self._evaluation_actual(actual),
+            }
+            if error:
+                result["error"] = error
+            return result
+        except Exception as error:  # noqa: BLE001 - evaluation records failures per case.
+            return {
+                "schema_version": "1.0",
+                "run_id": run_id,
+                "case_id": evaluation_case["case_id"],
+                "status": "failed",
+                "created_at": now,
+                "error": {
+                    "code": "evaluation_case_failed",
+                    "message": str(error),
+                },
+            }
+
+    def _score_evaluation_case(
+        self,
+        evaluation_case: dict[str, Any],
+        actual: dict[str, Any],
+    ) -> tuple[str, dict[str, str] | None]:
+        expected = evaluation_case["expected"]
+        rating = expected["rating"]
+        if rating == "incorrect":
+            return (
+                "skipped",
+                {
+                    "code": "negative_feedback_without_expected_answer",
+                    "message": "Оценка incorrect не содержит ожидаемый корректный ответ.",
+                },
+            )
+
+        if rating == "edited":
+            corrected = str(expected.get("corrected_response") or "").strip()
+            actual_text = " ".join(
+                [
+                    str(actual.get("operator_message") or ""),
+                    str((actual.get("ai_decision") or {}).get("decision", {}).get("summary") or ""),
+                    str((actual.get("ai_decision") or {}).get("decision", {}).get("question") or ""),
+                    str((actual.get("ai_decision") or {}).get("decision", {}).get("reason") or ""),
+                ]
+            )
+            if corrected and corrected in actual_text:
+                return "passed", None
+            return (
+                "failed",
+                {
+                    "code": "corrected_response_not_matched",
+                    "message": "Текущий ответ не совпал с исправленным ответом оператора.",
+                },
+            )
+
+        baseline = evaluation_case.get("analysis_snapshot", {})
+        expected_state = baseline.get("workflow_state", {}).get("id")
+        expected_decision = (baseline.get("ai_decision") or {}).get("decision", {}).get("type")
+        actual_state = actual.get("workflow_state", {}).get("id")
+        actual_decision = (actual.get("ai_decision") or {}).get("decision", {}).get("type")
+        if expected_state == actual_state and expected_decision == actual_decision:
+            return "passed", None
+        return (
+            "failed",
+            {
+                "code": "analysis_snapshot_changed",
+                "message": "Текущее решение отличается от snapshot, который оператор отметил как correct.",
+            },
+        )
+
+    @staticmethod
+    def _evaluation_actual(actual: dict[str, Any]) -> dict[str, Any]:
+        decision = (actual.get("ai_decision") or {}).get("decision", {})
+        return {
+            "case_id": actual.get("case_id"),
+            "ticket_id": actual.get("ticket_id"),
+            "workflow_state_id": actual.get("workflow_state", {}).get("id"),
+            "decision_type": decision.get("type"),
+            "decision_summary": decision.get("summary") or decision.get("question") or decision.get("reason"),
+            "operator_message": actual.get("operator_message"),
+            "rag_status": actual.get("rag_trace", {}).get("status"),
+            "tool_statuses": [
+                result.get("status")
+                for result in actual.get("tool_results", [])
+            ],
+        }
+
+    @staticmethod
+    def _evaluation_summary(results: list[dict[str, Any]]) -> dict[str, int]:
+        summary = {
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+        for result in results:
+            status = result["status"]
+            summary[status] = summary.get(status, 0) + 1
+        summary["total"] = len(results)
+        return summary
+
+    def _record_evaluation_event(
+        self,
+        evaluation_case: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        case_id = evaluation_case.get("extensions", {}).get("case_id")
+        if not case_id:
+            return
+        try:
+            self.case_store.append_event(
+                case_id,
+                "evaluation_result_recorded",
+                actor_type="system",
+                actor_id="evaluation_runner",
+                summary=f"Результат оценки записан со статусом {result['status']}.",
+                correlation={
+                    "feedback_id": evaluation_case["source_feedback_id"],
+                },
+                payload={
+                    "evaluation_case_id": evaluation_case["case_id"],
+                    "evaluation_result": copy.deepcopy(result),
+                },
+            )
+        except Exception:
+            return
 
     def decide_action_gate(
         self,

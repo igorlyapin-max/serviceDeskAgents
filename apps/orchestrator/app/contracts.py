@@ -59,6 +59,12 @@ class ContractRegistry:
         self.knowledge_source_catalog = load_json(
             self.contracts_root / "knowledge" / "knowledge-source-catalog.json"
         )
+        self.security_catalog = load_json(
+            self.contracts_root / "security" / "security-catalog.json"
+        )
+        self.n8n_workflow_catalog = load_json(
+            self.contracts_root / "config" / "n8n-workflow-catalog.json"
+        )
         self._validate_static_contract_data()
 
     def _load_entries(self) -> dict[str, SchemaEntry]:
@@ -145,6 +151,37 @@ class ContractRegistry:
             "workflow_transition_rules": self.contracts_root
             / "workflow"
             / "workflow-transition-rules.schema.json",
+            "security_catalog": self.contracts_root
+            / "security"
+            / "security-catalog.schema.json",
+            "audit_event": self.contracts_root / "security" / "audit-event.schema.json",
+            "prompt_catalog": self.contracts_root / "config" / "prompt-catalog.schema.json",
+            "model_routing": self.contracts_root / "config" / "model-routing.schema.json",
+            "n8n_workflow_catalog": self.contracts_root
+            / "config"
+            / "n8n-workflow-catalog.schema.json",
+            "attribute_resolution_profiles": self.contracts_root
+            / "config"
+            / "attribute-resolution-profiles.schema.json",
+            "service_scenarios": self.contracts_root
+            / "config"
+            / "service-scenarios.schema.json",
+            "slot_schemas": self.contracts_root / "config" / "slot-schemas.schema.json",
+            "classification_routes": self.contracts_root
+            / "config"
+            / "classification-routes.schema.json",
+            "orchestrator_policy": self.contracts_root
+            / "config"
+            / "orchestrator-policy.schema.json",
+            "tool_launch_matrix": self.contracts_root
+            / "config"
+            / "tool-launch-matrix.schema.json",
+            "prompt_packs": self.contracts_root / "config" / "prompt-packs.schema.json",
+            "escalation_policies": self.contracts_root
+            / "config"
+            / "escalation-policies.schema.json",
+            "config_draft": self.contracts_root / "config" / "config-draft.schema.json",
+            "config_version": self.contracts_root / "config" / "config-version.schema.json",
         }
         return {
             name: SchemaEntry(name=name, path=path, schema=load_json(path))
@@ -171,6 +208,8 @@ class ContractRegistry:
         self.require_valid("tool_catalog", self.tool_catalog)
         self.require_valid("integration_endpoint_catalog", self.integration_endpoint_catalog)
         self.require_valid("knowledge_source_catalog", self.knowledge_source_catalog)
+        self.require_valid("security_catalog", self.security_catalog)
+        self.require_valid("n8n_workflow_catalog", self.n8n_workflow_catalog)
         state_ids = {
             state["id"]
             for state in self.workflow_state_catalog["states"]
@@ -187,6 +226,8 @@ class ContractRegistry:
             )
         self._validate_tool_catalog_references()
         self._validate_knowledge_source_catalog()
+        self._validate_security_catalog()
+        self._validate_n8n_workflow_catalog()
 
     def _validate_tool_catalog_references(self) -> None:
         allowed_tool_names = set(
@@ -209,45 +250,45 @@ class ContractRegistry:
             if endpoint_ids.count(endpoint_id) > 1
         )
         for endpoint_id in duplicate_endpoint_ids:
-            errors.append(f"duplicate endpoint_id: {endpoint_id}")
+            errors.append(f"Дублируется endpoint_id: {endpoint_id}")
 
         missing_tool_names = sorted(allowed_tool_names - {
             tool["tool_name"]
             for tool in self.tool_catalog["tools"]
         })
         for tool_name in missing_tool_names:
-            errors.append(f"missing tool_catalog entry for proposed-action tool: {tool_name}")
+            errors.append(f"Нет записи tool_catalog для proposed-action tool: {tool_name}")
 
         seen_tool_names: set[str] = set()
         for tool in self.tool_catalog["tools"]:
             tool_name = tool["tool_name"]
             if tool_name in seen_tool_names:
-                errors.append(f"duplicate tool_name: {tool_name}")
+                errors.append(f"Дублируется tool_name: {tool_name}")
             seen_tool_names.add(tool_name)
 
             if tool_name not in allowed_tool_names:
-                errors.append(f"tool_name is not allowed by proposed-action schema: {tool_name}")
+                errors.append(f"tool_name не разрешен схемой proposed-action: {tool_name}")
 
             try:
                 Draft202012Validator.check_schema(tool["parameters_schema"])
             except SchemaError as error:
-                errors.append(f"{tool_name} parameters_schema is invalid: {error.message}")
+                errors.append(f"{tool_name} parameters_schema невалидна: {error.message}")
             try:
                 Draft202012Validator.check_schema(tool["result_schema"])
             except SchemaError as error:
-                errors.append(f"{tool_name} result_schema is invalid: {error.message}")
+                errors.append(f"{tool_name} result_schema невалидна: {error.message}")
 
             for binding in tool["endpoint_bindings"]:
                 endpoint = endpoint_by_id.get(binding["endpoint_id"])
                 if not endpoint:
                     errors.append(
-                        f"{tool_name} references unknown endpoint_id: {binding['endpoint_id']}"
+                        f"{tool_name} ссылается на неизвестный endpoint_id: {binding['endpoint_id']}"
                     )
                     continue
                 if binding["operation_id"] not in endpoint["operations"]:
                     errors.append(
-                        f"{tool_name} references unknown operation_id "
-                        f"{binding['operation_id']} on endpoint {binding['endpoint_id']}"
+                        f"{tool_name} ссылается на неизвестный operation_id "
+                        f"{binding['operation_id']} для endpoint {binding['endpoint_id']}"
                     )
 
         if errors:
@@ -265,16 +306,92 @@ class ContractRegistry:
             if source_ids.count(source_id) > 1
         )
         for source_id in duplicate_source_ids:
-            errors.append(f"duplicate source_id: {source_id}")
+            errors.append(f"Дублируется source_id: {source_id}")
 
         for source in self.knowledge_source_catalog["sources"]:
             if source["enabled"] is False and not source.get("disabled_reason"):
-                errors.append(f"{source['source_id']} disabled sources must explain disabled_reason")
+                errors.append(f"{source['source_id']} отключенный источник должен указывать disabled_reason")
             if source["connector_type"] == "local_files" and not source.get("path"):
-                errors.append(f"{source['source_id']} local_files source must define path")
+                errors.append(f"{source['source_id']} источник local_files должен указывать path")
 
         if errors:
             raise ContractValidationError("knowledge_source_catalog", errors)
+
+    def _validate_security_catalog(self) -> None:
+        errors = []
+        permission_ids = [
+            permission["permission_id"]
+            for permission in self.security_catalog["permissions"]
+        ]
+        role_ids = [
+            role["role_id"]
+            for role in self.security_catalog["roles"]
+        ]
+        user_ids = [
+            user["user_id"]
+            for user in self.security_catalog["users"]
+        ]
+        secret_ids = [
+            secret["secret_id"]
+            for secret in self.security_catalog["secret_references"]
+        ]
+
+        for permission_id in self._duplicates(permission_ids):
+            errors.append(f"Дублируется permission_id: {permission_id}")
+        for role_id in self._duplicates(role_ids):
+            errors.append(f"Дублируется role_id: {role_id}")
+        for user_id in self._duplicates(user_ids):
+            errors.append(f"Дублируется user_id: {user_id}")
+        for secret_id in self._duplicates(secret_ids):
+            errors.append(f"Дублируется secret_id: {secret_id}")
+
+        known_permissions = set(permission_ids)
+        for role in self.security_catalog["roles"]:
+            for permission_id in role["permissions"]:
+                if permission_id not in known_permissions:
+                    errors.append(
+                        f"Роль {role['role_id']} ссылается на неизвестный permission_id: {permission_id}"
+                    )
+
+        known_roles = set(role_ids)
+        for user in self.security_catalog["users"]:
+            for role_id in user["roles"]:
+                if role_id not in known_roles:
+                    errors.append(
+                        f"Пользователь {user['user_id']} ссылается на неизвестный role_id: {role_id}"
+                    )
+
+        if errors:
+            raise ContractValidationError("security_catalog", errors)
+
+    def _validate_n8n_workflow_catalog(self) -> None:
+        errors = []
+        workflow_ids = [
+            workflow["workflow_id"]
+            for workflow in self.n8n_workflow_catalog["workflows"]
+        ]
+        for workflow_id in self._duplicates(workflow_ids):
+            errors.append(f"Дублируется workflow_id: {workflow_id}")
+
+        endpoint_ids = {
+            endpoint["endpoint_id"]
+            for endpoint in self.integration_endpoint_catalog["endpoints"]
+        }
+        for workflow in self.n8n_workflow_catalog["workflows"]:
+            if workflow["endpoint_id"] not in endpoint_ids:
+                errors.append(
+                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный endpoint_id: "
+                    f"{workflow['endpoint_id']}"
+                )
+            callback_endpoint_id = workflow.get("callback_endpoint_id")
+            if callback_endpoint_id and callback_endpoint_id not in endpoint_ids:
+                errors.append(
+                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный "
+                    f"callback_endpoint_id: {callback_endpoint_id}"
+                )
+
+        if errors:
+            raise ContractValidationError("n8n_workflow_catalog", errors)
 
     def validate(self, contract_name: str, payload: Any) -> list[str]:
         validator = self.validators[contract_name]
@@ -294,3 +411,11 @@ class ContractRegistry:
         path = ".".join(str(part) for part in error.path)
         prefix = path if path else "$"
         return f"{prefix}: {error.message}"
+
+    @staticmethod
+    def _duplicates(values: list[str]) -> list[str]:
+        return sorted(
+            value
+            for value in set(values)
+            if values.count(value) > 1
+        )

@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 base_url = os.environ["BASE_URL"]
 
 
-def request(path, payload=None, expected_status=200, parse_json=True):
+def request(path, payload=None, expected_status=200, parse_json=True, headers_extra=None):
     data = None
     method = "GET"
     headers = {}
@@ -43,6 +43,8 @@ def request(path, payload=None, expected_status=200, parse_json=True):
         data = json.dumps(payload).encode("utf-8")
         method = "POST"
         headers["Content-Type"] = "application/json"
+    if headers_extra:
+        headers.update(headers_extra)
     req = Request(f"{base_url}{path}", data=data, headers=headers, method=method)
     try:
         with urlopen(req, timeout=5) as response:
@@ -70,20 +72,41 @@ else:
 
 html = request("/operator", parse_json=False)
 assert "Оператор ServiceDesk" in html, html[:200]
+assert "Пять шагов оркестратора" in html, html[:300]
 assert "/operator/static/app.js" in html, html[:200]
 print("operator html ok")
 
 js = request("/operator/static/app.js", parse_json=False)
 css = request("/operator/static/styles.css", parse_json=False)
 assert "analyzeTicket" in js, js[:200]
+assert "/operator/scenarios" in js, js[:300]
 assert ".workspace" in css, css[:200]
 print("operator assets ok")
 
-status_before = request("/knowledge/status")
+operator_headers = {"X-ServiceDesk-Actor": "operator-1", "X-ServiceDesk-Session": "stage8:operator"}
+
+scenarios = request("/operator/scenarios", headers_extra=operator_headers)
+assert scenarios["scenario_count"] >= 6, scenarios
+detail = request("/operator/scenarios/password_reset", headers_extra=operator_headers)
+assert detail["slot_schema"]["required_slots"] == ["user_login", "account_type"], detail
+simulation = request(
+    "/operator/scenarios/password_reset/simulate",
+    {
+        "operator_id": "operator-stage8",
+        "text": "Пользователь не может войти, нужен сброс пароля",
+        "provided_slots": {"user_login": "ivan", "account_type": "domain"},
+    },
+    headers_extra=operator_headers,
+)
+assert simulation["final_decision"] == "ready_for_react", simulation
+assert not simulation["missing_slots"], simulation
+print("operator scenario API ok")
+
+status_before = request("/knowledge/status", headers_extra=operator_headers)
 assert status_before["status"] == "unavailable", status_before
 print("knowledge status unavailable ok")
 
-rebuild = request("/knowledge/rebuild", {"operator_id": "operator-stage8"})
+rebuild = request("/knowledge/rebuild", {"operator_id": "operator-stage8"}, headers_extra=operator_headers)
 assert rebuild["status"] == "success", rebuild
 assert rebuild["index_manifest"]["requested_by_operator"] == "operator-stage8", rebuild
 print("knowledge rebuild endpoint ok")

@@ -235,6 +235,73 @@ class KnowledgeIndexer:
             "index_manifest": manifest,
         }
 
+    def source_catalog(self) -> dict[str, Any]:
+        return self.contracts.knowledge_source_catalog
+
+    def chunks(self, *, source_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        index_result = self._read_index()
+        if "error" in index_result:
+            return index_result
+
+        chunks = index_result["chunks"]
+        if source_id:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if chunk["source_id"] == source_id
+            ]
+        limited_chunks = chunks[: max(min(limit, 200), 0)]
+        for chunk in limited_chunks:
+            self.contracts.require_valid("knowledge_chunk", chunk)
+        return {
+            "schema_version": "1.0",
+            "status": "success",
+            "index_path": str(self.index_path),
+            "index_manifest": index_result["manifest"],
+            "source_id": source_id,
+            "limit": limit,
+            "total_matches": len(chunks),
+            "chunks": limited_chunks,
+        }
+
+    def _read_index(self) -> dict[str, Any]:
+        if not self.index_path.exists():
+            return {
+                "schema_version": "1.0",
+                "status": "unavailable",
+                "index_path": str(self.index_path),
+                "error": {
+                    "code": "knowledge_index_missing",
+                    "message": f"Индекс базы знаний не найден: {self.index_path}",
+                },
+            }
+
+        try:
+            index = json.loads(self.index_path.read_text(encoding="utf-8"))
+            manifest = index["manifest"]
+            documents = index["documents"]
+            chunks = index["chunks"]
+            self.contracts.require_valid("knowledge_index_manifest", manifest)
+        except (OSError, KeyError, json.JSONDecodeError) as error:
+            return {
+                "schema_version": "1.0",
+                "status": "error",
+                "index_path": str(self.index_path),
+                "error": {
+                    "code": "knowledge_index_invalid",
+                    "message": str(error),
+                },
+            }
+
+        return {
+            "schema_version": "1.0",
+            "status": manifest["status"],
+            "index_path": str(self.index_path),
+            "manifest": manifest,
+            "documents": documents,
+            "chunks": chunks,
+        }
+
     def _sync_source(self, source: dict[str, Any]) -> SourceSyncResult:
         if not source["enabled"]:
             return SourceSyncResult(

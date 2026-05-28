@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/prompt-packs.schema.json",
+  "title": "Prompt Packs",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "packs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "packs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "prompt_pack_id",
+          "scenario_id",
+          "display_name",
+          "status",
+          "active_version",
+          "blocks"
+        ],
+        "properties": {
+          "prompt_pack_id": {
+            "$ref": "#/$defs/id"
+          },
+          "scenario_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "planned",
+              "disabled"
+            ]
+          },
+          "active_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "blocks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role_context",
+              "behavior_principles",
+              "slot_schemas",
+              "classification_confidence",
+              "react_planning",
+              "tool_rules",
+              "escalation_response"
+            ],
+            "properties": {
+              "role_context": {
+                "$ref": "#/$defs/block"
+              },
+              "behavior_principles": {
+                "$ref": "#/$defs/block"
+              },
+              "slot_schemas": {
+                "$ref": "#/$defs/block"
+              },
+              "classification_confidence": {
+                "$ref": "#/$defs/block"
+              },
+              "react_planning": {
+                "$ref": "#/$defs/block"
+              },
+              "tool_rules": {
+                "$ref": "#/$defs/block"
+              },
+              "escalation_response": {
+                "$ref": "#/$defs/block"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "block": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20000
+    }
+  }
+}

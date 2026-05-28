@@ -70,16 +70,19 @@ services:
     restart: unless-stopped
     profiles:
       - llm
-    depends_on:
-      vllm-cpu:
-        condition: service_started
     command: ["--config", "/app/config/litellm.yaml", "--host", "0.0.0.0", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-litellm-master-key}
+      MODEL_ACTIVE_PROVIDER: ${MODEL_ACTIVE_PROVIDER:-vllm_cpu}
       LITELLM_MODEL_ALIAS: ${LITELLM_MODEL_ALIAS:-local-opt-125m}
       LITELLM_UPSTREAM_MODEL: ${LITELLM_UPSTREAM_MODEL:-hosted_vllm/facebook/opt-125m}
       VLLM_BASE_URL: http://vllm-cpu:8000/v1
       VLLM_MODEL: ${VLLM_MODEL:-facebook/opt-125m}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_KEY_ENV: ${OPENAI_API_KEY_ENV:-OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL_ALIAS: ${OPENAI_MODEL_ALIAS:-openai-primary}
+      OPENAI_MODEL: ${OPENAI_MODEL:-openai/gpt-4.1-mini}
     ports:
       - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     volumes:

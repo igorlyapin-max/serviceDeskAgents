@@ -22,58 +22,40 @@
       <main class="workspace">
         <section class="ticket-pane" aria-labelledby="ticket-title">
           <div class="section-head">
-            <h2 id="ticket-title">Заявка</h2>
-            <button class="primary" id="analyzeButton" type="button">Анализировать</button>
+            <h2 id="ticket-title">Текст заявки</h2>
+            <button class="primary" id="analyzeButton" type="button" disabled>Анализировать</button>
           </div>
 
           <form id="ticketForm" class="ticket-form">
-            <label>
-              Пользователь
-              <input name="user" value="ivan" autocomplete="off">
-            </label>
-            <label>
-              Сервис
-              <input name="service" value="billing-worker" autocomplete="off">
-            </label>
-            <label>
-              Среда
-              <select name="environment">
-                <option value="test" selected>test</option>
-                <option value="prod">prod</option>
-                <option value="dev">dev</option>
-              </select>
-            </label>
-            <label>
-              Приоритет
-              <select name="priority">
-                <option value="p3" selected>p3</option>
-                <option value="p2">p2</option>
-                <option value="p1">p1</option>
-              </select>
-            </label>
-            <label>
-              Сценарий
-              <select name="scenario">
-                <option value="">авто</option>
-                <option value="answer">ответ</option>
-                <option value="clarification">уточнение</option>
-                <option value="escalation">эскалация</option>
-                <option value="runbook" selected>ранбук</option>
-              </select>
+            <label class="span-all">
+              Описание обращения
+              <textarea id="ticketText" name="description" rows="8">Пользователь не может войти, нужен сброс пароля</textarea>
             </label>
             <label class="span-all">
-              Описание
-              <textarea name="description" rows="6">перезапустить billing-worker через ранбук</textarea>
+              Сценарий
+              <select id="scenarioSelect" name="scenario"></select>
             </label>
+            <label class="checkbox-row span-all">
+              <input id="dryRunToggle" type="checkbox" checked>
+              <span>Тестовый прогон сценария</span>
+            </label>
+            <div class="button-row span-all">
+              <button id="loadScenarioButton" type="button">Обновить сценарий</button>
+              <button id="enrichButton" type="button">Проверить слоты</button>
+              <button id="resetSlotsButton" type="button">Сбросить ответы</button>
+            </div>
           </form>
+
+          <div id="questionView" class="question-panel"></div>
+          <div id="slotAnswers" class="slot-answer-list"></div>
         </section>
 
-        <section class="knowledge-pane" aria-labelledby="knowledge-title">
+        <section class="steps-pane" aria-labelledby="steps-title">
           <div class="section-head">
-            <h2 id="knowledge-title">База знаний</h2>
-            <button id="rebuildButton" type="button">Перестроить</button>
+            <h2 id="steps-title">Пять шагов оркестратора</h2>
+            <div id="scenarioSummary" class="summary-line">Сценарий загружается</div>
           </div>
-          <div id="knowledgeStatus" class="status-grid"></div>
+          <div id="stepsView" class="steps-view"></div>
         </section>
 
         <section class="result-pane" aria-labelledby="result-title">
@@ -98,6 +80,14 @@
             <div id="feedbackStatus" class="feedback-status">Обратная связь не сохранена</div>
           </div>
           <pre id="copyText" class="copy-text" aria-live="polite"></pre>
+        </section>
+
+        <section class="knowledge-pane" aria-labelledby="knowledge-title">
+          <div class="section-head">
+            <h2 id="knowledge-title">База знаний</h2>
+            <button id="rebuildButton" type="button">Перестроить</button>
+          </div>
+          <div id="knowledgeStatus" class="status-grid"></div>
         </section>
 
         <section class="trace-pane" aria-labelledby="trace-title">

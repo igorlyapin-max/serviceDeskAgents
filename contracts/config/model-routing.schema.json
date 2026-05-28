@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/model-routing.schema.json",
+  "title": "Model Routing",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "active_provider",
+    "providers",
+    "gateway",
+    "default_model_alias",
+    "routing"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "active_provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160,
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "properties": {
+        "vllm_cpu": {
+          "$ref": "#/$defs/provider"
+        },
+        "openai": {
+          "$ref": "#/$defs/provider"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "base_url"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "default_model_alias": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "upstream_model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "minProperties": 1
+    },
+    "fallbacks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "context_length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rate_limits": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "enabled",
+        "provider_type",
+        "display_name",
+        "base_url",
+        "model_alias",
+        "model",
+        "api_key_env",
+        "api_key_required",
+        "context_length",
+        "temperature",
+        "max_tokens",
+        "timeout_seconds",
+        "rate_limits"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "provider_type": {
+          "type": "string",
+          "enum": [
+            "vllm_cpu",
+            "openai",
+            "litellm"
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "base_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "model_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "api_key_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "api_key_required": {
+          "type": "boolean"
+        },
+        "secret_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "context_length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rate_limits": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "requests_per_minute": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tokens_per_minute": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    }
+  }
+}

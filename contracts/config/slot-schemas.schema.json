@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/slot-schemas.schema.json",
+  "title": "Slot Schemas",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "slot_schemas"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "slot_schemas": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot_schema_id",
+          "display_name",
+          "required_slots",
+          "auto_fill_slots",
+          "question_order",
+          "timeouts",
+          "slots"
+        ],
+        "properties": {
+          "slot_schema_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "required_slots": {
+            "$ref": "#/$defs/id_list"
+          },
+          "auto_fill_slots": {
+            "$ref": "#/$defs/id_list"
+          },
+          "question_order": {
+            "$ref": "#/$defs/id_list"
+          },
+          "timeouts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "reminder_after_seconds",
+              "draft_after_seconds"
+            ],
+            "properties": {
+              "reminder_after_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 1800
+              },
+              "draft_after_seconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 7200
+              }
+            }
+          },
+          "slots": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "slot_id",
+                "display_name",
+                "priority_group",
+                "required",
+                "fill_method"
+              ],
+              "properties": {
+                "slot_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "display_name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240
+                },
+                "priority_group": {
+                  "type": "string",
+                  "enum": [
+                    "who",
+                    "what",
+                    "when",
+                    "where",
+                    "context"
+                  ]
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "fill_method": {
+                  "type": "string",
+                  "enum": [
+                    "user_question",
+                    "case",
+                    "llm_extraction",
+                    "resolution_profile",
+                    "operator_manual"
+                  ]
+                },
+                "resolution_profile_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 600
+                },
+                "auto_fill_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "examples": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 240
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "id_list": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/id"
+      },
+      "uniqueItems": true
+    }
+  }
+}

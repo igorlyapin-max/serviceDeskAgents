@@ -1,0 +1,254 @@
+{
+  "schema_version": "1.0",
+  "auth_mode_default": "dev_header",
+  "permissions": [
+    {
+      "permission_id": "cases.read",
+      "description": "Чтение кейсов и связанных timeline."
+    },
+    {
+      "permission_id": "cases.operate",
+      "description": "Анализ заявок и операторские действия по кейсу."
+    },
+    {
+      "permission_id": "approvals.decide",
+      "description": "Согласование или отклонение action gates."
+    },
+    {
+      "permission_id": "callbacks.write",
+      "description": "Прием callback от integration endpoints."
+    },
+    {
+      "permission_id": "feedback.write",
+      "description": "Запись обратной связи оператора по ответам AI."
+    },
+    {
+      "permission_id": "knowledge.read",
+      "description": "Чтение статуса, sources, chunks и test retrieval базы знаний."
+    },
+    {
+      "permission_id": "knowledge.manage",
+      "description": "Перестроение индекса базы знаний."
+    },
+    {
+      "permission_id": "tools.read",
+      "description": "Просмотр tools и integration endpoint catalogs."
+    },
+    {
+      "permission_id": "tools.manage",
+      "description": "Административные действия с tools и integrations."
+    },
+    {
+      "permission_id": "prompts.read",
+      "description": "Просмотр prompt registry и версий prompts."
+    },
+    {
+      "permission_id": "prompts.manage",
+      "description": "Управление prompts и activation workflow."
+    },
+    {
+      "permission_id": "workflow.read",
+      "description": "Просмотр workflow states и transition rules."
+    },
+    {
+      "permission_id": "workflow.manage",
+      "description": "Управление workflow config через draft/validate/activate."
+    },
+    {
+      "permission_id": "models.read",
+      "description": "Просмотр model routing и LiteLLM settings."
+    },
+    {
+      "permission_id": "models.manage",
+      "description": "Управление model routing и LiteLLM settings."
+    },
+    {
+      "permission_id": "evaluation.run",
+      "description": "Запуск evaluation runner и управление curated evaluation cases."
+    },
+    {
+      "permission_id": "audit.read",
+      "description": "Просмотр audit log и observability summaries."
+    },
+    {
+      "permission_id": "security.manage",
+      "description": "Управление security catalog, secret references и sessions."
+    }
+  ],
+  "roles": [
+    {
+      "role_id": "admin",
+      "description": "Полный доступ к административной и операторской плоскости.",
+      "permissions": [
+        "cases.read",
+        "cases.operate",
+        "approvals.decide",
+        "callbacks.write",
+        "feedback.write",
+        "knowledge.read",
+        "knowledge.manage",
+        "tools.read",
+        "tools.manage",
+        "prompts.read",
+        "prompts.manage",
+        "workflow.read",
+        "workflow.manage",
+        "models.read",
+        "models.manage",
+        "evaluation.run",
+        "audit.read",
+        "security.manage"
+      ]
+    },
+    {
+      "role_id": "operator",
+      "description": "Оператор обработки обращений и согласования действий.",
+      "permissions": [
+        "cases.read",
+        "cases.operate",
+        "approvals.decide",
+        "feedback.write",
+        "knowledge.read",
+        "knowledge.manage"
+      ]
+    },
+    {
+      "role_id": "support_l1",
+      "description": "Линия поддержки L1 с доступом к чтению и базовым операторским действиям.",
+      "permissions": [
+        "cases.read",
+        "cases.operate",
+        "feedback.write",
+        "knowledge.read"
+      ]
+    },
+    {
+      "role_id": "support_l2",
+      "description": "Линия поддержки L2 с доступом к чтению, операторским действиям и диагностике tools.",
+      "permissions": [
+        "cases.read",
+        "cases.operate",
+        "knowledge.read",
+        "tools.read"
+      ]
+    },
+    {
+      "role_id": "readonly",
+      "description": "Только чтение кейсов и audit summaries.",
+      "permissions": [
+        "cases.read",
+        "knowledge.read",
+        "tools.read",
+        "workflow.read",
+        "models.read",
+        "audit.read"
+      ]
+    },
+    {
+      "role_id": "endpoint",
+      "description": "Техническая роль для callback endpoints.",
+      "permissions": [
+        "callbacks.write"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "user_id": "admin-1",
+      "display_name": "Администратор разработки",
+      "roles": [
+        "admin"
+      ],
+      "enabled": true
+    },
+    {
+      "user_id": "operator-1",
+      "display_name": "Оператор разработки",
+      "roles": [
+        "operator"
+      ],
+      "enabled": true
+    },
+    {
+      "user_id": "support-l1-1",
+      "display_name": "Support L1 разработки",
+      "roles": [
+        "support_l1"
+      ],
+      "enabled": true
+    },
+    {
+      "user_id": "support-l2-1",
+      "display_name": "Support L2 разработки",
+      "roles": [
+        "support_l2"
+      ],
+      "enabled": true
+    },
+    {
+      "user_id": "readonly-1",
+      "display_name": "Readonly пользователь разработки",
+      "roles": [
+        "readonly"
+      ],
+      "enabled": true
+    }
+  ],
+  "secret_references": [
+    {
+      "secret_id": "litellm.master_key",
+      "secret_type": "api_key",
+      "storage": "env",
+      "reference": "LITELLM_MASTER_KEY",
+      "description": "Master key для LiteLLM gateway.",
+      "used_by": [
+        "litellm"
+      ],
+      "rotation_required": true
+    },
+    {
+      "secret_id": "n8n.webhook_token",
+      "secret_type": "webhook_token",
+      "storage": "env",
+      "reference": "N8N_WEBHOOK_TOKEN",
+      "description": "Token для исходящих вызовов n8n webhook.",
+      "used_by": [
+        "n8n_webhook"
+      ],
+      "rotation_required": true
+    },
+    {
+      "secret_id": "integrations.callback_token",
+      "secret_type": "webhook_token",
+      "storage": "env",
+      "reference": "INTEGRATION_CALLBACK_TOKEN",
+      "description": "Token для защиты callback endpoints интеграций.",
+      "used_by": [
+        "integration_callback"
+      ],
+      "rotation_required": true
+    },
+    {
+      "secret_id": "zabbix.direct_credentials",
+      "secret_type": "credential_reference",
+      "storage": "external",
+      "reference": "ZABBIX_DIRECT_CREDENTIALS_REF",
+      "description": "Будущая ссылка на credentials прямого Zabbix API.",
+      "used_by": [
+        "direct.zabbix.disabled"
+      ],
+      "rotation_required": true
+    },
+    {
+      "secret_id": "cmdb.direct_credentials",
+      "secret_type": "credential_reference",
+      "storage": "external",
+      "reference": "CMDB_DIRECT_CREDENTIALS_REF",
+      "description": "Будущая ссылка на credentials прямого CMDB API.",
+      "used_by": [
+        "direct.cmdb.disabled"
+      ],
+      "rotation_required": true
+    }
+  ]
+}
