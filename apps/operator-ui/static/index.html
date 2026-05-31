@@ -3,23 +3,31 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Оператор ServiceDesk</title>
-    <link rel="stylesheet" href="/operator/static/styles.css">
+    <title>Консоль отладки ServiceDesk</title>
+    <link rel="stylesheet" href="/debug/static/styles.css">
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
         <div>
-          <h1>Оператор ServiceDesk</h1>
+          <h1>Консоль отладки ServiceDesk</h1>
           <div class="subhead" id="apiStatus">API ожидается</div>
         </div>
         <div class="operator-strip">
-          <label for="operatorId">Оператор</label>
-          <input id="operatorId" name="operatorId" value="operator-1" autocomplete="off">
+          <label for="operatorId">Инициатор</label>
+          <input id="operatorId" name="operatorId" value="admin-1" autocomplete="off">
         </div>
       </header>
 
-      <main class="workspace">
+      <nav class="debug-nav" role="tablist" aria-label="Разделы консоли отладки">
+        <button class="debug-tab active" data-debug-tab="single" type="button" role="tab" aria-selected="true">Одиночный прогон</button>
+        <button class="debug-tab" data-debug-tab="flow" type="button" role="tab" aria-selected="false">Мультиагентный поток</button>
+        <button class="debug-tab" data-debug-tab="traces" type="button" role="tab" aria-selected="false">Трассы обращений</button>
+        <button class="debug-tab" data-debug-tab="waits" type="button" role="tab" aria-selected="false">Активные ожидания</button>
+        <button class="debug-tab" data-debug-tab="captures" type="button" role="tab" aria-selected="false">Mock из endpoint-вызовов</button>
+      </nav>
+
+      <main class="workspace debug-panel" data-debug-panel="single">
         <section class="ticket-pane" aria-labelledby="ticket-title">
           <div class="section-head">
             <h2 id="ticket-title">Текст заявки</h2>
@@ -81,7 +89,7 @@
         </section>
 
         <section class="detail-pane" aria-label="Детали обработки">
-          <nav class="operator-tabs" role="tablist" aria-label="Разделы панели оператора">
+          <nav class="operator-tabs" role="tablist" aria-label="Разделы одиночного прогона">
             <button class="operator-tab active" data-main-tab="steps" type="button" role="tab" aria-selected="true">5 шагов</button>
             <button class="operator-tab" data-main-tab="result" type="button" role="tab" aria-selected="false">Результат</button>
             <button class="operator-tab" data-main-tab="case" type="button" role="tab" aria-selected="false">Кейс</button>
@@ -167,8 +175,117 @@
           </div>
         </section>
       </main>
+
+      <main class="debug-workspace debug-panel" data-debug-panel="flow" hidden>
+        <section class="debug-card">
+          <div class="section-head">
+            <h2>Мультиагентный поток</h2>
+            <div class="button-row">
+              <button id="debugPrepareButton" class="primary" type="button">Сформировать поток</button>
+              <button id="debugStartButton" type="button" disabled>Запустить</button>
+              <button id="debugPauseButton" type="button" disabled>Пауза</button>
+              <button id="debugCancelButton" type="button" disabled>Отменить</button>
+            </div>
+          </div>
+          <div class="debug-form-grid">
+            <label>
+              Сценарий-источник
+              <select id="debugFlowScenario"></select>
+              <span class="field-help">Поток генерируется из сценария как источника истины: слоты, ReAct-вызовы и ожидаемые ветки берутся из конфигурации.</span>
+            </label>
+            <label>
+              Обращений на сценарий
+              <input id="debugFlowCount" type="number" min="1" max="100" value="3">
+            </label>
+            <label>
+              Seed
+              <input id="debugFlowSeed" value="debug-seed-1" autocomplete="off">
+            </label>
+            <label class="checkbox-row">
+              <input id="debugFlowWrongDepartment" type="checkbox" checked>
+              <span>Добавить нецелевое обращение</span>
+            </label>
+          </div>
+          <div id="debugSimulationStatus" class="status-line">Поток не сформирован</div>
+          <div id="debugSimulationItems" class="debug-table-zone"></div>
+        </section>
+      </main>
+
+      <main class="debug-workspace debug-panel" data-debug-panel="traces" hidden>
+        <section class="debug-card">
+          <div class="section-head">
+            <h2>Трассы обращений</h2>
+            <button id="debugLoadTraceButton" type="button">Обновить</button>
+          </div>
+          <div class="debug-form-grid">
+            <label>
+              Запуск симуляции
+              <select id="debugTraceRunSelect"></select>
+            </label>
+            <label>
+              Case ID
+              <input id="debugTraceCaseId" autocomplete="off" placeholder="case-...">
+            </label>
+            <div class="button-row align-end">
+              <button id="debugLoadCaseTraceButton" type="button">Открыть обращение</button>
+            </div>
+          </div>
+          <div id="debugCaseTraceView" class="trace-view"></div>
+        </section>
+      </main>
+
+      <main class="debug-workspace debug-panel" data-debug-panel="waits" hidden>
+        <section class="debug-card">
+          <div class="section-head">
+            <h2>Активные ожидания</h2>
+            <button id="debugWaitsRefreshButton" type="button">Обновить</button>
+          </div>
+          <div id="debugWaitsView" class="debug-table-zone"></div>
+        </section>
+      </main>
+
+      <main class="debug-workspace debug-panel" data-debug-panel="captures" hidden>
+        <section class="debug-card">
+          <div class="section-head">
+            <h2>Mock из endpoint-вызовов</h2>
+            <div class="button-row">
+              <button id="captureRefreshButton" type="button">Обновить</button>
+              <button id="captureStartButton" class="primary" type="button">Начать захват</button>
+            </div>
+          </div>
+          <div class="debug-form-grid">
+            <label>
+              Endpoint
+              <select id="captureEndpointSelect"></select>
+              <span class="field-help">Захват записывает реальные вызовы выбранной операции и затем позволяет создать обезличенный mock.</span>
+            </label>
+            <label>
+              Операция
+              <select id="captureOperationSelect"></select>
+            </label>
+            <label>
+              Активная сессия
+              <select id="captureStopSessionSelect"></select>
+            </label>
+            <div class="button-row align-end">
+              <button id="captureStopButton" type="button">Остановить захват</button>
+            </div>
+          </div>
+          <div id="captureStatus" class="status-line">Сессии захвата не загружены</div>
+          <div class="debug-grid-two">
+            <section>
+              <h3>Сессии</h3>
+              <div id="captureSessions" class="debug-table-zone"></div>
+            </section>
+            <section>
+              <h3>Захваченные вызовы</h3>
+              <div id="captureList" class="debug-table-zone"></div>
+            </section>
+          </div>
+        </section>
+      </main>
     </div>
 
-    <script src="/operator/static/app.js?v=stage13_40_autofill_trace_values"></script>
+    <script src="/debug/static/app.js?v=stage14_debug_simulation_capture"></script>
   </body>
 </html>

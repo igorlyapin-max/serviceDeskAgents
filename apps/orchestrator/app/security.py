@@ -62,6 +62,7 @@ class SecurityContext:
     session_id: str | None
     auth_mode: str
     ip_address: str | None = None
+    request_id: str | None = None
 
     def has_permission(self, permission: str) -> bool:
         return permission in self.permissions
@@ -79,6 +80,8 @@ class SecurityContext:
             result["session_id"] = self.session_id
         if self.ip_address:
             result["ip_address"] = self.ip_address
+        if self.request_id:
+            result["request_id"] = self.request_id
         return result
 
 
@@ -108,9 +111,10 @@ class SecurityManager:
         headers: Mapping[str, str],
         *,
         ip_address: str | None = None,
+        request_id: str | None = None,
     ) -> SecurityContext:
         if self.auth_mode == "disabled":
-            return self._disabled_context(ip_address)
+            return self._disabled_context(ip_address, request_id=request_id)
 
         actor_id = headers.get("x-servicedesk-actor") or self.dev_actor
         session_id = headers.get("x-servicedesk-session") or f"dev:{actor_id}"
@@ -126,6 +130,7 @@ class SecurityManager:
             session_id=session_id,
             auth_mode=self.auth_mode,
             ip_address=ip_address,
+            request_id=request_id,
         )
 
     def callback_context(
@@ -134,6 +139,7 @@ class SecurityManager:
         *,
         endpoint_id: str,
         ip_address: str | None = None,
+        request_id: str | None = None,
     ) -> SecurityContext:
         expected_token = os.getenv("INTEGRATION_CALLBACK_TOKEN", "dev-callback-token")
         actual_token = headers.get("x-servicedesk-callback-token")
@@ -146,6 +152,7 @@ class SecurityManager:
             session_id=f"callback:{endpoint_id}",
             auth_mode="callback_token",
             ip_address=ip_address,
+            request_id=request_id,
         )
 
     def require_permission(self, context: SecurityContext, permission: str) -> None:
@@ -193,6 +200,7 @@ class SecurityManager:
         *,
         actor_id: str = "anonymous",
         ip_address: str | None = None,
+        request_id: str | None = None,
     ) -> SecurityContext:
         return SecurityContext(
             actor_id=actor_id,
@@ -202,6 +210,7 @@ class SecurityManager:
             session_id=None,
             auth_mode=self.auth_mode,
             ip_address=ip_address,
+            request_id=request_id,
         )
 
     def _context_from_roles(
@@ -213,6 +222,7 @@ class SecurityManager:
         session_id: str | None,
         auth_mode: str,
         ip_address: str | None,
+        request_id: str | None = None,
     ) -> SecurityContext:
         permissions: set[str] = set()
         for role_id in role_ids:
@@ -226,9 +236,10 @@ class SecurityManager:
             session_id=session_id,
             auth_mode=auth_mode,
             ip_address=ip_address,
+            request_id=request_id,
         )
 
-    def _disabled_context(self, ip_address: str | None) -> SecurityContext:
+    def _disabled_context(self, ip_address: str | None, *, request_id: str | None = None) -> SecurityContext:
         admin_role = self.roles_by_id["admin"]
         return SecurityContext(
             actor_id="security-disabled",
@@ -238,6 +249,7 @@ class SecurityManager:
             session_id="security-disabled",
             auth_mode="disabled",
             ip_address=ip_address,
+            request_id=request_id,
         )
 
 
@@ -267,6 +279,9 @@ class AuditStore:
         status_code: int | None = None,
         details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        clean_details = copy.deepcopy(details or {})
+        if context.request_id and "request_id" not in clean_details:
+            clean_details["request_id"] = context.request_id
         event = {
             "schema_version": "1.0",
             "audit_id": f"aud-{uuid.uuid4().hex[:12]}",
@@ -285,7 +300,7 @@ class AuditStore:
             "request_path": request_path,
             "status_code": status_code,
             "ip_address": context.ip_address,
-            "details": self._sanitize_details(details or {}),
+            "details": self._sanitize_details(clean_details),
         }
         for key, value in optional_values.items():
             if value not in (None, "", {}):

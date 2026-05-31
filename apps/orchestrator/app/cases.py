@@ -255,6 +255,70 @@ class CaseStore:
         self.contracts.require_valid("case_record", record)
         return record
 
+    def callback_receipt(self, invocation_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select receipt_json
+                from callback_receipts
+                where invocation_id = ?
+                """,
+                (invocation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["receipt_json"])
+
+    def record_callback_receipt(
+        self,
+        *,
+        invocation_id: str,
+        endpoint_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        receipt = {
+            "schema_version": "1.0",
+            "invocation_id": invocation_id,
+            "endpoint_id": endpoint_id,
+            "case_id": result.get("case", {}).get("case_id"),
+            "status": result.get("tool_result", {}).get("status"),
+            "created_at": now,
+            "updated_at": now,
+            "result": copy.deepcopy(result),
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into callback_receipts (
+                    invocation_id,
+                    endpoint_id,
+                    case_id,
+                    status,
+                    receipt_json,
+                    created_at,
+                    updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?)
+                on conflict(invocation_id) do update set
+                    endpoint_id = excluded.endpoint_id,
+                    case_id = excluded.case_id,
+                    status = excluded.status,
+                    receipt_json = excluded.receipt_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    receipt["invocation_id"],
+                    receipt["endpoint_id"],
+                    receipt.get("case_id"),
+                    receipt.get("status"),
+                    self._to_json(receipt),
+                    receipt["created_at"],
+                    receipt["updated_at"],
+                ),
+            )
+        return receipt
+
     def timeline(self, case_id: str) -> dict[str, Any]:
         record = self.require(case_id)
         with self._connect() as connection:
@@ -692,6 +756,19 @@ class CaseStore:
                     ticket_id text not null,
                     created_at text not null,
                     primary key (correlation_key, correlation_value)
+                )
+                """
+            )
+            connection.execute(
+                """
+                create table if not exists callback_receipts (
+                    invocation_id text primary key,
+                    endpoint_id text not null,
+                    case_id text,
+                    status text,
+                    receipt_json text not null,
+                    created_at text not null,
+                    updated_at text not null
                 )
                 """
             )

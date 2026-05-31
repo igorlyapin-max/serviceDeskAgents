@@ -7,7 +7,7 @@ stage0-config:
 
 .PHONY: stage0-up
 stage0-up:
-	$(COMPOSE) up -d postgres redis n8n
+	$(COMPOSE) up -d postgres redis redpanda n8n
 
 .PHONY: stage0-llm-up
 stage0-llm-up:
@@ -246,6 +246,31 @@ stage13_9-check:
 .PHONY: stage13_9-smoke
 stage13_9-smoke:
 	./scripts/stage13_9-smoke.sh
+
+.PHONY: stage13_40-check
+stage13_40-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+	./scripts/validate-docs.sh
+
+.PHONY: test
+test:
+	$(PYTHON) -m unittest discover -s tests
+
+.PHONY: stage14-check
+stage14-check:
+	$(PYTHON) -m compileall -q apps/orchestrator
+	node --check apps/operator-ui/static/app.js
+	node --check apps/admin-ui/static/app.js
+	./scripts/validate-contracts.sh
+	./scripts/validate-docs.sh
+	$(PYTHON) -m unittest discover -s tests
+
+.PHONY: docs-check
+docs-check:
+	./scripts/validate-docs.sh
 
 .PHONY: stage0-ps
 stage0-ps:

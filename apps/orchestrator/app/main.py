@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +22,20 @@ from .config_registry import (
     ConfigVersionNotFound,
 )
 from .contracts import ContractValidationError
+from .debug_runtime import DebugRuntime, DebugRuntimeError
 from .local_env import LocalEnvError, set_local_env_value
+from .metrics import metrics
+from .processing import ProcessingConflict, ProcessingNotFound, ProcessingStore
+from .runtime_guardrails import (
+    RuntimeConfigurationError,
+    configure_logging,
+    is_production_environment,
+    log_json,
+    readiness_report,
+    require_local_secret_write_allowed,
+    security_headers,
+    validate_startup_environment,
+)
 from .security import (
     AuditStore,
     CallbackTokenInvalid,
@@ -29,6 +45,11 @@ from .security import (
     SecurityManager,
 )
 from .workflow import TicketWorkflow
+
+
+configure_logging()
+validate_startup_environment()
+logger = logging.getLogger("servicedesk.orchestrator")
 
 
 class TicketAnalyzeRequest(BaseModel):
@@ -131,6 +152,11 @@ class AdminModelSecretUpdateRequest(BaseModel):
     secret_value: str = Field(min_length=1, max_length=8192, repr=False)
 
 
+class AdminProcessingCommandRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    reason: str | None = Field(default=None)
+
+
 class OperatorScenarioSimulationRequest(BaseModel):
     text: str = Field()
     provided_slots: dict[str, Any] | None = Field(default=None)
@@ -140,6 +166,56 @@ class OperatorScenarioSimulationRequest(BaseModel):
     allow_readonly_integrations: bool | None = Field(default=None)
     allow_mock_integrations: bool | None = Field(default=None)
     allow_action_with_approval: bool | None = Field(default=None)
+
+
+class DebugSimulationPrepareRequest(BaseModel):
+    source: str = Field(default="scenario_profiles")
+    scenario_ids: list[str] | None = Field(default=None)
+    count_per_scenario: int = Field(default=1, ge=1, le=100)
+    channel_id: str = Field(default="debug")
+    seed: str | None = Field(default=None)
+    include_wrong_department: bool = Field(default=False)
+    mode: str = Field(default="dry_run")
+    dry_run: bool = Field(default=True)
+    contains_real_data: bool = Field(default=False)
+    sanitized: bool = Field(default=False)
+
+
+class DebugSimulationItemPatchRequest(BaseModel):
+    patch: dict[str, Any] = Field(default_factory=dict)
+
+
+class DebugSimulationStartRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    selected_item_ids: list[str] | None = Field(default=None)
+    stop_on_mismatch: bool = Field(default=False)
+
+
+class DebugEndpointCaptureStartRequest(BaseModel):
+    endpoint_id: str = Field()
+    operation_id: str = Field()
+    operator_id: str = Field(default="admin-1")
+
+
+class DebugEndpointCaptureStopRequest(BaseModel):
+    session_id: str = Field()
+    operator_id: str = Field(default="admin-1")
+
+
+class DebugEndpointCaptureSanitizeRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+
+
+class DebugEndpointCaptureCreateMockRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    example_name: str | None = Field(default=None)
+    description: str | None = Field(default=None)
+    tags: list[str] | None = Field(default=None)
+
+
+class DebugEndpointCaptureMarkBrokenRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    reason: str | None = Field(default=None)
 
 
 class IntegrationCallbackRequest(BaseModel):
@@ -166,14 +242,74 @@ app = FastAPI(title="ServiceDesk AI Orchestrator", version="0.1.0")
 workflow = TicketWorkflow()
 config_store = ConfigStore(workflow.contracts)
 workflow.attach_config_store(config_store)
+processing_store = ProcessingStore(workflow.case_store)
+debug_runtime = DebugRuntime(workflow, config_store, processing_store)
+workflow.capture_recorder = debug_runtime
+workflow.integration_dispatcher.capture_recorder = debug_runtime
 security = SecurityManager(workflow.contracts)
 audit_store = AuditStore(workflow.contracts)
 OPERATOR_UI_ROOT = Path(__file__).resolve().parents[2] / "operator-ui" / "static"
 ADMIN_UI_ROOT = Path(__file__).resolve().parents[2] / "admin-ui" / "static"
+
+
+@app.middleware("http")
+async def request_context_and_security_headers(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or f"req-{uuid.uuid4().hex[:12]}"
+    request.state.request_id = request_id
+    started_at = time.monotonic()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception:
+        log_json(
+            logger,
+            logging.ERROR,
+            "http_request_failed",
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+        )
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        log_json(
+            logger,
+            logging.INFO,
+            "http_request_completed",
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+        )
+        metrics.increment(
+            "http_requests_total",
+            {"method": request.method, "path": request.url.path, "status": status_code},
+        )
+        metrics.observe(
+            "http_request_duration_seconds",
+            duration_ms / 1000,
+            {"method": request.method, "path": request.url.path, "status": status_code},
+        )
+    response.headers["X-Request-ID"] = request_id
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    https_enabled = request.url.scheme == "https" or forwarded_proto == "https"
+    https_enabled = https_enabled or is_production_environment()
+    for header, value in security_headers(https_enabled=https_enabled).items():
+        response.headers.setdefault(header, value)
+    return response
+
+
 app.mount(
     "/operator/static",
     StaticFiles(directory=OPERATOR_UI_ROOT),
     name="operator-static",
+)
+app.mount(
+    "/debug/static",
+    StaticFiles(directory=OPERATOR_UI_ROOT),
+    name="debug-static",
 )
 app.mount(
     "/admin/static",
@@ -192,18 +328,24 @@ def client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def request_id(request: Request) -> str | None:
+    value = getattr(request.state, "request_id", None)
+    return str(value) if value else None
+
+
 def context_or_raise(request: Request) -> SecurityContext:
     context: SecurityContext | None = None
     try:
         context = security.context_from_headers(
             request.headers,
             ip_address=client_ip(request),
+            request_id=request_id(request),
         )
         security.check_rate_limit(context)
         return context
     except RateLimitExceeded as error:
         audit_store.record(
-            context or security.anonymous_context(ip_address=client_ip(request)),
+            context or security.anonymous_context(ip_address=client_ip(request), request_id=request_id(request)),
             action="security.rate_limit",
             resource_type="session",
             outcome="denied",
@@ -221,7 +363,7 @@ def context_or_raise(request: Request) -> SecurityContext:
         ) from error
     except PermissionDenied as error:
         audit_store.record(
-            security.anonymous_context(ip_address=client_ip(request)),
+            security.anonymous_context(ip_address=client_ip(request), request_id=request_id(request)),
             action="security.authenticate",
             resource_type="session",
             outcome="denied",
@@ -282,6 +424,7 @@ def callback_context_dependency(
             request.headers,
             endpoint_id=endpoint_id,
             ip_address=client_ip(request),
+            request_id=request_id(request),
         )
         security.check_rate_limit(context)
         security.require_permission(context, "callbacks.write")
@@ -291,6 +434,7 @@ def callback_context_dependency(
             security.anonymous_context(
                 actor_id=f"endpoint:{endpoint_id}",
                 ip_address=client_ip(request),
+                request_id=request_id(request),
             ),
             action="callbacks.receive",
             resource_type="integration_endpoint",
@@ -314,6 +458,7 @@ def callback_context_dependency(
             security.anonymous_context(
                 actor_id=f"endpoint:{endpoint_id}",
                 ip_address=client_ip(request),
+                request_id=request_id(request),
             ),
             action="security.rate_limit",
             resource_type="integration_endpoint",
@@ -337,6 +482,7 @@ def callback_context_dependency(
             security.anonymous_context(
                 actor_id=f"endpoint:{endpoint_id}",
                 ip_address=client_ip(request),
+                request_id=request_id(request),
             ),
             action="callbacks.receive",
             resource_type="integration_endpoint",
@@ -405,6 +551,42 @@ def audit_error(
         status_code=status_code,
         details={"message": message},
     )
+
+
+def existing_callback_result(payload: dict[str, Any]) -> dict[str, Any] | None:
+    invocation_id = payload.get("invocation_id")
+    if not invocation_id:
+        return None
+    receipt = workflow.case_store.callback_receipt(invocation_id)
+    if receipt:
+        result = receipt.get("result", {})
+        if isinstance(result, dict):
+            duplicate = dict(result)
+            duplicate.setdefault("schema_version", "1.0")
+            duplicate.setdefault("accepted", True)
+            duplicate["duplicate"] = True
+            return duplicate
+    record = workflow.case_store.by_correlation("invocation_id", invocation_id)
+    if not record:
+        return None
+    tool_result = next(
+        (
+            item
+            for item in record.get("tool_results", [])
+            if item.get("invocation_id") == invocation_id
+        ),
+        None,
+    )
+    if not tool_result:
+        return None
+    return {
+        "schema_version": "1.0",
+        "accepted": True,
+        "duplicate": True,
+        "case": record,
+        "tool_result": tool_result,
+        "workflow_state": record.get("current_workflow_state"),
+    }
 
 
 def require_config_permission(
@@ -476,6 +658,62 @@ def config_error_response(error: Exception) -> HTTPException:
     )
 
 
+def processing_error_response(error: Exception) -> HTTPException:
+    if isinstance(error, ProcessingNotFound):
+        return HTTPException(
+            status_code=404,
+            detail={
+                "code": "processing_item_not_found",
+                "message": f"Объект потока обработки не найден: {error}",
+            },
+        )
+    if isinstance(error, CaseNotFound):
+        return HTTPException(
+            status_code=404,
+            detail={
+                "code": "case_not_found",
+                "message": f"Кейс не найден: {error}",
+            },
+        )
+    if isinstance(error, ProcessingConflict):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "processing_conflict",
+                "message": str(error),
+            },
+        )
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": "processing_error",
+            "message": str(error),
+        },
+    )
+
+
+def debug_error_response(error: Exception) -> HTTPException:
+    if isinstance(error, DebugRuntimeError):
+        return HTTPException(
+            status_code=400,
+            detail={
+                "code": "debug_runtime_error",
+                "message": str(error),
+            },
+        )
+    if isinstance(error, ConfigRegistryError):
+        return config_error_response(error)
+    if isinstance(error, (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError)):
+        return processing_error_response(error)
+    return HTTPException(
+        status_code=500,
+        detail={
+            "code": "debug_runtime_error",
+            "message": str(error),
+        },
+    )
+
+
 def build_config_regression(
     draft: dict[str, Any],
     *,
@@ -539,8 +777,27 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/readyz")
+def readyz() -> dict[str, Any]:
+    return readiness_report(
+        config_store=config_store,
+        workflow=workflow,
+        processing_store=processing_store,
+    )
+
+
+@app.get("/metrics")
+def metrics_endpoint() -> PlainTextResponse:
+    return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/operator")
 def operator_ui() -> FileResponse:
+    return FileResponse(OPERATOR_UI_ROOT / "index.html")
+
+
+@app.get("/debug")
+def debug_ui() -> FileResponse:
     return FileResponse(OPERATOR_UI_ROOT / "index.html")
 
 
@@ -618,6 +875,518 @@ def operator_simulate_scenario(
         raise config_error_response(error) from error
 
 
+@app.get("/debug/scenarios")
+def debug_scenarios(
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.scenarios.read",
+            resource_type="scenario",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return config_store.scenario_overview()
+
+
+@app.get("/debug/scenarios/{scenario_id}")
+def debug_scenario_detail(
+    scenario_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.scenarios.detail.read",
+            resource_type="scenario",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return config_store.scenario_detail(scenario_id)
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+
+
+@app.post("/debug/scenarios/{scenario_id}/simulate")
+def debug_simulate_scenario(
+    scenario_id: str,
+    request: OperatorScenarioSimulationRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.scenarios.simulate",
+            resource_type="scenario",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = config_store.simulate_scenario(
+            scenario_id,
+            text=request.text,
+            provided_slots=request.provided_slots,
+            run_mode=request.run_mode,
+            allow_llm=request.allow_llm,
+            allow_readonly_integrations=request.allow_readonly_integrations,
+            allow_mock_integrations=request.allow_mock_integrations,
+            allow_action_with_approval=request.allow_action_with_approval,
+        )
+        audit_success(
+            context,
+            http_request,
+            action="debug.scenarios.simulate",
+            resource_type="scenario",
+            resource_id=scenario_id,
+            permission="cases.operate",
+            details={
+                "operator_id": request.operator_id,
+                "dry_run": True,
+                "final_decision": result["final_decision"],
+            },
+        )
+        return result
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+
+
+@app.get("/debug/simulations/profiles")
+def debug_simulation_profiles(
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.profiles.read",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.simulation_profiles()
+    except (DebugRuntimeError, ConfigRegistryError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/simulations")
+def debug_simulations(
+    limit: int = Query(default=50, ge=1, le=200),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.read",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return debug_runtime.list_simulations(limit=limit)
+
+
+@app.post("/debug/simulations/prepare")
+def debug_simulation_prepare(
+    request: DebugSimulationPrepareRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.prepare",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.prepare_simulation(model_to_dict(request))
+        audit_success(
+            context,
+            http_request,
+            action="debug.simulations.prepare",
+            resource_type="debug_simulation",
+            resource_id=result["run"]["run_id"],
+            permission="cases.operate",
+            details={"item_count": len(result["items"]), "source": result["run"]["source"]},
+        )
+        return result
+    except (DebugRuntimeError, ConfigRegistryError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/simulations/{run_id}")
+def debug_simulation_detail(
+    run_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.detail.read",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.simulation_detail(run_id)
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/simulations/{run_id}/items")
+def debug_simulation_items(
+    run_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.items.read",
+            resource_type="debug_simulation_item",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.list_simulation_items(run_id)
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.patch("/debug/simulations/{run_id}/items/{item_id}")
+def debug_simulation_item_patch(
+    run_id: str,
+    item_id: str,
+    request: DebugSimulationItemPatchRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.item.update",
+            resource_type="debug_simulation_item",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.patch_simulation_item(run_id, item_id, request.patch)
+        audit_success(
+            context,
+            http_request,
+            action="debug.simulations.item.update",
+            resource_type="debug_simulation_item",
+            resource_id=item_id,
+            permission="cases.operate",
+            details={"run_id": run_id},
+        )
+        return result
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/simulations/{run_id}/start")
+def debug_simulation_start(
+    run_id: str,
+    request: DebugSimulationStartRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.start",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.start_simulation(run_id, model_to_dict(request))
+        audit_success(
+            context,
+            http_request,
+            action="debug.simulations.start",
+            resource_type="debug_simulation",
+            resource_id=run_id,
+            permission="cases.operate",
+            details={"operator_id": request.operator_id, "counters": result["run"].get("counters")},
+        )
+        return result
+    except (DebugRuntimeError, ConfigRegistryError, ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/simulations/{run_id}/pause")
+def debug_simulation_pause(
+    run_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.pause",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.pause_simulation(run_id)
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/simulations/{run_id}/cancel")
+def debug_simulation_cancel(
+    run_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.cancel",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.cancel_simulation(run_id)
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/simulations/{run_id}/trace")
+def debug_simulation_trace(
+    run_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.simulations.trace.read",
+            resource_type="debug_simulation",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.simulation_trace(run_id)
+    except (DebugRuntimeError, ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/cases/{case_id}/trace")
+def debug_case_trace(
+    case_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.case.trace.read",
+            resource_type="case",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.case_trace(case_id)
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/waits")
+def debug_waits(
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.waits.read",
+            resource_type="wait_state",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.list_waits(limit=limit)
+
+
+@app.get("/debug/integration-operations")
+def debug_integration_operations(
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.read",
+            action="debug.integration_operations.read",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return config_store.active_payload("integration_endpoints")
+
+
+@app.post("/debug/endpoint-captures/start")
+def debug_endpoint_capture_start(
+    request: DebugEndpointCaptureStartRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.manage",
+            action="debug.endpoint_captures.start",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.start_capture_session(model_to_dict(request))
+        audit_success(
+            context,
+            http_request,
+            action="debug.endpoint_captures.start",
+            resource_type="integration_endpoint",
+            resource_id=f"{request.endpoint_id}/{request.operation_id}",
+            permission="tools.manage",
+            details={"operator_id": request.operator_id, "session_id": result["session"]["session_id"]},
+        )
+        return result
+    except (DebugRuntimeError, ConfigRegistryError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/endpoint-captures/stop")
+def debug_endpoint_capture_stop(
+    request: DebugEndpointCaptureStopRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.manage",
+            action="debug.endpoint_captures.stop",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.stop_capture_session(request.session_id)
+        audit_success(
+            context,
+            http_request,
+            action="debug.endpoint_captures.stop",
+            resource_type="integration_endpoint",
+            resource_id=request.session_id,
+            permission="tools.manage",
+            details={"operator_id": request.operator_id},
+        )
+        return result
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.get("/debug/endpoint-captures")
+def debug_endpoint_captures(
+    limit: int = Query(default=100, ge=1, le=200),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.read",
+            action="debug.endpoint_captures.read",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return debug_runtime.list_captures(limit=limit)
+
+
+@app.get("/debug/endpoint-captures/{capture_id}")
+def debug_endpoint_capture_detail(
+    capture_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.read",
+            action="debug.endpoint_captures.detail.read",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return debug_runtime.capture_detail(capture_id)
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/endpoint-captures/{capture_id}/sanitize")
+def debug_endpoint_capture_sanitize(
+    capture_id: str,
+    request: DebugEndpointCaptureSanitizeRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.manage",
+            action="debug.endpoint_captures.sanitize",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.sanitize_capture(capture_id)
+        audit_success(
+            context,
+            http_request,
+            action="debug.endpoint_captures.sanitize",
+            resource_type="integration_endpoint",
+            resource_id=capture_id,
+            permission="tools.manage",
+            details={"operator_id": request.operator_id},
+        )
+        return result
+    except DebugRuntimeError as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/endpoint-captures/{capture_id}/create-mock")
+def debug_endpoint_capture_create_mock(
+    capture_id: str,
+    request: DebugEndpointCaptureCreateMockRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.manage",
+            action="debug.endpoint_captures.create_mock",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.create_mock_from_capture(capture_id, model_to_dict(request))
+        audit_success(
+            context,
+            http_request,
+            action="debug.endpoint_captures.create_mock",
+            resource_type="integration_endpoint",
+            resource_id=capture_id,
+            permission="tools.manage",
+            details={
+                "operator_id": request.operator_id,
+                "version_id": result["config_version"]["version_id"],
+            },
+        )
+        return result
+    except (DebugRuntimeError, ConfigRegistryError) as error:
+        raise debug_error_response(error) from error
+
+
+@app.post("/debug/endpoint-captures/{capture_id}/mark-contract-broken")
+def debug_endpoint_capture_mark_contract_broken(
+    capture_id: str,
+    request: DebugEndpointCaptureMarkBrokenRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "tools.manage",
+            action="debug.endpoint_captures.mark_contract_broken",
+            resource_type="integration_endpoint",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        result = debug_runtime.mark_capture_contract_broken(capture_id, model_to_dict(request))
+        audit_success(
+            context,
+            http_request,
+            action="debug.endpoint_captures.mark_contract_broken",
+            resource_type="integration_endpoint",
+            resource_id=capture_id,
+            permission="tools.manage",
+            details={
+                "operator_id": request.operator_id,
+                "version_id": result["config_version"]["version_id"],
+            },
+        )
+        return result
+    except (DebugRuntimeError, ConfigRegistryError) as error:
+        raise debug_error_response(error) from error
+
+
 @app.get("/admin")
 def admin_ui() -> FileResponse:
     return FileResponse(ADMIN_UI_ROOT / "index.html")
@@ -636,7 +1405,9 @@ def analyze_ticket(
     ),
 ) -> dict[str, Any]:
     try:
-        analysis = workflow.analyze(model_to_dict(request))
+        ticket_input = model_to_dict(request)
+        analysis = workflow.analyze(ticket_input)
+        processing_store.record_analysis(ticket_input, analysis)
         audit_success(
             context,
             http_request,
@@ -655,6 +1426,8 @@ def analyze_ticket(
                 "errors": error.errors,
             },
         ) from error
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise processing_error_response(error) from error
 
 
 @app.post("/cases")
@@ -670,7 +1443,9 @@ def create_case(
     ),
 ) -> dict[str, Any]:
     try:
-        analysis = workflow.analyze(model_to_dict(request))
+        ticket_input = model_to_dict(request)
+        analysis = workflow.analyze(ticket_input)
+        processing_store.record_analysis(ticket_input, analysis)
         audit_success(
             context,
             http_request,
@@ -693,6 +1468,8 @@ def create_case(
                 "errors": error.errors,
             },
         ) from error
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise processing_error_response(error) from error
 
 
 @app.get("/cases/{case_id}")
@@ -847,7 +1624,31 @@ def integration_callback(
             },
         )
     try:
+        duplicate = existing_callback_result(payload)
+        if duplicate:
+            metrics.increment("callback_duplicates_total", {"endpoint_id": endpoint_id})
+            audit_success(
+                context,
+                http_request,
+                action="callbacks.receive",
+                resource_type="integration_endpoint",
+                resource_id=endpoint_id,
+                permission="callbacks.write",
+                details={
+                    "case_id": duplicate["case"].get("case_id"),
+                    "invocation_id": payload.get("invocation_id"),
+                    "status": payload.get("status"),
+                    "duplicate": True,
+                },
+            )
+            return duplicate
         result = workflow.handle_integration_callback(payload)
+        processing_store.record_integration_callback(result)
+        workflow.case_store.record_callback_receipt(
+            invocation_id=payload["invocation_id"],
+            endpoint_id=endpoint_id,
+            result=result,
+        )
         audit_success(
             context,
             http_request,
@@ -967,6 +1768,7 @@ def decide_approval(
             if value is not None
         }
         result = workflow.decide_action_gate(approval_id, payload)
+        processing_store.record_approval_decision(result)
         audit_success(
             context,
             http_request,
@@ -1109,7 +1911,335 @@ def admin_dashboard(
     ),
 ) -> dict[str, Any]:
     _ = context
-    return workflow.admin_dashboard()
+    dashboard = workflow.admin_dashboard()
+    dashboard["processing"] = processing_store.overview()
+    return dashboard
+
+
+@app.get("/admin/processing/overview")
+def admin_processing_overview(
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.overview.read",
+            resource_type="processing",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.overview()
+
+
+@app.get("/admin/processing/cases")
+def admin_processing_cases(
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.cases.read",
+            resource_type="processing_case",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.list_cases(limit=limit)
+
+
+@app.get("/admin/processing/cases/{case_id}")
+def admin_processing_case_detail(
+    case_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.case.read",
+            resource_type="processing_case",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return processing_store.case_detail(case_id)
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise processing_error_response(error) from error
+
+
+@app.get("/admin/processing/runs")
+def admin_processing_runs(
+    case_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.runs.read",
+            resource_type="processing_run",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.list_runs(case_id=case_id, limit=limit)
+
+
+@app.get("/admin/processing/tasks")
+def admin_processing_tasks(
+    case_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.tasks.read",
+            resource_type="agent_task",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.list_tasks(case_id=case_id, limit=limit)
+
+
+@app.get("/admin/processing/waits")
+def admin_processing_waits(
+    case_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.waits.read",
+            resource_type="wait_state",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.list_waits(case_id=case_id, limit=limit)
+
+
+@app.get("/admin/processing/events")
+def admin_processing_events(
+    case_id: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.read",
+            action="admin.processing.events.read",
+            resource_type="case_event",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    return processing_store.case_events(case_id=case_id, limit=limit)
+
+
+@app.post("/admin/processing/runs/{run_id}/cancel")
+def admin_processing_cancel_run(
+    run_id: str,
+    payload: AdminProcessingCommandRequest,
+    request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.manage",
+            action="admin.processing.run.cancel",
+            resource_type="processing_run",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        run = processing_store.cancel_run(
+            run_id,
+            actor_id=payload.operator_id,
+            reason=payload.reason,
+        )
+        audit_success(
+            context,
+            request,
+            action="admin.processing.run.cancel",
+            resource_type="processing_run",
+            resource_id=run_id,
+            permission="processing.manage",
+            details={"operator_id": payload.operator_id, "status": run.get("status")},
+        )
+        return {"schema_version": "1.0", "run": run}
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        audit_error(
+            context,
+            request,
+            action="admin.processing.run.cancel",
+            resource_type="processing_run",
+            resource_id=run_id,
+            permission="processing.manage",
+            status_code=409 if isinstance(error, ProcessingConflict) else 400,
+            message=str(error),
+        )
+        raise processing_error_response(error) from error
+
+
+@app.post("/admin/processing/tasks/{task_id}/retry")
+def admin_processing_retry_task(
+    task_id: str,
+    payload: AdminProcessingCommandRequest,
+    request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.manage",
+            action="admin.processing.task.retry",
+            resource_type="agent_task",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        task = processing_store.retry_task(
+            task_id,
+            actor_id=payload.operator_id,
+            reason=payload.reason,
+        )
+        audit_success(
+            context,
+            request,
+            action="admin.processing.task.retry",
+            resource_type="agent_task",
+            resource_id=task_id,
+            permission="processing.manage",
+            details={"operator_id": payload.operator_id, "status": task.get("status")},
+        )
+        return {"schema_version": "1.0", "task": task}
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        audit_error(
+            context,
+            request,
+            action="admin.processing.task.retry",
+            resource_type="agent_task",
+            resource_id=task_id,
+            permission="processing.manage",
+            status_code=409 if isinstance(error, ProcessingConflict) else 400,
+            message=str(error),
+        )
+        raise processing_error_response(error) from error
+
+
+@app.post("/admin/processing/tasks/{task_id}/release-lease")
+def admin_processing_release_task_lease(
+    task_id: str,
+    payload: AdminProcessingCommandRequest,
+    request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.manage",
+            action="admin.processing.task.release_lease",
+            resource_type="agent_task",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        task = processing_store.release_task_lease(
+            task_id,
+            actor_id=payload.operator_id,
+            reason=payload.reason,
+        )
+        audit_success(
+            context,
+            request,
+            action="admin.processing.task.release_lease",
+            resource_type="agent_task",
+            resource_id=task_id,
+            permission="processing.manage",
+            details={"operator_id": payload.operator_id, "status": task.get("status")},
+        )
+        return {"schema_version": "1.0", "task": task}
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        audit_error(
+            context,
+            request,
+            action="admin.processing.task.release_lease",
+            resource_type="agent_task",
+            resource_id=task_id,
+            permission="processing.manage",
+            status_code=409 if isinstance(error, ProcessingConflict) else 400,
+            message=str(error),
+        )
+        raise processing_error_response(error) from error
+
+
+@app.post("/admin/processing/waits/{wait_id}/force-timeout")
+def admin_processing_force_wait_timeout(
+    wait_id: str,
+    payload: AdminProcessingCommandRequest,
+    request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.manage",
+            action="admin.processing.wait.force_timeout",
+            resource_type="wait_state",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        wait = processing_store.force_wait_timeout(
+            wait_id,
+            actor_id=payload.operator_id,
+            reason=payload.reason,
+        )
+        audit_success(
+            context,
+            request,
+            action="admin.processing.wait.force_timeout",
+            resource_type="wait_state",
+            resource_id=wait_id,
+            permission="processing.manage",
+            details={"operator_id": payload.operator_id, "status": wait.get("status")},
+        )
+        return {"schema_version": "1.0", "wait": wait}
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        audit_error(
+            context,
+            request,
+            action="admin.processing.wait.force_timeout",
+            resource_type="wait_state",
+            resource_id=wait_id,
+            permission="processing.manage",
+            status_code=409 if isinstance(error, ProcessingConflict) else 400,
+            message=str(error),
+        )
+        raise processing_error_response(error) from error
+
+
+@app.post("/admin/processing/cases/{case_id}/escalate")
+def admin_processing_escalate_case(
+    case_id: str,
+    payload: AdminProcessingCommandRequest,
+    request: Request,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "processing.manage",
+            action="admin.processing.case.escalate",
+            resource_type="processing_case",
+        )
+    ),
+) -> dict[str, Any]:
+    try:
+        detail = processing_store.escalate_case(
+            case_id,
+            actor_id=payload.operator_id,
+            reason=payload.reason,
+        )
+        audit_success(
+            context,
+            request,
+            action="admin.processing.case.escalate",
+            resource_type="processing_case",
+            resource_id=case_id,
+            permission="processing.manage",
+            details={"operator_id": payload.operator_id},
+        )
+        return detail
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        audit_error(
+            context,
+            request,
+            action="admin.processing.case.escalate",
+            resource_type="processing_case",
+            resource_id=case_id,
+            permission="processing.manage",
+            status_code=409 if isinstance(error, ProcessingConflict) else 400,
+            message=str(error),
+        )
+        raise processing_error_response(error) from error
 
 
 @app.get("/admin/knowledge/status")
@@ -1314,7 +2444,32 @@ def admin_model_secret_update(
     ),
 ) -> dict[str, Any]:
     try:
+        require_local_secret_write_allowed()
         set_local_env_value(payload.env_name, payload.secret_value)
+    except RuntimeConfigurationError as error:
+        audit_store.record(
+            context,
+            action="admin.models.secret.update",
+            resource_type="model_secret",
+            resource_id=payload.provider_id,
+            permission="models.manage",
+            outcome="denied",
+            request_method=request.method,
+            request_path=str(request.url.path),
+            status_code=403,
+            details={
+                "provider_id": payload.provider_id,
+                "env_name": payload.env_name,
+                "error": str(error),
+            },
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "secret_write_forbidden",
+                "message": str(error),
+            },
+        ) from error
     except LocalEnvError as error:
         audit_store.record(
             context,

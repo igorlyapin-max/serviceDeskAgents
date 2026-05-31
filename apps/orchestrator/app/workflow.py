@@ -113,6 +113,7 @@ class TicketWorkflow:
         self.policy = ExecutionPolicy(self.contracts)
         self.state_resolver = WorkflowStateResolver(self.contracts)
         self.tool_registry = ToolRegistry(self.contracts)
+        self.capture_recorder = None
         self.integration_dispatcher = IntegrationDispatcher(
             self.contracts,
             self.tool_registry,
@@ -342,6 +343,7 @@ class TicketWorkflow:
                 self.contracts,
                 self.tool_registry,
             )
+            self.integration_dispatcher.capture_recorder = self.capture_recorder
             return
         if domain == "integration_endpoints":
             self.contracts.integration_endpoint_catalog = copy.deepcopy(payload)
@@ -350,6 +352,7 @@ class TicketWorkflow:
                 self.contracts,
                 self.tool_registry,
             )
+            self.integration_dispatcher.capture_recorder = self.capture_recorder
             return
         if domain == "workflow_states":
             self.contracts.workflow_state_catalog = copy.deepcopy(payload)

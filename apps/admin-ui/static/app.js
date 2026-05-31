@@ -39,6 +39,7 @@ const state = {
   orchestrationGraphZoom: 0.78,
   orchestrationGraphPanX: 24,
   orchestrationGraphPanY: 34,
+  processingCaseId: '',
   modelRoutingBaseVersionId: '',
   lastData: {
     toolCatalog: [],
@@ -48,6 +49,7 @@ const state = {
 
 const viewTitles = {
   dashboard: 'Панель обзора',
+  processing: 'Поток обработки',
   scenarios: 'Сценарии',
   orchestrationGraph: 'Граф оркестрации',
   scenarioSlots: '0. Слоты',
@@ -189,6 +191,23 @@ const visibleLabels = {
   llm_required: 'нужна LLM-классификация',
   human_review_required: 'нужна проверка оператором',
   human_required: 'эскалировать оператору',
+  queued: 'в очереди',
+  leased: 'lease выдан',
+  waiting: 'ожидание',
+  cancelled: 'отменено',
+  canceled: 'отменено',
+  escalated: 'эскалировано',
+  timed_out: 'timeout',
+  expired: 'истекло',
+  stale: 'зависло',
+  open: 'открыто',
+  reminded: 'напоминание отправлено',
+  client_wait: 'ожидание клиента',
+  external_wait: 'ожидание внешнего события',
+  operator_approval: 'согласование оператора',
+  langgraph_run: 'LangGraph run',
+  tool_use: 'ReAct-вызовы',
+  decision: 'решение',
 };
 
 const activeResolverSourceTypes = ['react_call', 'disabled'];
@@ -474,6 +493,8 @@ async function loadView(view = state.activeView) {
 async function renderView(view) {
   if (view === 'dashboard') {
     await renderDashboard();
+  } else if (view === 'processing') {
+    await renderProcessing();
   } else if (view === 'scenarios') {
     await renderScenarios();
   } else if (view === 'orchestrationGraph') {
@@ -4364,6 +4385,270 @@ async function renderDashboard() {
       </div>`,
     ),
   ].join('');
+}
+
+async function renderProcessing({ scrollToDetail = false } = {}) {
+  const [overview, casesPayload, runsPayload, tasksPayload, waitsPayload, baseGraph] = await Promise.all([
+    api('/admin/processing/overview'),
+    api('/admin/processing/cases?limit=100'),
+    api('/admin/processing/runs?limit=50'),
+    api('/admin/processing/tasks?limit=50'),
+    api('/admin/processing/waits?limit=50'),
+    api('/admin/orchestration-graph?view=base'),
+  ]);
+  const cases = casesPayload.cases || [];
+  if (!state.processingCaseId || !cases.some((item) => item.case_id === state.processingCaseId)) {
+    state.processingCaseId = cases[0]?.case_id || '';
+  }
+  const detail = state.processingCaseId
+    ? await api(`/admin/processing/cases/${encodeURIComponent(state.processingCaseId)}`)
+    : null;
+  state.lastData.processingOverview = overview;
+  state.lastData.processingCaseDetail = detail;
+  const graph = processingRuntimeGraph(baseGraph, detail);
+  if (graph.nodes?.length) {
+    state.lastData.orchestrationGraph = graph;
+    const activeNode = graph.nodes.find((node) => node.status === 'running' || node.status === 'waiting')
+      || graph.nodes.find((node) => node.status === 'error')
+      || graph.nodes[0];
+    state.orchestrationGraphSelectedNodeId = activeNode?.id || state.orchestrationGraphSelectedNodeId;
+  }
+
+  elements.viewContent.innerHTML = [
+    section('Состояние потока', renderProcessingOverview(overview)),
+    section('Кейсы в потоке', renderProcessingCases(cases)),
+    section('Выбранный кейс', renderProcessingCaseDetail(detail)),
+    section('Запуски и задачи', renderProcessingRunsAndTasks(detail, runsPayload.runs || [], tasksPayload.tasks || [])),
+    section('Ожидания', renderProcessingWaits(detail, waitsPayload.waits || [])),
+    section('Kafka и outbox', renderProcessingKafka(overview, detail)),
+    section(
+      'Граф обработки',
+      graph.nodes?.length
+        ? `<div class="graph-workspace processing-graph">
+            <div class="graph-board panel">
+              ${renderGraphControls()}
+              <div class="graph-canvas" data-graph-canvas>
+                ${renderGraphSvg(graph)}
+              </div>
+            </div>
+            ${renderGraphNodeDetails(graph, selectedGraphNode(graph))}
+          </div>`
+        : '<div class="empty">Граф обработки пока недоступен.</div>',
+    ),
+  ].join('');
+  if (graph.nodes?.length) {
+    attachOrchestrationGraphInteractions();
+    updateGraphViewport();
+  }
+  if (scrollToDetail) {
+    document.getElementById('processingCaseDetail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function renderProcessingOverview(overview) {
+  const active = overview.active || {};
+  return `
+    <div class="grid">
+      ${metric('Активные run', String(active.runs ?? 0))}
+      ${metric('Активные задачи', String(active.tasks ?? 0))}
+      ${metric('Активные ожидания', String(active.waits ?? 0))}
+      ${metric('Зависшие задачи', String(active.stale_tasks ?? 0))}
+      ${metric('Outbox Kafka', String(overview.kafka?.outbox_pending ?? 0))}
+      ${metric('Kafka bootstrap', escapeHtml(overview.kafka?.bootstrap_servers || 'н/д'))}
+      ${metric('Run status', processingCounts(overview.runs_by_status))}
+      ${metric('Task status', processingCounts(overview.tasks_by_status))}
+    </div>
+  `;
+}
+
+function processingCounts(counts = {}) {
+  const items = Object.entries(counts);
+  if (!items.length) return 'н/д';
+  return items.map(([status, count]) => `${badge(status)} ${escapeHtml(count)}`).join(' ');
+}
+
+function renderProcessingCases(cases) {
+  const rows = cases.map((item) => [
+    `<button type="button" class="${item.case_id === state.processingCaseId ? 'primary' : ''}" data-action="processing-case-open" data-case-id="${escapeHtml(item.case_id)}">${item.case_id === state.processingCaseId ? 'Открыт' : 'Открыть'}</button>`,
+    escapeHtml(item.case_id),
+    escapeHtml(item.ticket_id),
+    badge(item.workflow_state_id),
+    badge(item.processing?.run_status || 'missing'),
+    escapeHtml(item.processing?.current_step || 'н/д'),
+    escapeHtml(item.updated_at || 'н/д'),
+  ]);
+  return table(['Действие', 'Кейс', 'Заявка', 'Workflow', 'Run', 'Шаг', 'Обновлено'], rows);
+}
+
+function renderProcessingCaseDetail(detail) {
+  if (!detail?.case) {
+    return '<div id="processingCaseDetail" class="empty">Кейс не выбран или поток обработки пуст.</div>';
+  }
+  const caseRecord = detail.case;
+  const currentRun = (detail.runs || [])[0] || null;
+  const activeWait = (detail.waits || []).find((wait) => ['open', 'reminded'].includes(wait.status));
+  const slotValues = caseRecord.analysis_snapshot?.simulation?.slot_values
+    || caseRecord.analysis_snapshot?.slot_values
+    || {};
+  const eventRows = (detail.timeline?.events || []).slice(0, 8).map((event) => [
+    escapeHtml(event.created_at),
+    badge(event.event_type),
+    escapeHtml(event.summary || event.actor_id || 'н/д'),
+  ]);
+  return `
+    <div id="processingCaseDetail" class="processing-anchor"></div>
+    <div class="grid">
+      ${metric('Кейс', escapeHtml(caseRecord.case_id))}
+      ${metric('Workflow', badge(caseRecord.current_workflow_state?.id || 'н/д'))}
+      ${metric('Текущий run', escapeHtml(currentRun?.run_id || 'н/д'))}
+      ${metric('Активное ожидание', activeWait ? badge(activeWait.wait_type) : 'нет')}
+    </div>
+    <div class="scenario-editor-actions">
+      <button class="danger" type="button" data-action="processing-case-escalate" data-case-id="${escapeHtml(caseRecord.case_id)}">Эскалировать кейс</button>
+    </div>
+    <div class="processing-split">
+      <div class="panel">
+        <div class="metric-label">Контекст кейса</div>
+        <div class="meta">Слоты и runtime context являются снимком текущей реализации; прямое редактирование из админки запрещено.</div>
+        ${jsonBlock({
+          ticket_input: caseRecord.ticket_input,
+          slots: slotValues,
+          workflow_state: caseRecord.current_workflow_state,
+        })}
+      </div>
+      <div class="panel">
+        <div class="metric-label">Последние события timeline</div>
+        ${table(['Время', 'Событие', 'Описание'], eventRows)}
+      </div>
+    </div>
+  `;
+}
+
+function renderProcessingRunsAndTasks(detail, fallbackRuns, fallbackTasks) {
+  const runs = detail?.runs?.length ? detail.runs : fallbackRuns;
+  const tasks = detail?.tasks?.length ? detail.tasks : fallbackTasks;
+  const runRows = runs.map((run) => [
+    badge(run.status),
+    escapeHtml(run.run_id),
+    escapeHtml(run.case_id),
+    escapeHtml(run.current_step || 'н/д'),
+    escapeHtml(run.started_at || 'н/д'),
+    escapeHtml(run.updated_at || 'н/д'),
+    `<button class="danger" type="button" data-action="processing-run-cancel" data-run-id="${escapeHtml(run.run_id)}" ${['completed', 'failed', 'cancelled', 'escalated', 'timed_out'].includes(run.status) ? 'disabled' : ''}>Отменить</button>`,
+  ]);
+  const taskRows = tasks.map((task) => [
+    badge(task.stale ? 'stale' : task.status),
+    escapeHtml(task.task_id),
+    escapeHtml(task.case_id),
+    badge(task.task_type),
+    escapeHtml(task.worker_id || 'н/д'),
+    escapeHtml(task.attempt ?? 0),
+    escapeHtml(task.heartbeat_at || 'н/д'),
+    `<div class="table-actions">
+      <button type="button" data-action="processing-task-retry" data-task-id="${escapeHtml(task.task_id)}" ${['failed', 'expired', 'cancelled', 'blocked'].includes(task.status) ? '' : 'disabled'}>Повторить</button>
+      <button type="button" data-action="processing-task-release" data-task-id="${escapeHtml(task.task_id)}" ${['running', 'leased'].includes(task.status) ? '' : 'disabled'}>Освободить lease</button>
+    </div>`,
+  ]);
+  return `
+    <div class="processing-split">
+      <div>${table(['Статус', 'Run', 'Кейс', 'Шаг', 'Старт', 'Обновлено', 'Действие'], runRows)}</div>
+      <div>${table(['Статус', 'Задача', 'Кейс', 'Тип', 'Worker', 'Попытка', 'Heartbeat', 'Действия'], taskRows)}</div>
+    </div>
+  `;
+}
+
+function renderProcessingWaits(detail, fallbackWaits) {
+  const waits = detail?.waits?.length ? detail.waits : fallbackWaits;
+  const rows = waits.map((wait) => [
+    badge(wait.status),
+    badge(wait.wait_type),
+    escapeHtml(wait.wait_id),
+    escapeHtml(wait.case_id),
+    escapeHtml(wait.channel_id || 'н/д'),
+    escapeHtml(wait.deadline_at || 'н/д'),
+    escapeHtml(wait.reason || wait.correlation_id || 'н/д'),
+    `<button type="button" data-action="processing-wait-timeout" data-wait-id="${escapeHtml(wait.wait_id)}" ${['open', 'reminded'].includes(wait.status) ? '' : 'disabled'}>Timeout</button>`,
+  ]);
+  return table(['Статус', 'Тип', 'Ожидание', 'Кейс', 'Канал', 'Дедлайн', 'Причина', 'Действие'], rows);
+}
+
+function renderProcessingKafka(overview, detail) {
+  const topicRows = (overview.kafka?.topics || []).map((topic) => [
+    escapeHtml(topic.topic),
+    escapeHtml(topic.key),
+    escapeHtml(topic.description),
+  ]);
+  const outboxRows = (detail?.outbox || []).slice(0, 12).map((message) => [
+    badge(message.status),
+    escapeHtml(message.topic),
+    escapeHtml(message.event_type),
+    escapeHtml(message.idempotency_key),
+    escapeHtml(message.created_at),
+  ]);
+  return `
+    <div class="processing-split">
+      <div>
+        <div class="metric-label">Топики Kafka</div>
+        ${table(['Topic', 'Key', 'Назначение'], topicRows)}
+      </div>
+      <div>
+        <div class="metric-label">Outbox выбранного кейса</div>
+        ${table(['Статус', 'Topic', 'Событие', 'Idempotency key', 'Создано'], outboxRows)}
+      </div>
+    </div>
+  `;
+}
+
+function processingRuntimeGraph(baseGraph, detail) {
+  const graph = JSON.parse(JSON.stringify(baseGraph || {}));
+  if (!graph.nodes) return graph;
+  const run = detail?.runs?.[0] || null;
+  const activeWait = (detail?.waits || []).find((wait) => ['open', 'reminded'].includes(wait.status));
+  const activeStep = activeWait ? 'waiting' : run?.current_step;
+  const runStatus = run?.status || 'unknown';
+  const order = ['slot_filling', 'classification', 'react_planning', 'tool_use', 'decision', 'waiting'];
+  const activeIndex = Math.max(order.indexOf(activeStep), 0);
+  graph.title = 'Runtime-граф обработки';
+  graph.nodes = graph.nodes.map((node) => {
+    const index = order.indexOf(node.id);
+    let status = index >= 0 && index < activeIndex ? 'completed' : 'pending';
+    if (node.id === activeStep) {
+      status = runStatus === 'failed' ? 'error' : activeWait ? 'waiting' : 'running';
+    }
+    if (runStatus === 'completed' && node.id === 'decision') {
+      status = 'completed';
+    }
+    if (runStatus === 'escalated' && node.id === 'decision') {
+      status = 'escalated';
+    }
+    return {
+      ...node,
+      status,
+      metrics: [
+        ...(node.metrics || []),
+        ...(node.id === activeStep && run ? [
+          { label: 'Run', value: run.run_id },
+          { label: 'Статус', value: run.status },
+        ] : []),
+      ],
+    };
+  });
+  return graph;
+}
+
+async function runProcessingCommand(path, successMessage) {
+  if (!window.confirm('Выполнить административное действие с записью в audit?')) {
+    return;
+  }
+  await api(path, {
+    method: 'POST',
+    body: JSON.stringify({
+      operator_id: state.actorId,
+      reason: 'Команда администратора из UI потока обработки.',
+    }),
+  });
+  setNotice(successMessage, 'success');
+  await renderProcessing();
 }
 
 async function renderKnowledge() {
@@ -9353,6 +9638,35 @@ function initEvents() {
     try {
       if (action === 'knowledge-rebuild') {
         await rebuildKnowledge();
+      } else if (action === 'processing-case-open') {
+        state.processingCaseId = target.dataset.caseId || '';
+        await renderProcessing({ scrollToDetail: true });
+        setNotice(`Открыт кейс ${state.processingCaseId}.`, 'success');
+      } else if (action === 'processing-run-cancel') {
+        await runProcessingCommand(
+          `/admin/processing/runs/${encodeURIComponent(target.dataset.runId)}/cancel`,
+          'Запуск обработки отменен.',
+        );
+      } else if (action === 'processing-task-retry') {
+        await runProcessingCommand(
+          `/admin/processing/tasks/${encodeURIComponent(target.dataset.taskId)}/retry`,
+          'Задача поставлена на повторную обработку.',
+        );
+      } else if (action === 'processing-task-release') {
+        await runProcessingCommand(
+          `/admin/processing/tasks/${encodeURIComponent(target.dataset.taskId)}/release-lease`,
+          'Lease задачи освобожден.',
+        );
+      } else if (action === 'processing-wait-timeout') {
+        await runProcessingCommand(
+          `/admin/processing/waits/${encodeURIComponent(target.dataset.waitId)}/force-timeout`,
+          'Ожидание завершено по timeout.',
+        );
+      } else if (action === 'processing-case-escalate') {
+        await runProcessingCommand(
+          `/admin/processing/cases/${encodeURIComponent(target.dataset.caseId)}/escalate`,
+          'Кейс передан в эскалацию.',
+        );
       } else if (action === 'promote-feedback') {
         await promoteFeedback();
       } else if (action === 'run-evaluation') {
@@ -9363,7 +9677,11 @@ function initEvents() {
         await renderOrchestrationGraph();
       } else if (action === 'graph-node-select') {
         state.orchestrationGraphSelectedNodeId = target.dataset.nodeId;
-        await renderOrchestrationGraph();
+        if (state.activeView === 'processing') {
+          await renderProcessing();
+        } else {
+          await renderOrchestrationGraph();
+        }
       } else if (action === 'graph-zoom-in') {
         setGraphZoom(state.orchestrationGraphZoom * 1.15);
       } else if (action === 'graph-zoom-out') {

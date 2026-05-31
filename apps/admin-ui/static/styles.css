@@ -405,6 +405,30 @@ label {
 .scenario-editor-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+}
+
+.processing-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.table-actions button {
+  min-height: 30px;
+  padding: 0 8px;
+}
+
+.processing-anchor {
+  scroll-margin-top: 104px;
 }
 
 .slot-schema-derived {
@@ -1047,6 +1071,7 @@ tr:last-child td {
   }
 
   .split,
+  .processing-split,
   .graph-workspace {
     grid-template-columns: 1fr;
   }

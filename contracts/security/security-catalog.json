@@ -55,6 +55,14 @@
       "description": "Управление workflow config через draft/validate/activate."
     },
     {
+      "permission_id": "processing.read",
+      "description": "Просмотр асинхронного потока обработки, запусков, задач и ожиданий."
+    },
+    {
+      "permission_id": "processing.manage",
+      "description": "Безопасное управление потоком обработки: retry, cancel, release lease и эскалация."
+    },
+    {
       "permission_id": "models.read",
       "description": "Просмотр model routing и LiteLLM settings."
     },
@@ -93,6 +101,8 @@
         "prompts.manage",
         "workflow.read",
         "workflow.manage",
+        "processing.read",
+        "processing.manage",
         "models.read",
         "models.manage",
         "evaluation.run",
@@ -140,6 +150,7 @@
         "knowledge.read",
         "tools.read",
         "workflow.read",
+        "processing.read",
         "models.read",
         "audit.read"
       ]

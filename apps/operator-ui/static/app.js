@@ -18,6 +18,14 @@ const state = {
   dryRunEnabled: true,
   testRunMode: 'config_check',
   providedSlots: {},
+  activeDebugTab: 'single',
+  debugProfiles: null,
+  debugSimulations: [],
+  debugSimulation: null,
+  debugTrace: null,
+  debugWaits: null,
+  integrationEndpoints: [],
+  endpointCaptures: null,
 };
 
 const elements = {
@@ -58,7 +66,37 @@ const elements = {
   tabs: Array.from(document.querySelectorAll('.tab')),
   mainTabs: Array.from(document.querySelectorAll('[data-main-tab]')),
   mainPanels: Array.from(document.querySelectorAll('[data-main-panel]')),
+  debugTabs: Array.from(document.querySelectorAll('[data-debug-tab]')),
+  debugPanels: Array.from(document.querySelectorAll('[data-debug-panel]')),
+  debugFlowScenario: document.getElementById('debugFlowScenario'),
+  debugFlowCount: document.getElementById('debugFlowCount'),
+  debugFlowSeed: document.getElementById('debugFlowSeed'),
+  debugFlowWrongDepartment: document.getElementById('debugFlowWrongDepartment'),
+  debugPrepareButton: document.getElementById('debugPrepareButton'),
+  debugStartButton: document.getElementById('debugStartButton'),
+  debugPauseButton: document.getElementById('debugPauseButton'),
+  debugCancelButton: document.getElementById('debugCancelButton'),
+  debugSimulationStatus: document.getElementById('debugSimulationStatus'),
+  debugSimulationItems: document.getElementById('debugSimulationItems'),
+  debugTraceRunSelect: document.getElementById('debugTraceRunSelect'),
+  debugLoadTraceButton: document.getElementById('debugLoadTraceButton'),
+  debugTraceCaseId: document.getElementById('debugTraceCaseId'),
+  debugLoadCaseTraceButton: document.getElementById('debugLoadCaseTraceButton'),
+  debugCaseTraceView: document.getElementById('debugCaseTraceView'),
+  debugWaitsRefreshButton: document.getElementById('debugWaitsRefreshButton'),
+  debugWaitsView: document.getElementById('debugWaitsView'),
+  captureEndpointSelect: document.getElementById('captureEndpointSelect'),
+  captureOperationSelect: document.getElementById('captureOperationSelect'),
+  captureStartButton: document.getElementById('captureStartButton'),
+  captureStopSessionSelect: document.getElementById('captureStopSessionSelect'),
+  captureStopButton: document.getElementById('captureStopButton'),
+  captureRefreshButton: document.getElementById('captureRefreshButton'),
+  captureStatus: document.getElementById('captureStatus'),
+  captureSessions: document.getElementById('captureSessions'),
+  captureList: document.getElementById('captureList'),
 };
+
+const scenarioApiBase = '/debug';
 
 const visibleLabels = {
   active: 'активно',
@@ -72,6 +110,7 @@ const visibleLabels = {
   draft: 'черновик',
   error: 'ошибка',
   failed: 'ошибка',
+  escalated: 'эскалировано',
   incomplete: 'неполно',
   info: 'информация',
   agent_with_confirmation: 'агент + подтверждение',
@@ -101,6 +140,7 @@ const visibleLabels = {
   started: 'запущено',
   filled_by_slot_autofill: 'заполнено ReAct-автозаполнением',
   missing_required_result_field: 'нет обязательного поля результата',
+  needs_review: 'нужна проверка данных',
   extraction_pending: 'ожидает извлечения',
   filled_by_model: 'заполнено моделью',
   candidate_below_threshold: 'результат ниже порога',
@@ -108,6 +148,7 @@ const visibleLabels = {
   prepared: 'подготовлено',
   not_executed: 'не выполнялось',
   question_required: 'нужно уточнение у клиента',
+  waiting: 'ожидает клиента',
   resolution_profile: 'профиль разрешения',
   dry_run_simulated: 'смоделировано',
   success: 'успешно',
@@ -277,11 +318,11 @@ function syncTestRunModeDefaults() {
 }
 
 function apiHeaders(extra = {}) {
-  const actorId = elements.operatorId.value.trim() || 'operator-1';
+  const actorId = elements.operatorId.value.trim() || 'admin-1';
   return {
     'Content-Type': 'application/json',
     'X-ServiceDesk-Actor': actorId,
-    'X-ServiceDesk-Session': `operator-ui:${actorId}`,
+    'X-ServiceDesk-Session': `debug-ui:${actorId}`,
     ...extra,
   };
 }
@@ -428,11 +469,27 @@ function renderFilledSlotValues(items = []) {
   `;
 }
 
+function traceStatusHint(status) {
+  const hints = {
+    completed: 'Шаг выполнен успешно.',
+    ready: 'Вызов подготовлен, но в dry-run не выполнялся.',
+    blocked: 'Продолжение заблокировано настройками, политикой или недостающими параметрами.',
+    skipped: 'Шаг пропущен выбранным режимом тестового прогона.',
+    error: 'Шаг завершился ошибкой.',
+    failed: 'Шаг завершился ошибкой.',
+    approval_required: 'Требуется подтверждение оператора перед выполнением.',
+    question_required: 'Нужно уточнение у клиента.',
+    started: 'Шаг начат.',
+  };
+  return hints[String(status || '').toLowerCase()] || '';
+}
+
 function renderDryRunTraceItem(item, index) {
   const callLabel = traceCallLabel(item);
   const parameters = traceParameters(item);
   const result = traceResult(item);
   const filledSlotValues = item.details?.filled_slot_values || [];
+  const statusHint = traceStatusHint(item.status);
   return `
     <div class="dry-run-trace-item">
       <div class="dry-run-trace-head">
@@ -441,6 +498,7 @@ function renderDryRunTraceItem(item, index) {
         ${badge(item.status || 'info')}
       </div>
       <div class="trace-meta">${escapeHtml(item.message || '')}</div>
+      ${statusHint ? `<div class="trace-hint">${escapeHtml(statusHint)}</div>` : ''}
       ${renderFilledSlotValues(filledSlotValues)}
       <div class="dry-run-trace-grid">
         <div>
@@ -513,6 +571,100 @@ function formatMap(map) {
   return entries.length
     ? entries.map(([key, value]) => `${escapeHtml(key)} = ${escapeHtml(value)}`).join(', ')
     : 'н/д';
+}
+
+function clientAgentOutcome(simulation) {
+  if (!simulation) {
+    return {
+      status: 'pending',
+      label: 'Ожидает запуска',
+      summary: 'Тестовый прогон еще не выполнялся.',
+      next_step: 'Введите текст заявки и нажмите «Анализировать».',
+    };
+  }
+  if (simulation.agent_outcome) return simulation.agent_outcome;
+  if (simulation.error) {
+    return {
+      status: 'error',
+      label: 'Ошибка',
+      summary: simulation.error.message || 'Тестовый прогон завершился ошибкой.',
+      next_step: 'Исправьте ошибку и повторите запуск.',
+    };
+  }
+  if (simulation.operator_escalation?.required) {
+    return {
+      status: 'escalated',
+      label: 'Эскалировано',
+      summary: simulation.operator_escalation.reason || 'Агент подготовил передачу оператору.',
+      next_step: 'Проверьте пакет передачи и канал эскалации.',
+      missing_slots: simulation.missing_slots || [],
+    };
+  }
+  if (simulation.awaiting_client_response || simulation.next_question) {
+    return {
+      status: 'waiting',
+      label: 'Ожидает клиента',
+      summary: 'Агент сформировал вопрос и не может продолжить без ответа клиента.',
+      next_step: simulation.next_question || 'Передайте вопрос клиенту и продолжите после ответа.',
+      missing_slots: simulation.missing_slots || [],
+    };
+  }
+  if ((simulation.missing_slots || []).length || ['pending_auto_fill', 'waiting_operator_approval'].includes(simulation.final_decision)) {
+    return {
+      status: 'needs_review',
+      label: 'Нужна проверка данных',
+      summary: 'Агент дошел до состояния, где требуется ручная проверка данных или подтверждение действия.',
+      next_step: 'Проверьте недостающие слоты, спорные результаты и ожидающие действия.',
+      missing_slots: simulation.missing_slots || [],
+    };
+  }
+  return {
+    status: 'success',
+    label: 'Успешно',
+    summary: 'Агент собрал обязательные данные и не нашел блокирующих проблем.',
+    next_step: 'Проверьте заполненные данные и подготовленные ReAct-вызовы.',
+  };
+}
+
+function outcomeList(values = []) {
+  return values.length ? values.map(escapeHtml).join(', ') : 'нет';
+}
+
+function outcomeCallLabel(item) {
+  if (!item) return '';
+  const name = item.react_call || item.tool_name || 'ReAct-вызов';
+  const endpoint = item.endpoint_id || '';
+  const operation = item.operation_id || '';
+  return endpoint || operation
+    ? `${name} -> ${endpoint || 'н/д'}/${operation || 'н/д'}`
+    : name;
+}
+
+function renderAgentOutcomePanel(simulation) {
+  const outcome = clientAgentOutcome(simulation);
+  const readyCalls = outcome.ready_react_calls || [];
+  const blockedCalls = outcome.blocked_react_calls || [];
+  const details = [
+    metric('Статус агента', badge(outcome.status)),
+    metric('Заполнено слотов', escapeHtml(outcomeList(outcome.filled_slots || []))),
+    metric('Не хватает слотов', escapeHtml(outcomeList(outcome.missing_slots || []))),
+    metric('Готовые ReAct-вызовы', escapeHtml(outcomeList(readyCalls.map(outcomeCallLabel)))),
+    metric('Заблокированные вызовы', escapeHtml(outcomeList(blockedCalls.map(outcomeCallLabel)))),
+  ].join('');
+  return `
+    <section class="agent-outcome agent-outcome-${escapeHtml(outcome.status || 'pending')}">
+      <div class="agent-outcome-header">
+        <h3>Итог работы агента</h3>
+        ${badge(outcome.status || 'pending')}
+      </div>
+      <p>${escapeHtml(outcome.summary || outcome.label || 'Итог не рассчитан')}</p>
+      <div class="agent-outcome-next">
+        <div class="metric-label">Следующий шаг</div>
+        <div>${escapeHtml(outcome.next_step || 'Проверьте трассу тестового прогона.')}</div>
+      </div>
+      <div class="grid">${details}</div>
+    </section>
+  `;
 }
 
 function scenarioName() {
@@ -953,6 +1105,7 @@ function renderSteps() {
     })
     .filter(Boolean);
   elements.stepsView.innerHTML = [
+    renderAgentOutcomePanel(simulation),
     renderDryRunTracePanel(simulation),
     stepBlock(
       1,
@@ -1041,12 +1194,13 @@ function syncAnalyzeButton() {
 
 async function loadScenarios() {
   try {
-    const overview = await api('/operator/scenarios');
+    const overview = await api(`${scenarioApiBase}/scenarios`);
     state.scenarios = overview.scenarios || [];
     if (!state.scenarios.some((scenario) => scenario.scenario_id === state.scenarioId)) {
       state.scenarioId = state.scenarios[0]?.scenario_id || '';
     }
     renderScenarioSelect();
+    renderDebugScenarioOptions();
     elements.apiStatus.textContent = 'API готов';
     renderScenario();
   } catch (error) {
@@ -1059,7 +1213,7 @@ async function loadScenarioDetail(scenarioId = state.scenarioId, options = {}) {
   if (!scenarioId) return;
   state.scenarioId = scenarioId;
   if (options.resetSlots) state.providedSlots = {};
-  state.scenarioDetail = await api(`/operator/scenarios/${encodeURIComponent(scenarioId)}`);
+  state.scenarioDetail = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(scenarioId)}`);
   state.scenarioSimulation = null;
   renderScenario();
   if (options.simulate === true && state.dryRunEnabled) {
@@ -1080,12 +1234,12 @@ async function simulateScenario() {
   elements.enrichButton.disabled = true;
   try {
     const runOptions = currentTestRunOptions();
-    state.scenarioSimulation = await api(`/operator/scenarios/${encodeURIComponent(state.scenarioId)}/simulate`, {
+    state.scenarioSimulation = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(state.scenarioId)}/simulate`, {
       method: 'POST',
       body: JSON.stringify({
         text: state.ticketTextSnapshot,
         provided_slots: state.providedSlots,
-        operator_id: elements.operatorId.value.trim() || 'operator-1',
+        operator_id: elements.operatorId.value.trim() || 'admin-1',
         ...runOptions,
       }),
     });
@@ -1113,6 +1267,12 @@ async function simulateScenario() {
         },
       ],
       final_decision: 'error',
+      agent_outcome: {
+        status: 'error',
+        label: 'Ошибка',
+        summary: error.message,
+        next_step: 'Исправьте ошибку и повторите тестовый прогон.',
+      },
       dry_run: true,
       error: { message: error.message },
     };
@@ -1550,7 +1710,7 @@ async function submitFeedback(rating) {
   const payload = compactObject({
     schema_version: '1.0',
     ticket_id: state.analysis.ticket_id,
-    operator_id: elements.operatorId.value.trim() || 'operator-1',
+    operator_id: elements.operatorId.value.trim() || 'admin-1',
     rating,
     ticket_input: state.ticketInput,
     analysis_snapshot: state.analysis,
@@ -1619,7 +1779,7 @@ async function rebuildKnowledge() {
   try {
     const result = await api('/knowledge/rebuild', {
       method: 'POST',
-      body: JSON.stringify({ operator_id: elements.operatorId.value.trim() || 'operator-1' }),
+      body: JSON.stringify({ operator_id: elements.operatorId.value.trim() || 'admin-1' }),
     });
     state.knowledge = {
       schema_version: '1.0',
@@ -1644,7 +1804,7 @@ async function decideApproval(approvalId, decision) {
   const commentInput = document.getElementById(`comment-${approvalId}`);
   const payload = compactObject({
     decision,
-    operator_id: elements.operatorId.value.trim() || 'operator-1',
+    operator_id: elements.operatorId.value.trim() || 'admin-1',
     comment: commentInput?.value,
   });
   try {
@@ -1673,6 +1833,517 @@ async function copyResult() {
     range.selectNodeContents(elements.copyText);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+}
+
+function setDebugTab(tabId) {
+  state.activeDebugTab = tabId || 'single';
+  elements.debugTabs.forEach((tab) => {
+    const active = tab.dataset.debugTab === state.activeDebugTab;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  elements.debugPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.debugPanel !== state.activeDebugTab;
+  });
+  if (state.activeDebugTab === 'flow') {
+    loadDebugProfiles();
+    loadDebugSimulations();
+  } else if (state.activeDebugTab === 'traces') {
+    loadDebugSimulations();
+  } else if (state.activeDebugTab === 'waits') {
+    loadDebugWaits();
+  } else if (state.activeDebugTab === 'captures') {
+    loadDebugIntegrationOperations();
+    loadEndpointCaptures();
+  }
+}
+
+function renderDebugScenarioOptions() {
+  if (!elements.debugFlowScenario) return;
+  const selected = elements.debugFlowScenario.value || state.scenarioId;
+  elements.debugFlowScenario.innerHTML = state.scenarios
+    .map((scenario) => `
+      <option value="${escapeHtml(scenario.scenario_id)}" ${scenario.scenario_id === selected ? 'selected' : ''}>
+        ${escapeHtml(scenario.display_name || scenario.scenario_id)}
+      </option>
+    `)
+    .join('');
+}
+
+async function loadDebugProfiles() {
+  if (state.debugProfiles) {
+    renderDebugScenarioOptions();
+    return;
+  }
+  try {
+    state.debugProfiles = await api('/debug/simulations/profiles');
+    renderDebugScenarioOptions();
+  } catch (error) {
+    if (elements.debugSimulationStatus) {
+      elements.debugSimulationStatus.textContent = `Профили генерации не загружены: ${error.message}`;
+    }
+  }
+}
+
+async function loadDebugSimulations() {
+  try {
+    const data = await api('/debug/simulations');
+    state.debugSimulations = data.runs || [];
+    renderDebugTraceRunSelect();
+  } catch (error) {
+    if (elements.debugCaseTraceView) {
+      elements.debugCaseTraceView.innerHTML = `<div class="empty">Симуляции не загружены: ${escapeHtml(error.message)}</div>`;
+    }
+  }
+}
+
+async function prepareDebugSimulation() {
+  const scenarioId = elements.debugFlowScenario?.value || state.scenarioId;
+  if (!scenarioId) return;
+  elements.debugPrepareButton.disabled = true;
+  try {
+    state.debugSimulation = await api('/debug/simulations/prepare', {
+      method: 'POST',
+      body: JSON.stringify({
+        source: 'scenario_profiles',
+        scenario_ids: [scenarioId],
+        count_per_scenario: Number(elements.debugFlowCount?.value || 1),
+        channel_id: 'debug',
+        seed: elements.debugFlowSeed?.value || undefined,
+        include_wrong_department: elements.debugFlowWrongDepartment?.checked === true,
+        mode: 'dry_run',
+        dry_run: true,
+      }),
+    });
+    state.debugSimulations = [state.debugSimulation.run, ...state.debugSimulations.filter(
+      (run) => run.run_id !== state.debugSimulation.run.run_id,
+    )];
+    renderDebugSimulation();
+    renderDebugTraceRunSelect();
+  } catch (error) {
+    elements.debugSimulationStatus.textContent = `Ошибка подготовки потока: ${error.message}`;
+  } finally {
+    elements.debugPrepareButton.disabled = false;
+  }
+}
+
+function debugExpectedValue(value) {
+  if (value === undefined || value === null || value === '') return 'н/д';
+  if (typeof value === 'object') {
+    if (value.value !== undefined && value.value !== null && value.value !== '') {
+      return String(value.value);
+    }
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function debugExpectedBlock(title, values) {
+  const entries = Object.entries(values || {});
+  return `
+    <div class="simulation-expected-block">
+      <div class="metric-label">${escapeHtml(title)}</div>
+      ${entries.length
+        ? entries.map(([key, value]) => `
+          <div class="simulation-expected-row">
+            <strong>${escapeHtml(key)}</strong>
+            <span>${escapeHtml(debugExpectedValue(value))}</span>
+          </div>
+        `).join('')
+        : '<div class="muted-text">нет</div>'}
+    </div>
+  `;
+}
+
+function renderSimulationExpectations(item) {
+  return `
+    <div class="simulation-expectations">
+      ${debugExpectedBlock('В тексте заявки', item.text_slots)}
+      ${debugExpectedBlock('Ожидается из автозаполнения', item.expected_autofill)}
+      ${debugExpectedBlock('Ожидается из разрешения атрибутов', item.expected_resolution)}
+      <div class="simulation-expected-block">
+        <div class="metric-label">Итог</div>
+        <div>${escapeHtml(item.expected_outcome || 'н/д')}</div>
+        ${item.expected_gaps?.length ? `<div class="muted-text">Пробелы: ${escapeHtml(item.expected_gaps.join(', '))}</div>` : ''}
+        ${item.generation_notes?.length ? `<div class="muted-text">${escapeHtml(item.generation_notes.join(' '))}</div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderDebugAgentOutcome(item) {
+  const outcome = item.agent_outcome || null;
+  if (!outcome) {
+    return `<div class="debug-agent-outcome">${badge(item.status || 'prepared')}<div class="muted-text">Запустите поток, чтобы получить итог агента.</div></div>`;
+  }
+  return `
+    <div class="debug-agent-outcome debug-agent-outcome-${escapeHtml(outcome.status || 'pending')}">
+      <div>${badge(outcome.status || 'pending')}</div>
+      <strong>${escapeHtml(outcome.label || visibleLabels[outcome.status] || outcome.status || 'н/д')}</strong>
+      <span>${escapeHtml(outcome.summary || 'н/д')}</span>
+      <small>${escapeHtml(outcome.next_step || '')}</small>
+    </div>
+  `;
+}
+
+function renderDebugSimulation() {
+  const run = state.debugSimulation?.run;
+  const items = state.debugSimulation?.items || [];
+  if (!run) {
+    elements.debugSimulationStatus.textContent = 'Поток не сформирован';
+    elements.debugSimulationItems.innerHTML = '<div class="empty">Сначала сформируйте поток</div>';
+    elements.debugStartButton.disabled = true;
+    elements.debugPauseButton.disabled = true;
+    elements.debugCancelButton.disabled = true;
+    return;
+  }
+  const counters = run.counters || {};
+  elements.debugSimulationStatus.innerHTML = [
+    `Запуск: <strong>${escapeHtml(run.run_id)}</strong>`,
+    `Статус: ${badge(run.status)}`,
+    `Seed: ${escapeHtml(run.seed)}`,
+    `Подготовлено: ${escapeHtml(counters.prepared || 0)}`,
+    `Завершено: ${escapeHtml(counters.completed || 0)}`,
+    `Ожиданий: ${escapeHtml(counters.waiting || 0)}`,
+    `Ошибок: ${escapeHtml(counters.failed || 0)}`,
+  ].join(' / ');
+  elements.debugStartButton.disabled = !['prepared', 'paused'].includes(run.status);
+  elements.debugPauseButton.disabled = !['prepared', 'running'].includes(run.status);
+  elements.debugCancelButton.disabled = ['completed', 'cancelled'].includes(run.status);
+  if (!items.length) {
+    elements.debugSimulationItems.innerHTML = '<div class="empty">В потоке нет обращений</div>';
+    return;
+  }
+  elements.debugSimulationItems.innerHTML = `
+    <div class="table-wrap wide-table">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Статус</th>
+            <th>Сценарий</th>
+            <th>Вариант</th>
+            <th>Текст обращения</th>
+            <th>Ожидаемые данные</th>
+            <th>Итог агента</th>
+            <th>Case</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((item) => `
+            <tr data-sim-item="${escapeHtml(item.item_id)}">
+              <td>${escapeHtml(item.sort_order)}</td>
+              <td>${badge(item.status)}</td>
+              <td>${escapeHtml(item.scenario_display_name || item.scenario_id)}</td>
+              <td>${escapeHtml(item.variant || 'н/д')}</td>
+              <td><textarea class="compact-textarea" data-sim-item-text>${escapeHtml(item.text || '')}</textarea></td>
+              <td>${renderSimulationExpectations(item)}</td>
+              <td>${renderDebugAgentOutcome(item)}</td>
+              <td>${item.case_id ? `<button type="button" data-action="debug-open-case" data-case-id="${escapeHtml(item.case_id)}">${escapeHtml(item.case_id)}</button>` : 'не создан'}</td>
+              <td>
+                <div class="button-column">
+                  <button type="button" data-action="debug-save-item">Сохранить</button>
+                  <button type="button" data-action="debug-toggle-exclude">${item.excluded ? 'Вернуть' : 'Исключить'}</button>
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function saveDebugSimulationItem(row, overrides = {}) {
+  const runId = state.debugSimulation?.run?.run_id;
+  const itemId = row?.dataset.simItem;
+  if (!runId || !itemId) return;
+  const text = row.querySelector('[data-sim-item-text]')?.value || '';
+  const current = (state.debugSimulation.items || []).find((item) => item.item_id === itemId) || {};
+  const response = await api(`/debug/simulations/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      patch: {
+        text,
+        excluded: current.excluded === true,
+        ...overrides,
+      },
+    }),
+  });
+  state.debugSimulation.items = state.debugSimulation.items.map((item) => (
+    item.item_id === itemId ? response.item : item
+  ));
+  renderDebugSimulation();
+}
+
+async function startDebugSimulation() {
+  const runId = state.debugSimulation?.run?.run_id;
+  if (!runId) return;
+  elements.debugStartButton.disabled = true;
+  try {
+    state.debugSimulation = await api(`/debug/simulations/${encodeURIComponent(runId)}/start`, {
+      method: 'POST',
+      body: JSON.stringify({
+        operator_id: elements.operatorId.value.trim() || 'admin-1',
+        stop_on_mismatch: false,
+      }),
+    });
+    renderDebugSimulation();
+    await loadDebugSimulations();
+  } catch (error) {
+    elements.debugSimulationStatus.textContent = `Ошибка запуска потока: ${error.message}`;
+  }
+}
+
+async function pauseDebugSimulation() {
+  const runId = state.debugSimulation?.run?.run_id;
+  if (!runId) return;
+  try {
+    const result = await api(`/debug/simulations/${encodeURIComponent(runId)}/pause`, { method: 'POST', body: '{}' });
+    state.debugSimulation.run = result.run;
+    renderDebugSimulation();
+  } catch (error) {
+    elements.debugSimulationStatus.textContent = `Ошибка паузы: ${error.message}`;
+  }
+}
+
+async function cancelDebugSimulation() {
+  const runId = state.debugSimulation?.run?.run_id;
+  if (!runId) return;
+  try {
+    const result = await api(`/debug/simulations/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: '{}' });
+    state.debugSimulation.run = result.run;
+    renderDebugSimulation();
+  } catch (error) {
+    elements.debugSimulationStatus.textContent = `Ошибка отмены: ${error.message}`;
+  }
+}
+
+function renderDebugTraceRunSelect() {
+  if (!elements.debugTraceRunSelect) return;
+  const current = elements.debugTraceRunSelect.value || state.debugSimulation?.run?.run_id || state.debugSimulations[0]?.run_id || '';
+  elements.debugTraceRunSelect.innerHTML = state.debugSimulations
+    .map((run) => `<option value="${escapeHtml(run.run_id)}" ${run.run_id === current ? 'selected' : ''}>${escapeHtml(run.run_id)} / ${escapeHtml(run.status)}</option>`)
+    .join('');
+}
+
+async function loadSelectedSimulationTrace() {
+  const runId = elements.debugTraceRunSelect?.value || state.debugSimulation?.run?.run_id;
+  if (!runId) {
+    elements.debugCaseTraceView.innerHTML = '<div class="empty">Нет выбранного запуска симуляции</div>';
+    return;
+  }
+  try {
+    const trace = await api(`/debug/simulations/${encodeURIComponent(runId)}/trace`);
+    renderSimulationTrace(trace);
+  } catch (error) {
+    elements.debugCaseTraceView.innerHTML = `<div class="empty">Трасса не загружена: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function loadDebugCaseTrace(caseId = elements.debugTraceCaseId?.value.trim()) {
+  if (!caseId) return;
+  try {
+    state.debugTrace = await api(`/debug/cases/${encodeURIComponent(caseId)}/trace`);
+    renderCaseCentricTrace(state.debugTrace);
+  } catch (error) {
+    elements.debugCaseTraceView.innerHTML = `<div class="empty">Обращение не загружено: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderSimulationTrace(trace) {
+  const rows = (trace.items || []).map((item) => [
+    escapeHtml(item.sort_order),
+    badge(item.status),
+    item.agent_outcome ? badge(item.agent_outcome.status) : 'н/д',
+    escapeHtml(item.scenario_display_name || item.scenario_id),
+    escapeHtml(item.variant || 'н/д'),
+    item.case_id ? `<button type="button" data-action="debug-open-case" data-case-id="${escapeHtml(item.case_id)}">${escapeHtml(item.case_id)}</button>` : 'не создан',
+  ]);
+  elements.debugCaseTraceView.innerHTML = [
+    `<div class="status-line">Запуск ${escapeHtml(trace.run.run_id)} / ${badge(trace.run.status)}</div>`,
+    table(['#', 'Статус', 'Итог агента', 'Сценарий', 'Вариант', 'Case'], rows),
+  ].join('');
+}
+
+function renderCaseCentricTrace(trace) {
+  const events = trace.events || [];
+  if (!events.length) {
+    elements.debugCaseTraceView.innerHTML = '<div class="empty">Нет событий трассы</div>';
+    return;
+  }
+  elements.debugCaseTraceView.innerHTML = `
+    <div class="status-line">Обращение: <strong>${escapeHtml(trace.case_id)}</strong> / событий: ${escapeHtml(events.length)}</div>
+    <div class="case-trace-list">
+      ${events.map((event) => `
+        <details class="case-trace-event">
+          <summary>
+            <span>${escapeHtml(event.created_at || 'н/д')}</span>
+            <strong>${escapeHtml(event.event_type || 'event')}</strong>
+            <span>${escapeHtml(event.summary || '')}</span>
+            ${event.agent_id ? badge(event.agent_id) : ''}
+          </summary>
+          <div class="dry-run-trace-grid">
+            <div><div class="metric-label">Run / Task</div><div class="trace-value">${escapeHtml(event.run_id || 'н/д')} / ${escapeHtml(event.task_id || 'н/д')}</div></div>
+            <div><div class="metric-label">Correlation</div><div class="trace-value">${escapeHtml(event.correlation_id || event.idempotency_key || 'н/д')}</div></div>
+            <div><div class="metric-label">Payload</div><div class="trace-value">${traceJson(event.payload)}</div></div>
+          </div>
+        </details>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function loadDebugWaits() {
+  try {
+    state.debugWaits = await api('/debug/waits');
+    const rows = (state.debugWaits.waits || []).map((wait) => [
+      escapeHtml(wait.wait_id),
+      wait.case_id ? `<button type="button" data-action="debug-open-case" data-case-id="${escapeHtml(wait.case_id)}">${escapeHtml(wait.case_id)}</button>` : 'н/д',
+      badge(wait.wait_type),
+      badge(wait.status),
+      escapeHtml(wait.deadline_at || 'н/д'),
+      escapeHtml(wait.reason || 'н/д'),
+    ]);
+    elements.debugWaitsView.innerHTML = table(['Ожидание', 'Case', 'Тип', 'Статус', 'Deadline', 'Причина'], rows);
+  } catch (error) {
+    elements.debugWaitsView.innerHTML = `<div class="empty">Ожидания не загружены: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function loadDebugIntegrationOperations() {
+  try {
+    const payload = await api('/debug/integration-operations');
+    state.integrationEndpoints = payload.endpoints || [];
+    renderCaptureEndpointSelectors();
+  } catch (error) {
+    elements.captureStatus.textContent = `Операции не загружены: ${error.message}`;
+  }
+}
+
+function renderCaptureEndpointSelectors() {
+  const selectedEndpointId = elements.captureEndpointSelect?.value || state.integrationEndpoints[0]?.endpoint_id || '';
+  if (elements.captureEndpointSelect) {
+    elements.captureEndpointSelect.innerHTML = state.integrationEndpoints
+      .map((endpoint) => `<option value="${escapeHtml(endpoint.endpoint_id)}" ${endpoint.endpoint_id === selectedEndpointId ? 'selected' : ''}>${escapeHtml(endpoint.display_name || endpoint.endpoint_id)}</option>`)
+      .join('');
+  }
+  const endpoint = state.integrationEndpoints.find((item) => item.endpoint_id === selectedEndpointId) || state.integrationEndpoints[0];
+  const operations = Object.entries(endpoint?.operations || {});
+  const selectedOperationId = elements.captureOperationSelect?.value || operations[0]?.[0] || '';
+  if (elements.captureOperationSelect) {
+    elements.captureOperationSelect.innerHTML = operations
+      .map(([operationId, operation]) => `<option value="${escapeHtml(operationId)}" ${operationId === selectedOperationId ? 'selected' : ''}>${escapeHtml(operation.display_name || operationId)}</option>`)
+      .join('');
+  }
+}
+
+async function startEndpointCapture() {
+  try {
+    const result = await api('/debug/endpoint-captures/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        endpoint_id: elements.captureEndpointSelect.value,
+        operation_id: elements.captureOperationSelect.value,
+        operator_id: elements.operatorId.value.trim() || 'admin-1',
+      }),
+    });
+    elements.captureStatus.textContent = `Захват включен: ${result.session.session_id}`;
+    await loadEndpointCaptures();
+  } catch (error) {
+    elements.captureStatus.textContent = `Захват не включен: ${error.message}`;
+  }
+}
+
+async function stopEndpointCapture() {
+  const sessionId = elements.captureStopSessionSelect?.value;
+  if (!sessionId) return;
+  try {
+    await api('/debug/endpoint-captures/stop', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: sessionId,
+        operator_id: elements.operatorId.value.trim() || 'admin-1',
+      }),
+    });
+    elements.captureStatus.textContent = `Захват остановлен: ${sessionId}`;
+    await loadEndpointCaptures();
+  } catch (error) {
+    elements.captureStatus.textContent = `Захват не остановлен: ${error.message}`;
+  }
+}
+
+async function loadEndpointCaptures() {
+  try {
+    state.endpointCaptures = await api('/debug/endpoint-captures');
+    renderEndpointCaptures();
+  } catch (error) {
+    elements.captureStatus.textContent = `Сессии захвата не загружены: ${error.message}`;
+  }
+}
+
+function renderEndpointCaptures() {
+  const sessions = state.endpointCaptures?.sessions || [];
+  const captures = state.endpointCaptures?.captures || [];
+  elements.captureStatus.innerHTML = `Сессий: ${escapeHtml(sessions.length)} / captured: ${escapeHtml(captures.length)}`;
+  const activeSessions = sessions.filter((session) => session.status === 'active');
+  elements.captureStopSessionSelect.innerHTML = activeSessions
+    .map((session) => `<option value="${escapeHtml(session.session_id)}">${escapeHtml(session.endpoint_id)}/${escapeHtml(session.operation_id)} · ${escapeHtml(session.session_id)}</option>`)
+    .join('');
+  elements.captureSessions.innerHTML = table(
+    ['Сессия', 'Операция', 'Статус', 'Captured', 'Обновлено'],
+    sessions.map((session) => [
+      escapeHtml(session.session_id),
+      escapeHtml(`${session.endpoint_id}/${session.operation_id}`),
+      badge(session.status),
+      escapeHtml(session.capture_count || 0),
+      escapeHtml(session.updated_at || 'н/д'),
+    ]),
+  );
+  elements.captureList.innerHTML = table(
+    ['Capture', 'Операция', 'Статус', 'Schema', 'Sanitized', 'Действия'],
+    captures.map((capture) => [
+      escapeHtml(capture.capture_id),
+      escapeHtml(`${capture.endpoint_id}/${capture.operation_id}`),
+      badge(capture.status),
+      badge(capture.validation?.status || 'н/д'),
+      badge(capture.sanitized ? 'yes' : 'no'),
+      `<div class="button-column">
+        <button type="button" data-action="capture-sanitize" data-capture-id="${escapeHtml(capture.capture_id)}">Обезличить</button>
+        <button type="button" data-action="capture-create-mock" data-capture-id="${escapeHtml(capture.capture_id)}">Создать mock</button>
+      </div>`,
+    ]),
+  );
+}
+
+async function sanitizeCapture(captureId) {
+  try {
+    await api(`/debug/endpoint-captures/${encodeURIComponent(captureId)}/sanitize`, {
+      method: 'POST',
+      body: JSON.stringify({ operator_id: elements.operatorId.value.trim() || 'admin-1' }),
+    });
+    await loadEndpointCaptures();
+  } catch (error) {
+    elements.captureStatus.textContent = `Обезличивание не выполнено: ${error.message}`;
+  }
+}
+
+async function createMockFromCapture(captureId) {
+  try {
+    const result = await api(`/debug/endpoint-captures/${encodeURIComponent(captureId)}/create-mock`, {
+      method: 'POST',
+      body: JSON.stringify({
+        operator_id: elements.operatorId.value.trim() || 'admin-1',
+        example_name: `Captured ${captureId}`,
+        tags: ['captured', 'debug'],
+      }),
+    });
+    elements.captureStatus.textContent = `Mock создан и активирован: ${result.config_version.version_id}`;
+    await loadEndpointCaptures();
+  } catch (error) {
+    elements.captureStatus.textContent = `Mock не создан: ${error.message}`;
   }
 }
 
@@ -1728,8 +2399,47 @@ elements.tabs.forEach((tab) => {
 elements.mainTabs.forEach((tab) => {
   tab.addEventListener('click', () => setMainTab(tab.dataset.mainTab));
 });
+elements.debugTabs.forEach((tab) => {
+  tab.addEventListener('click', () => setDebugTab(tab.dataset.debugTab));
+});
+elements.debugPrepareButton?.addEventListener('click', prepareDebugSimulation);
+elements.debugStartButton?.addEventListener('click', startDebugSimulation);
+elements.debugPauseButton?.addEventListener('click', pauseDebugSimulation);
+elements.debugCancelButton?.addEventListener('click', cancelDebugSimulation);
+elements.debugLoadTraceButton?.addEventListener('click', loadSelectedSimulationTrace);
+elements.debugLoadCaseTraceButton?.addEventListener('click', () => loadDebugCaseTrace());
+elements.debugWaitsRefreshButton?.addEventListener('click', loadDebugWaits);
+elements.captureEndpointSelect?.addEventListener('change', renderCaptureEndpointSelectors);
+elements.captureRefreshButton?.addEventListener('click', () => {
+  loadDebugIntegrationOperations();
+  loadEndpointCaptures();
+});
+elements.captureStartButton?.addEventListener('click', startEndpointCapture);
+elements.captureStopButton?.addEventListener('click', stopEndpointCapture);
+document.addEventListener('click', (event) => {
+  const target = event.target.closest('[data-action]');
+  if (!target) return;
+  const action = target.dataset.action;
+  if (action === 'debug-save-item') {
+    saveDebugSimulationItem(target.closest('[data-sim-item]'));
+  } else if (action === 'debug-toggle-exclude') {
+    const row = target.closest('[data-sim-item]');
+    const itemId = row?.dataset.simItem;
+    const current = (state.debugSimulation?.items || []).find((item) => item.item_id === itemId);
+    saveDebugSimulationItem(row, { excluded: !current?.excluded });
+  } else if (action === 'debug-open-case') {
+    setDebugTab('traces');
+    if (elements.debugTraceCaseId) elements.debugTraceCaseId.value = target.dataset.caseId || '';
+    loadDebugCaseTrace(target.dataset.caseId || '');
+  } else if (action === 'capture-sanitize') {
+    sanitizeCapture(target.dataset.captureId);
+  } else if (action === 'capture-create-mock') {
+    createMockFromCapture(target.dataset.captureId);
+  }
+});
 
 syncTestRunModeDefaults();
+setDebugTab(state.activeDebugTab);
 setMainTab(state.activeMainTab);
 renderAnalysis();
 renderScenario();

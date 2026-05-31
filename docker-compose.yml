@@ -35,6 +35,37 @@ services:
       timeout: 5s
       retries: 5
 
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://127.0.0.1:${KAFKA_PORT:-19092}
+    ports:
+      - "127.0.0.1:${KAFKA_PORT:-19092}:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --brokers 127.0.0.1:9092 | grep -E 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   n8n:
     image: n8nio/n8n:latest
     container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-n8n
@@ -129,5 +160,6 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  redpanda-data:
   n8n-data:
   hf-cache:

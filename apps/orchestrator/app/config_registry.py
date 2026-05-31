@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from jsonschema import Draft202012Validator, SchemaError
 
 from .action_gates import DEFAULT_STATE_DB_PATH, utc_now
 from .contracts import CONTRACTS_ROOT, ContractRegistry, ContractValidationError, load_json
+from .http_client import urlopen_with_retry
+from .privacy import redact_for_llm
 
 
 class ConfigRegistryError(ValueError):
@@ -70,6 +72,22 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
     "clarification_confidence": 0.70,
     "operator_handoff_confidence": 0.50,
     "min_extraction_confidence": 0.70,
+}
+
+AGENT_OUTCOME_LABELS = {
+    "success": "Успешно",
+    "needs_review": "Нужна проверка данных",
+    "waiting": "Ожидает клиента",
+    "escalated": "Эскалировано",
+    "error": "Ошибка",
+}
+
+AGENT_OUTCOME_NEXT_STEPS = {
+    "success": "Проверьте заполненные данные и подготовленные ReAct-вызовы.",
+    "needs_review": "Проверьте спорные данные, недостающие слоты или ожидающие подтверждения действия.",
+    "waiting": "Передайте клиенту уточняющий вопрос и продолжите обработку после ответа.",
+    "escalated": "Проверьте пакет передачи и передайте обращение в настроенный канал эскалации.",
+    "error": "Исправьте конфигурацию, mock или контракт и повторите тестовый прогон.",
 }
 
 SIMULATION_RUN_MODES = {
@@ -291,6 +309,124 @@ def default_result_mapping(
         if name in response_properties:
             result[name] = name
     return result
+
+
+def compact_agent_dict(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if item not in (None, "", [], {})
+    }
+
+
+def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str, Any]:
+    slot_values = simulation.get("slot_values") or {}
+    missing_slots = list(simulation.get("missing_slots") or [])
+    filled_slots = [
+        slot_id
+        for slot_id, value in slot_values.items()
+        if (value or {}).get("value") not in (None, "")
+    ]
+    ready_calls = list(simulation.get("ready_tool_launches") or [])
+    blocked_calls = list(simulation.get("blocked_tool_launches") or [])
+    trace = list(simulation.get("execution_trace") or [])
+    error_events = [
+        item
+        for item in trace
+        if str(item.get("status") or "").lower() in {"error", "failed"}
+    ]
+    low_confidence_slots = [
+        slot_id
+        for slot_id, value in slot_values.items()
+        if (value or {}).get("status") in {"candidate_below_threshold", "model_unavailable"}
+        or (value or {}).get("threshold_decision") == "accepted_for_test_below_auto_accept"
+    ]
+    ambiguous_resolution = [
+        item
+        for item in simulation.get("attribute_resolution") or []
+        if item.get("status") in {
+            "ambiguous",
+            "no_result",
+            "question_required",
+            "llm_resolution_pending",
+            "resolution_pending",
+            "blocked_by_configuration",
+        }
+    ]
+    missing_slot_set = set(missing_slots)
+    configuration_blocks = []
+    for item in blocked_calls:
+        unknown_required_slots = item.get("unknown_required_slots") or []
+        unresolved_parameters = [
+            slot_id
+            for slot_id in item.get("missing_parameter_slots") or []
+            if slot_id not in missing_slot_set
+        ]
+        if unknown_required_slots or unresolved_parameters:
+            configuration_blocks.append(item)
+    final_decision = simulation.get("final_decision")
+    operator_escalation = simulation.get("operator_escalation") or {}
+
+    if error_events or configuration_blocks or final_decision == "blocked_by_configuration":
+        status = "error"
+        summary = "Агент не смог продолжить из-за ошибки конфигурации, контракта или выполнения."
+    elif operator_escalation.get("required"):
+        status = "escalated"
+        summary = operator_escalation.get("reason") or "Агент завершил автообработку и подготовил передачу оператору."
+    elif simulation.get("awaiting_client_response") or simulation.get("next_question"):
+        status = "waiting"
+        summary = "Агенту не хватает данных: сформирован вопрос клиенту."
+    elif (
+        missing_slots
+        or low_confidence_slots
+        or ambiguous_resolution
+        or final_decision in {"pending_auto_fill", "waiting_operator_approval"}
+    ):
+        status = "needs_review"
+        summary = "Агент дошел до спорного состояния: требуется проверка данных или подтверждение действия."
+    else:
+        status = "success"
+        summary = "Агент собрал обязательные данные и не нашел блокирующих проблем в тестовом прогоне."
+
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "label": AGENT_OUTCOME_LABELS[status],
+        "summary": summary,
+        "next_step": AGENT_OUTCOME_NEXT_STEPS[status],
+        "filled_slots": filled_slots,
+        "missing_slots": missing_slots,
+        "low_confidence_slots": low_confidence_slots,
+        "ambiguous_resolution_count": len(ambiguous_resolution),
+        "ready_react_calls": [
+            compact_agent_dict(
+                {
+                    "react_call": item.get("tool_name"),
+                    "endpoint_id": item.get("endpoint_id"),
+                    "operation_id": item.get("operation_id"),
+                    "status": item.get("status", "ready"),
+                    "parameters": item.get("parameters"),
+                }
+            )
+            for item in ready_calls
+        ],
+        "blocked_react_calls": [
+            compact_agent_dict(
+                {
+                    "react_call": item.get("tool_name"),
+                    "endpoint_id": item.get("endpoint_id"),
+                    "operation_id": item.get("operation_id"),
+                    "block_reasons": item.get("block_reasons"),
+                    "missing_slots": item.get("missing_slots"),
+                    "missing_parameter_slots": item.get("missing_parameter_slots"),
+                    "unknown_required_slots": item.get("unknown_required_slots"),
+                }
+            )
+            for item in blocked_calls
+        ],
+        "error_count": len(error_events),
+        "final_decision": final_decision,
+    }
 
 
 def string_property(title: str | None = None) -> dict[str, Any]:
@@ -891,9 +1027,10 @@ def invoke_slot_extraction_model(
             },
         }
 
+    redaction = redact_for_llm(text)
     payload = {
         "model": model_name,
-        "messages": build_slot_extraction_prompt(scenario=scenario, slots=slots, text=text),
+        "messages": build_slot_extraction_prompt(scenario=scenario, slots=slots, text=redaction.text),
         "temperature": provider.get("temperature", 0),
         "max_tokens": min(int(provider.get("max_tokens", 1024)), 2048),
         "response_format": {"type": "json_object"},
@@ -909,9 +1046,12 @@ def invoke_slot_extraction_model(
     )
     started = time.perf_counter()
     try:
-        with urlopen(request, timeout=int(provider.get("timeout_seconds", 60))) as response:
-            raw_body = response.read().decode("utf-8")
-            body = json.loads(raw_body)
+        raw_body = urlopen_with_retry(
+            request,
+            timeout=int(provider.get("timeout_seconds", 60)),
+            operation_name=f"model/{provider.get('provider_id') or provider.get('display_name') or 'unknown'}",
+        ).decode("utf-8")
+        body = json.loads(raw_body)
     except HTTPError as error:
         error_body = error.read().decode("utf-8", errors="replace")
         return {
@@ -919,6 +1059,7 @@ def invoke_slot_extraction_model(
             "provider": provider.get("display_name"),
             "model": model_name,
             "duration_ms": int((time.perf_counter() - started) * 1000),
+            "redaction": redaction.as_dict(),
             "error": {
                 "code": f"model_http_{error.code}",
                 "message": error_body[:1000] or error.reason or "Модель вернула HTTP-ошибку.",
@@ -930,6 +1071,7 @@ def invoke_slot_extraction_model(
             "provider": provider.get("display_name"),
             "model": model_name,
             "duration_ms": int((time.perf_counter() - started) * 1000),
+            "redaction": redaction.as_dict(),
             "error": {
                 "code": "model_unreachable",
                 "message": str(error),
@@ -941,6 +1083,7 @@ def invoke_slot_extraction_model(
             "provider": provider.get("display_name"),
             "model": model_name,
             "duration_ms": int((time.perf_counter() - started) * 1000),
+            "redaction": redaction.as_dict(),
             "error": {
                 "code": "model_response_not_json",
                 "message": str(error),
@@ -961,6 +1104,7 @@ def invoke_slot_extraction_model(
             "model": model_name,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "raw_content": content[:1000],
+            "redaction": redaction.as_dict(),
             "error": {
                 "code": "slot_extraction_json_invalid",
                 "message": str(error),
@@ -973,6 +1117,7 @@ def invoke_slot_extraction_model(
         "model": model_name,
         "duration_ms": int((time.perf_counter() - started) * 1000),
         "usage": body.get("usage", {}),
+        "redaction": redaction.as_dict(),
         "slots": parsed.get("slots", parsed),
     }
 
@@ -3545,6 +3690,7 @@ class ConfigStore:
                         "model": model_result.get("model"),
                         "duration_ms": model_result.get("duration_ms"),
                         "usage": model_result.get("usage", {}),
+                        "redaction": model_result.get("redaction", {}),
                         "parameters": {"slot_ids": [slot["slot_id"] for slot in llm_slots]},
                         "result": llm_result_by_slot,
                     },
@@ -3561,6 +3707,7 @@ class ConfigStore:
                         "provider": model_result.get("provider"),
                         "model": model_result.get("model"),
                         "code": llm_error.get("code"),
+                        "redaction": model_result.get("redaction", {}),
                     },
                 )
         elif llm_slots:
@@ -3967,8 +4114,13 @@ class ConfigStore:
         interaction_channel = detail.get("interaction_channel") or {}
         channel_action_profiles = detail.get("channel_action_profiles") or {}
         standard_profile = channel_action_profiles.get("standard_handoff") or {}
+        missing_slot_set = set(missing_slots)
         blocking_configuration = any(
-            item.get("unknown_required_slots") or item.get("missing_parameter_slots")
+            item.get("unknown_required_slots")
+            or any(
+                slot_id not in missing_slot_set
+                for slot_id in item.get("missing_parameter_slots") or []
+            )
             for item in blocked_launches
         )
         if next_question:
@@ -4035,7 +4187,7 @@ class ConfigStore:
             "package": escalation_package if operator_escalation_required else None,
             "semantic": "operator_escalation",
         }
-        return {
+        simulation_result = {
             "schema_version": "1.0",
             "scenario_id": scenario_id,
             "input_text": text,
@@ -4066,6 +4218,8 @@ class ConfigStore:
             "final_decision": final_decision,
             "dry_run": True,
         }
+        simulation_result["agent_outcome"] = build_agent_outcome_from_simulation(simulation_result)
+        return simulation_result
 
     def create_draft(
         self,
@@ -4497,6 +4651,13 @@ class ConfigStore:
                         errors.append(
                             f"{endpoint['endpoint_id']}/{operation_id} mock_output не соответствует response_schema: "
                             f"{error.message}"
+                        )
+                for example in operation.get("mock_examples", []):
+                    validator = Draft202012Validator(operation["response_schema"])
+                    for error in validator.iter_errors(example.get("response_example", {})):
+                        errors.append(
+                            f"{endpoint['endpoint_id']}/{operation_id} mock_example "
+                            f"{example.get('example_id')} не соответствует response_schema: {error.message}"
                         )
         for tool in self.active_payload("tools")["tools"]:
             for binding in tool["endpoint_bindings"]:

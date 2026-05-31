@@ -158,6 +158,91 @@
         "mock_output": {
           "type": "object",
           "additionalProperties": true
+        },
+        "mock_examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mock_example"
+          }
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "mock_example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "example_id",
+        "display_name",
+        "request_example",
+        "response_example",
+        "source",
+        "sanitized"
+      ],
+      "properties": {
+        "example_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "request_example": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "response_example": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "expected_status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "captured"
+          ]
+        },
+        "sanitized": {
+          "type": "boolean"
+        },
+        "captured_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "captured_from_endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "contract_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
         }
       }
     }

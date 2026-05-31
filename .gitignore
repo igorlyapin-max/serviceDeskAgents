@@ -13,3 +13,8 @@ build/
 data/
 logs/
 state/
+
+# Local planning notes are not repository documentation.
+docs/PLAN.md
+docs/STAGE*.md
+docs/STAGE_*.md

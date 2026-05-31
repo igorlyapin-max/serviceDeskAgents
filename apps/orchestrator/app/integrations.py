@@ -7,14 +7,19 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from jsonschema import Draft202012Validator
 
 from .contracts import ContractRegistry, ContractValidationError
+from .http_client import urlopen_with_retry
 
 
 RISK_ORDER = ["low", "medium", "high", "critical"]
+
+
+def copy_invocation(value: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(value, ensure_ascii=False))
 
 
 def value_at_path(value: Any, path: str | None) -> Any:
@@ -54,6 +59,19 @@ class IntegrationAdapter(Protocol):
         operation: dict[str, Any],
     ) -> dict[str, Any]:
         """Invoke an integration endpoint and return a normalized tool_result."""
+        ...
+
+
+class EndpointCaptureRecorder(Protocol):
+    def record_endpoint_call(
+        self,
+        *,
+        invocation: dict[str, Any],
+        endpoint: dict[str, Any],
+        operation: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Persist a real endpoint invocation for debug mock generation."""
         ...
 
 
@@ -257,6 +275,7 @@ class IntegrationDispatcher:
     def __init__(self, contracts: ContractRegistry, registry: ToolRegistry):
         self.contracts = contracts
         self.registry = registry
+        self.capture_recorder: EndpointCaptureRecorder | None = None
         self.adapters: dict[str, IntegrationAdapter] = {
             "mock": MockAdapter(),
             "n8n_webhook": N8nWebhookAdapter(),
@@ -293,6 +312,7 @@ class IntegrationDispatcher:
 
         result = self._invoke_with_retry(adapter, invocation, binding)
         result = self._normalize_result_output(result, binding)
+        self._record_capture(invocation, binding, result)
         return self._require_result(result)
 
     def _binding_gate(
@@ -443,6 +463,26 @@ class IntegrationDispatcher:
         self.registry.validate_result(result)
         return result
 
+    def _record_capture(
+        self,
+        invocation: dict[str, Any],
+        binding: EndpointBinding,
+        result: dict[str, Any],
+    ) -> None:
+        if not self.capture_recorder:
+            return
+        if invocation.get("adapter_type") == "mock":
+            return
+        try:
+            self.capture_recorder.record_endpoint_call(
+                invocation=copy_invocation(invocation),
+                endpoint=binding.endpoint,
+                operation=binding.operation,
+                result=result,
+            )
+        except Exception:
+            return
+
     @staticmethod
     def _base_result(
         invocation: dict[str, Any],
@@ -560,9 +600,12 @@ class N8nWebhookAdapter:
         )
 
         try:
-            with urlopen(request, timeout=operation["timeout_seconds"]) as response:
-                raw_body = response.read().decode("utf-8")
-                output = json.loads(raw_body) if raw_body else {}
+            raw_body = urlopen_with_retry(
+                request,
+                timeout=operation["timeout_seconds"],
+                operation_name=f"{endpoint['endpoint_id']}/{operation['operation_id']}",
+            ).decode("utf-8")
+            output = json.loads(raw_body) if raw_body else {}
         except HTTPError as error:
             return IntegrationDispatcher._base_result(
                 invocation,
