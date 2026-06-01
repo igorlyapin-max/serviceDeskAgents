@@ -352,6 +352,9 @@ class DebugRuntime:
                     "decision": analysis.get("ai_decision", {}).get("decision", {}).get("type"),
                     "operator_message": analysis.get("operator_message"),
                 }
+                simulation_snapshot = self._simulation_snapshot_for_item(started_item)
+                if simulation_snapshot:
+                    started_item["simulation_snapshot"] = simulation_snapshot
                 agent_outcome = self._agent_outcome_from_analysis(
                     analysis,
                     processing_detail,
@@ -361,6 +364,8 @@ class DebugRuntime:
                     started_item,
                     agent_outcome,
                 )
+                if isinstance(started_item.get("simulation_snapshot"), dict):
+                    started_item["simulation_snapshot"]["agent_outcome"] = copy.deepcopy(started_item["agent_outcome"])
                 started_item["finished_at"] = utc_now()
                 started_item["updated_at"] = started_item["finished_at"]
                 self._save_simulation_item(started_item)
@@ -424,6 +429,17 @@ class DebugRuntime:
 
     def case_trace(self, case_id: str) -> dict[str, Any]:
         detail = self.processing_store.case_detail(case_id)
+        debug_item = self._simulation_item_by_case_id(case_id)
+        scenario_detail = None
+        simulation_snapshot = None
+        if debug_item:
+            scenario_id = debug_item.get("scenario_id")
+            if scenario_id and scenario_id != "auto":
+                try:
+                    scenario_detail = self.config_store.scenario_detail(scenario_id)
+                except ConfigRegistryError:
+                    scenario_detail = None
+            simulation_snapshot = self._simulation_snapshot_for_item(debug_item)
         events = []
         for event in detail.get("timeline", {}).get("events", []):
             events.append(self._trace_event(
@@ -484,12 +500,425 @@ class DebugRuntime:
                 parent_event_id=message.get("idempotency_key"),
             ))
         events.sort(key=lambda item: (item.get("created_at") or "", item.get("event_type") or ""))
+        steps = self._build_case_trace_steps(detail, events)
+        agent_outcome = self._case_trace_agent_outcome(detail)
         return {
             "schema_version": "1.0",
             "case_id": case_id,
             "case": detail.get("case"),
+            "debug_item": debug_item,
+            "scenario_detail": scenario_detail,
+            "simulation_snapshot": simulation_snapshot,
+            "agent_outcome": agent_outcome,
+            "summary": self._case_trace_summary(detail, events, agent_outcome),
+            "steps": steps,
             "events": events,
         }
+
+    def _simulation_item_by_case_id(self, case_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select item_json
+                from debug_simulation_items
+                where case_id = ?
+                order by updated_at desc, item_id desc
+                limit 1
+                """,
+                (case_id,),
+            ).fetchone()
+        return json.loads(row["item_json"]) if row else None
+
+    def _simulation_snapshot_for_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        existing = item.get("simulation_snapshot")
+        if isinstance(existing, dict):
+            result = copy.deepcopy(existing)
+        else:
+            scenario_id = item.get("scenario_id")
+            if not scenario_id or scenario_id == "auto":
+                return None
+            try:
+                result = self.config_store.simulate_scenario(
+                    scenario_id,
+                    text=item.get("text") or "",
+                    provided_slots=item.get("text_slots") or {},
+                    run_mode="approval_debug",
+                    allow_llm=False,
+                    allow_readonly_integrations=True,
+                    allow_mock_integrations=True,
+                    allow_action_with_approval=True,
+                )
+            except ConfigRegistryError:
+                return None
+        if item.get("agent_outcome"):
+            result["agent_outcome"] = copy.deepcopy(item["agent_outcome"])
+        if item.get("case_id"):
+            result["case_id"] = item["case_id"]
+        if item.get("ticket_id"):
+            result["ticket_id"] = item["ticket_id"]
+        result["debug_item_id"] = item.get("item_id")
+        result["debug_run_id"] = item.get("run_id")
+        return result
+
+    @classmethod
+    def _case_trace_summary(
+        cls,
+        detail: dict[str, Any],
+        events: list[dict[str, Any]],
+        agent_outcome: dict[str, Any],
+    ) -> dict[str, Any]:
+        case = detail.get("case") or {}
+        state = case.get("current_workflow_state") or {}
+        runs = detail.get("runs") or []
+        waits = detail.get("waits") or []
+        active_waits = [item for item in waits if item.get("status") in {"open", "waiting"}]
+        return {
+            "case_id": case.get("case_id"),
+            "ticket_id": case.get("ticket_id"),
+            "workflow_state": state.get("id"),
+            "workflow_category": state.get("category"),
+            "agent_outcome": agent_outcome,
+            "run_count": len(runs),
+            "task_count": len(detail.get("tasks") or []),
+            "wait_count": len(waits),
+            "active_wait_count": len(active_waits),
+            "event_count": len(events),
+            "updated_at": case.get("updated_at"),
+        }
+
+    @classmethod
+    def _build_case_trace_steps(cls, detail: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        case = detail.get("case") or {}
+        analysis = case.get("analysis_snapshot") or {}
+        ticket_input = case.get("ticket_input") or {}
+        ai_decision = case.get("ai_decision") or analysis.get("ai_decision") or {}
+        decision = ai_decision.get("decision") or {}
+        workflow_state = case.get("current_workflow_state") or analysis.get("workflow_state") or {}
+        runs = detail.get("runs") or []
+        tasks = detail.get("tasks") or []
+        waits = detail.get("waits") or []
+        outbox = detail.get("outbox") or []
+        tool_trace = case.get("tool_trace") or analysis.get("tool_trace") or []
+        tool_results = case.get("tool_results") or analysis.get("tool_results") or []
+        approval_requests = analysis.get("approval_requests") or []
+        client_waits = [item for item in waits if item.get("wait_type") == "client_wait"]
+        operator_waits = [item for item in waits if item.get("wait_type") == "operator_approval"]
+        agent_outcome = cls._case_trace_agent_outcome(detail)
+
+        missing_fields = decision.get("missing_fields") or []
+        slot_rows = [
+            ["Пользователь", value_preview(ticket_input.get("user"))],
+            ["Сервис", value_preview(ticket_input.get("service"))],
+            ["Приоритет", value_preview(ticket_input.get("priority"))],
+            ["Описание", value_preview(ticket_input.get("description"), limit=420)],
+        ]
+        question_rows = []
+        if decision.get("question") or missing_fields:
+            question_rows.append([
+                value_preview(", ".join(missing_fields) if missing_fields else "уточнение"),
+                value_preview(decision.get("question")),
+            ])
+        for wait in client_waits:
+            payload = wait.get("payload") or {}
+            question_rows.append([
+                value_preview(", ".join(payload.get("expected_slots") or []) or wait.get("wait_id")),
+                value_preview(payload.get("question") or wait.get("reason")),
+            ])
+
+        classification_rows = [
+            ["Workflow state", value_preview(workflow_state.get("id"))],
+            ["Категория state", value_preview(workflow_state.get("category"))],
+            ["Decision", value_preview(decision.get("type"))],
+            ["Сообщение оператора", value_preview(analysis.get("operator_message") or case.get("analysis_snapshot", {}).get("operator_message"), limit=420)],
+            ["RAG", value_preview((case.get("rag_trace") or analysis.get("rag_trace") or {}).get("status"))],
+        ]
+        action_rows = [
+            [
+                value_preview(action.get("action_id")),
+                value_preview(action.get("tool_name")),
+                value_preview(action.get("risk_level")),
+                value_preview(action.get("parameters")),
+            ]
+            for action in ai_decision.get("proposed_actions") or []
+        ]
+
+        run_rows = [
+            [
+                value_preview(run.get("run_id")),
+                value_preview(run.get("status")),
+                value_preview(run.get("current_step")),
+                value_preview(run.get("started_at")),
+                value_preview(run.get("completed_at")),
+                value_preview((run.get("extensions") or {}).get("agent_id") or "runtime"),
+            ]
+            for run in runs
+        ]
+        task_rows = [
+            [
+                value_preview(task.get("task_id")),
+                value_preview(task.get("status")),
+                value_preview(task.get("worker_id")),
+                value_preview(task.get("attempt")),
+                value_preview(task.get("heartbeat_at")),
+                value_preview(task.get("idempotency_key")),
+            ]
+            for task in tasks
+        ]
+        outbox_rows = [
+            [
+                value_preview(message.get("topic")),
+                value_preview(message.get("event_type")),
+                value_preview(message.get("status")),
+                value_preview(message.get("idempotency_key")),
+            ]
+            for message in outbox[:20]
+        ]
+
+        result_by_invocation = {
+            result.get("invocation_id"): result
+            for result in tool_results
+            if result.get("invocation_id")
+        }
+        tool_rows = []
+        trace_items = tool_trace or tool_results
+        for item in trace_items:
+            result = result_by_invocation.get(item.get("invocation_id"), item)
+            trace = (result.get("extensions") or {}).get("trace") or {}
+            react_parameters = trace.get("react_parameters")
+            operation_parameters = trace.get("operation_parameters")
+            parameter_mapping = trace.get("parameter_mapping")
+            tool_rows.append([
+                value_preview(item.get("tool_name") or result.get("tool_name")),
+                value_preview(item.get("endpoint_id") or result.get("endpoint_id")),
+                value_preview(item.get("operation_id") or result.get("operation_id")),
+                value_preview(item.get("status") or result.get("status")),
+                value_preview(react_parameters if react_parameters is not None else "недоступно в старой трассе", limit=420),
+                value_preview(operation_parameters if operation_parameters is not None else "недоступно в старой трассе", limit=420),
+                value_preview(parameter_mapping if parameter_mapping is not None else "недоступно в старой трассе", limit=420),
+                value_preview(item.get("duration_ms") or result.get("duration_ms")),
+                value_preview(item.get("attempts") or result.get("attempts")),
+                value_preview(item.get("policy_rule_id") or result.get("policy_rule_id")),
+                value_preview(item.get("gate_id") or (result.get("extensions") or {}).get("gate_id")),
+                value_preview(item.get("error_code") or (result.get("error") or {}).get("code")),
+                value_preview(result.get("output"), limit=420),
+            ])
+
+        wait_rows = [
+            [
+                value_preview(wait.get("wait_id")),
+                value_preview(wait.get("wait_type")),
+                value_preview(wait.get("status")),
+                value_preview(wait.get("deadline_at")),
+                value_preview(wait.get("reason")),
+                value_preview((wait.get("payload") or {}).get("question")),
+            ]
+            for wait in waits
+        ]
+        approval_rows = [
+            [
+                value_preview(item.get("gate_id") or item.get("approval_id")),
+                value_preview(item.get("action_id")),
+                value_preview(item.get("status")),
+                value_preview(item.get("summary") or item.get("reason")),
+            ]
+            for item in approval_requests
+        ]
+
+        has_tool_errors = any(
+            item.get("status") not in {"success", "dry_run_completed", "blocked"}
+            for item in tool_results
+        )
+        has_blocked_tools = any(item.get("status") == "blocked" for item in tool_results)
+        return [
+            cls._case_trace_step(
+                1,
+                "Приём и нормализация",
+                "waiting" if client_waits or decision.get("type") == "clarification_needed" else "completed",
+                "Входные данные обращения и уточняющие вопросы клиенту.",
+                metrics=[
+                    cls._trace_metric("Ticket ID", case.get("ticket_id")),
+                    cls._trace_metric("Источник", ticket_input.get("source") or "tickets.analyze"),
+                    cls._trace_metric("Клиентский вопрос", "да" if client_waits or decision.get("question") else "нет"),
+                ],
+                tables=[
+                    cls._trace_table("Исходные данные", ["Поле", "Значение"], slot_rows),
+                    cls._trace_table("Вопросы клиенту", ["Недостающие данные", "Вопрос"], question_rows),
+                ],
+                events=cls._events_for_step(events, {"case_created", "analysis_completed", "processing_wait_opened"}),
+            ),
+            cls._case_trace_step(
+                2,
+                "Классификация и маршрутизация",
+                "escalated" if decision.get("type") == "escalation_needed" else "completed",
+                "Решение классификации, workflow state и route-факты из анализа.",
+                metrics=[
+                    cls._trace_metric("Workflow state", workflow_state.get("id"), kind="badge"),
+                    cls._trace_metric("Decision", decision.get("type"), kind="badge"),
+                    cls._trace_metric("Terminal", workflow_state.get("terminal")),
+                ],
+                tables=[
+                    cls._trace_table("Решение", ["Поле", "Значение"], classification_rows),
+                    cls._trace_table("Предложенные действия", ["Action ID", "ReAct-вызов", "Риск", "Параметры"], action_rows),
+                ],
+                events=cls._events_for_step(events, {"analysis_completed"}),
+            ),
+            cls._case_trace_step(
+                3,
+                "Планирование ReAct",
+                (runs[0].get("status") if runs else "not_executed") or "not_executed",
+                "Запуск обработки, задачи агентов, lease/heartbeat и outbox-события.",
+                metrics=[
+                    cls._trace_metric("Запусков", len(runs)),
+                    cls._trace_metric("Задач", len(tasks)),
+                    cls._trace_metric("Outbox pending/total", f"{sum(1 for item in outbox if item.get('status') == 'pending')}/{len(outbox)}"),
+                ],
+                tables=[
+                    cls._trace_table("Processing runs", ["Run", "Статус", "Текущий шаг", "Старт", "Финиш", "Агент"], run_rows),
+                    cls._trace_table("Agent tasks", ["Task", "Статус", "Worker", "Attempt", "Heartbeat", "Idempotency"], task_rows),
+                    cls._trace_table("Outbox", ["Topic", "Event", "Статус", "Idempotency"], outbox_rows),
+                ],
+                events=cls._events_for_step(events, {"processing_run", "agent_task", "processing_run_started", "processing_task_completed"}),
+            ),
+            cls._case_trace_step(
+                4,
+                "Выполнение и инструменты",
+                "error" if has_tool_errors else ("blocked" if has_blocked_tools else ("success" if tool_rows else "not_executed")),
+                "ReAct-вызовы, endpoint-операции, статусы и результаты инструментов.",
+                metrics=[
+                    cls._trace_metric("Вызовов", len(tool_rows)),
+                    cls._trace_metric("Ошибок", sum(1 for item in tool_results if item.get("status") not in {"success", "dry_run_completed", "blocked"})),
+                    cls._trace_metric("Заблокировано политикой", sum(1 for item in tool_results if item.get("status") == "blocked")),
+                ],
+                tables=[
+                    cls._trace_table(
+                        "Вызовы",
+                        [
+                            "ReAct",
+                            "Endpoint",
+                            "Операция",
+                            "Статус",
+                            "Параметры ReAct",
+                            "Параметры endpoint",
+                            "Маппинг параметров",
+                            "ms",
+                            "Attempts",
+                            "Policy",
+                            "Gate",
+                            "Ошибка",
+                            "Результат",
+                        ],
+                        tool_rows,
+                    ),
+                ],
+                events=cls._events_for_step(events, {"tool_result_recorded", "integration_callback_received", "processing_external_event_received"}),
+            ),
+            cls._case_trace_step(
+                5,
+                "Решение и эскалация",
+                agent_outcome["status"],
+                agent_outcome["summary"],
+                metrics=[
+                    cls._trace_metric("Итог агента", agent_outcome["label"], kind="badge", status=agent_outcome["status"]),
+                    cls._trace_metric("Следующее действие", agent_outcome.get("next_step")),
+                    cls._trace_metric("Активных ожиданий", sum(1 for item in waits if item.get("status") in {"open", "waiting"})),
+                    cls._trace_metric("Операторских ожиданий", len(operator_waits)),
+                ],
+                tables=[
+                    cls._trace_table("Ожидания", ["Wait", "Тип", "Статус", "Deadline", "Причина", "Вопрос"], wait_rows),
+                    cls._trace_table("Согласования", ["Gate", "Action", "Статус", "Описание"], approval_rows),
+                ],
+                events=cls._events_for_step(events, {"wait_state", "processing_wait_opened", "approval_decisioned"}),
+            ),
+        ]
+
+    @classmethod
+    def _case_trace_agent_outcome(cls, detail: dict[str, Any]) -> dict[str, Any]:
+        case = detail.get("case") or {}
+        analysis = case.get("analysis_snapshot") or {}
+        state = case.get("current_workflow_state") or analysis.get("workflow_state") or {}
+        decision = ((case.get("ai_decision") or analysis.get("ai_decision") or {}).get("decision") or {})
+        runs = detail.get("runs") or []
+        waits = detail.get("waits") or []
+        has_client_wait = any(item.get("wait_type") == "client_wait" and item.get("status") in {"open", "waiting"} for item in waits)
+        has_operator_wait = any(item.get("wait_type") == "operator_approval" and item.get("status") in {"open", "waiting"} for item in waits)
+        run_statuses = {run.get("status") for run in runs}
+        if analysis.get("failure") or "failed" in run_statuses or state.get("category") in {"error", "blocked"}:
+            return cls._agent_outcome(
+                "error",
+                analysis.get("operator_message") or "Обработка обращения завершилась технической ошибкой.",
+                AGENT_OUTCOME_NEXT_STEPS["error"],
+            )
+        if has_client_wait or state.get("category") == "waiting" or decision.get("type") == "clarification_needed":
+            return cls._agent_outcome(
+                "waiting",
+                analysis.get("operator_message") or "Агент сформировал вопрос клиенту и ожидает ответ.",
+                AGENT_OUTCOME_NEXT_STEPS["waiting"],
+            )
+        if (
+            has_operator_wait
+            or "escalated" in run_statuses
+            or state.get("category") == "handoff"
+            or decision.get("type") == "escalation_needed"
+            or analysis.get("approval_requests")
+        ):
+            return cls._agent_outcome(
+                "escalated",
+                analysis.get("operator_message") or "Автообработка остановлена: требуется передача оператору.",
+                AGENT_OUTCOME_NEXT_STEPS["escalated"],
+            )
+        return cls._agent_outcome(
+            "success",
+            analysis.get("operator_message") or "Обращение завершено автоматически.",
+            AGENT_OUTCOME_NEXT_STEPS["success"],
+        )
+
+    @staticmethod
+    def _case_trace_step(
+        order: int,
+        title: str,
+        status: str,
+        summary: str,
+        *,
+        metrics: list[dict[str, Any]] | None = None,
+        tables: list[dict[str, Any]] | None = None,
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "step_id": f"step_{order}",
+            "order": order,
+            "title": title,
+            "status": status,
+            "summary": summary,
+            "metrics": metrics or [],
+            "tables": [table for table in (tables or []) if table.get("rows")],
+            "events": events or [],
+        }
+
+    @staticmethod
+    def _trace_metric(label: str, value: Any, *, kind: str = "text", status: str | None = None) -> dict[str, Any]:
+        return {
+            "label": label,
+            "value": value_preview(value),
+            "kind": kind,
+            "status": status,
+        }
+
+    @staticmethod
+    def _trace_table(title: str, columns: list[str], rows: list[list[Any]]) -> dict[str, Any]:
+        return {
+            "title": title,
+            "columns": columns,
+            "rows": rows,
+        }
+
+    @staticmethod
+    def _events_for_step(events: list[dict[str, Any]], event_types: set[str]) -> list[dict[str, Any]]:
+        result = []
+        for event in events:
+            event_type = str(event.get("event_type") or "")
+            if event_type in event_types or event_type.split(":", 1)[0] in event_types:
+                result.append(event)
+        return result
 
     def start_capture_session(self, payload: dict[str, Any]) -> dict[str, Any]:
         endpoint_id = payload.get("endpoint_id")
@@ -1240,20 +1669,28 @@ class DebugRuntime:
                 workflow_state=workflow_state.get("id"),
                 decision=decision.get("type"),
             )
-        if result_status == "waiting" or workflow_state.get("category") == "waiting" or approval_requests:
+        if approval_requests:
             return cls._agent_outcome(
-                "waiting",
-                operator_message or "Агент ожидает ответ клиента или подтверждение оператора.",
-                AGENT_OUTCOME_NEXT_STEPS["waiting"],
+                "escalated",
+                operator_message or "Агент остановил автообработку: требуется подтверждение или действие оператора.",
+                AGENT_OUTCOME_NEXT_STEPS["escalated"],
                 workflow_state=workflow_state.get("id"),
                 decision=decision.get("type"),
                 approval_count=len(approval_requests),
             )
+        if result_status == "waiting" or workflow_state.get("category") == "waiting":
+            return cls._agent_outcome(
+                "waiting",
+                operator_message or "Агент ожидает ответ клиента.",
+                AGENT_OUTCOME_NEXT_STEPS["waiting"],
+                workflow_state=workflow_state.get("id"),
+                decision=decision.get("type"),
+            )
         if blocked_tools:
             return cls._agent_outcome(
-                "needs_review",
-                operator_message or "Агент завершил анализ, но часть вызовов была заблокирована политикой.",
-                AGENT_OUTCOME_NEXT_STEPS["needs_review"],
+                "escalated",
+                operator_message or "Агент завершил автообработку: часть вызовов заблокирована политикой.",
+                AGENT_OUTCOME_NEXT_STEPS["escalated"],
                 workflow_state=workflow_state.get("id"),
                 decision=decision.get("type"),
                 blocked_tools=[
@@ -1287,9 +1724,9 @@ class DebugRuntime:
         expected = item.get("expected_outcome") or "н/д"
         actual = outcome.get("label") or outcome.get("status") or "н/д"
         return cls._agent_outcome(
-            "needs_review",
+            "escalated",
             f"Фактический итог агента отличается от ожидаемой ветки генератора: ожидалось {expected}, получено {actual}.",
-            "Проверьте текст обращения, настройки сценария и трассу обработки.",
+            "Передайте обращение в отладочный разбор оператору или администратору вместе с трассой обработки.",
             expected_outcome=expected,
             actual_outcome=outcome,
             expected_mismatch=True,
@@ -1302,10 +1739,10 @@ class DebugRuntime:
         expected_to_actual = {
             "completed": {"success"},
             "wait_or_clarification": {"waiting"},
-            "manual_review": {"needs_review", "escalated"},
+            "manual_review": {"escalated"},
             "escalation_or_error": {"escalated", "error"},
             "external_wait": {"waiting"},
-            "out_of_scope": {"needs_review", "escalated", "error"},
+            "out_of_scope": {"escalated", "error"},
         }
         allowed = expected_to_actual.get(expected)
         if not allowed:

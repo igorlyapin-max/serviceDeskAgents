@@ -75,16 +75,16 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
 }
 
 AGENT_OUTCOME_LABELS = {
-    "success": "Успешно",
-    "needs_review": "Нужна проверка данных",
-    "waiting": "Ожидает клиента",
-    "escalated": "Эскалировано",
+    "success": "Завершено автоматически",
+    "needs_review": "Требуется эскалация",
+    "waiting": "Вопрос клиенту",
+    "escalated": "Требуется эскалация",
     "error": "Ошибка",
 }
 
 AGENT_OUTCOME_NEXT_STEPS = {
-    "success": "Проверьте заполненные данные и подготовленные ReAct-вызовы.",
-    "needs_review": "Проверьте спорные данные, недостающие слоты или ожидающие подтверждения действия.",
+    "success": "Автообработка завершена; проверьте трассу и итоговые данные при необходимости.",
+    "needs_review": "Передайте обращение оператору вместе с контекстом и трассой обработки.",
     "waiting": "Передайте клиенту уточняющий вопрос и продолжите обработку после ответа.",
     "escalated": "Проверьте пакет передачи и передайте обращение в настроенный канал эскалации.",
     "error": "Исправьте конфигурацию, mock или контракт и повторите тестовый прогон.",
@@ -376,17 +376,19 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
     elif simulation.get("awaiting_client_response") or simulation.get("next_question"):
         status = "waiting"
         summary = "Агенту не хватает данных: сформирован вопрос клиенту."
+    elif missing_slots:
+        status = "waiting"
+        summary = "Агенту не хватает обязательных данных: нужно задать вопрос клиенту."
     elif (
-        missing_slots
-        or low_confidence_slots
+        low_confidence_slots
         or ambiguous_resolution
         or final_decision in {"pending_auto_fill", "waiting_operator_approval"}
     ):
-        status = "needs_review"
-        summary = "Агент дошел до спорного состояния: требуется проверка данных или подтверждение действия."
+        status = "escalated"
+        summary = "Агент не может надежно продолжить автоматически: требуется передача оператору."
     else:
         status = "success"
-        summary = "Агент собрал обязательные данные и не нашел блокирующих проблем в тестовом прогоне."
+        summary = "Агент собрал обязательные данные и завершил тестовый прогон автоматически."
 
     return {
         "schema_version": "1.0",

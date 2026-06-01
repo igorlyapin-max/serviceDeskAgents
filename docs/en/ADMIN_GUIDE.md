@@ -125,7 +125,7 @@ Console areas:
 
 - `Single Run` - manual check of one ticket, slots, the five orchestrator steps and dry-run trace;
 - `Multi-Agent Flow` - generate cases from scenarios, preview, edit and start the flow;
-- `Case Traces` - case-centric inspection of the full processing cycle by `case_id`;
+- `Case Traces` - case-centric inspection of the full processing cycle by `case_id` in the five orchestrator steps format;
 - `Active Waits` - client, timer, external-event and approval waits;
 - `Mocks from Endpoint Calls` - capture real endpoint calls, sanitize them and create mock output.
 
@@ -140,15 +140,16 @@ The ticket text generator uses slot `examples` first, then scenario description 
 
 After start, the console shows `Agent Outcome`. This is the business verdict above the technical runtime status:
 
-- `Success` - required data is collected and no blocking issue was found;
-- `Needs data review` - data is ambiguous, confidence is low, or an action needs confirmation;
-- `Waiting for customer` - the agent asked a clarification question and must continue after the answer;
-- `Escalated` - automated processing stopped and a handoff was prepared;
+- `Completed automatically` - required data is collected and automated processing reached a final result;
+- `Question to customer` - the agent cannot continue without a customer answer;
+- `Escalation required` - automated processing stopped and must be handed off to an operator or escalation channel;
 - `Error` - mock, contract, configuration or execution failed.
 
 The technical `completed` status only means that the engine finished the run. Use `Agent Outcome` and the call trace to evaluate what actually happened.
 
-In multi-ticket dry-run, the generator's expected branch is compared with the actual agent outcome. If a variant expected a customer clarification but the agent completed the case as successful, the outcome is shown as `Needs data review`.
+In multi-ticket dry-run, the generator's expected branch is compared with the actual agent outcome. If a variant expected a customer clarification but the agent completed the case as successful, the outcome is shown as `Escalation required` with mismatch details in the trace.
+
+The `Case Traces` screen shows a case not as a flat event log, but as five steps: intake and normalization, classification, ReAct planning, tool execution, decision and escalation. For cases created by a multi-agent dry-run it reuses the same functional `Five Steps` view as the single-run debugger: filled slots, customer questions, ReAct calls, call parameters, endpoint parameters and results are visible. The raw timeline remains available in the collapsible `Technical timeline events` block. If an older case has no scenario snapshot, the console shows a fallback trace with the available facts.
 
 Out-of-scope tickets should be close to the target scenario by format, but not by meaning. For example, a finance request may contain a contact person and employee full name, but must not trigger the password reset scenario.
 

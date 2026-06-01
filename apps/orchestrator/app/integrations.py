@@ -16,6 +16,23 @@ from .http_client import urlopen_with_retry
 
 
 RISK_ORDER = ["low", "medium", "high", "critical"]
+SENSITIVE_TRACE_KEYWORDS = (
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "session",
+    "токен",
+    "пароль",
+    "секрет",
+    "ключ",
+)
 
 
 def copy_invocation(value: dict[str, Any]) -> dict[str, Any]:
@@ -287,31 +304,36 @@ class IntegrationDispatcher:
         binding = self.registry.resolve(invocation["tool_name"])
         binding_error = self._binding_gate(invocation, binding)
         if binding_error:
-            return self._require_result(binding_error)
+            return self._require_result(self._with_trace(binding_error, invocation, binding))
 
         policy_result = self._policy_gate(invocation)
         if policy_result:
-            return self._require_result(policy_result)
+            return self._require_result(self._with_trace(policy_result, invocation, binding))
 
         endpoint_result = self._endpoint_gate(invocation, binding.endpoint)
         if endpoint_result:
-            return self._require_result(endpoint_result)
+            return self._require_result(self._with_trace(endpoint_result, invocation, binding))
 
         adapter = self.adapters.get(invocation["adapter_type"])
         if not adapter:
             return self._require_result(
-                self._base_result(
+                self._with_trace(
+                    self._base_result(
+                        invocation,
+                        "error",
+                        error={
+                            "code": "adapter_not_supported",
+                            "message": f"adapter_type не поддерживается: {invocation['adapter_type']}",
+                        },
+                    ),
                     invocation,
-                    "error",
-                    error={
-                        "code": "adapter_not_supported",
-                        "message": f"adapter_type не поддерживается: {invocation['adapter_type']}",
-                    },
+                    binding,
                 )
             )
 
         result = self._invoke_with_retry(adapter, invocation, binding)
         result = self._normalize_result_output(result, binding)
+        result = self._with_trace(result, invocation, binding)
         self._record_capture(invocation, binding, result)
         return self._require_result(result)
 
@@ -461,6 +483,49 @@ class IntegrationDispatcher:
     def _require_result(self, result: dict[str, Any]) -> dict[str, Any]:
         self.contracts.require_valid("tool_result", result)
         self.registry.validate_result(result)
+        return result
+
+    @classmethod
+    def _with_trace(
+        cls,
+        result: dict[str, Any],
+        invocation: dict[str, Any],
+        binding: EndpointBinding,
+    ) -> dict[str, Any]:
+        extensions = result.setdefault("extensions", {})
+        parameter_mapping = copy_invocation(binding.binding.get("parameter_mapping") or {})
+        operation_parameters = cls._redact_trace_parameters(
+            invocation.get("operation_parameters") or {},
+            parameter_mapping=parameter_mapping,
+        )
+        extensions["trace"] = {
+            "react_parameters": cls._redact_trace_parameters(invocation.get("parameters") or {}),
+            "operation_parameters": operation_parameters,
+            "parameter_mapping": parameter_mapping,
+            "endpoint_id": invocation.get("endpoint_id"),
+            "operation_id": invocation.get("operation_id"),
+            "execution_mode": invocation.get("execution_mode"),
+            "approved_by_operator": invocation.get("approved_by_operator"),
+        }
+        return result
+
+    @classmethod
+    def _redact_trace_parameters(
+        cls,
+        parameters: dict[str, Any],
+        *,
+        parameter_mapping: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        secret_targets = {
+            parameter
+            for parameter, source_ref in (parameter_mapping or {}).items()
+            if str(source_ref).startswith("secret:")
+        }
+        result = copy_invocation(parameters)
+        for key in list(result):
+            normalized_key = str(key).lower()
+            if key in secret_targets or any(keyword in normalized_key for keyword in SENSITIVE_TRACE_KEYWORDS):
+                result[key] = "параметр скрыт"
         return result
 
     def _record_capture(

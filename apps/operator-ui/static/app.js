@@ -110,7 +110,7 @@ const visibleLabels = {
   draft: 'черновик',
   error: 'ошибка',
   failed: 'ошибка',
-  escalated: 'эскалировано',
+  escalated: 'требуется эскалация',
   incomplete: 'неполно',
   info: 'информация',
   agent_with_confirmation: 'агент + подтверждение',
@@ -140,7 +140,7 @@ const visibleLabels = {
   started: 'запущено',
   filled_by_slot_autofill: 'заполнено ReAct-автозаполнением',
   missing_required_result_field: 'нет обязательного поля результата',
-  needs_review: 'нужна проверка данных',
+  needs_review: 'требуется эскалация',
   extraction_pending: 'ожидает извлечения',
   filled_by_model: 'заполнено моделью',
   candidate_below_threshold: 'результат ниже порога',
@@ -148,10 +148,10 @@ const visibleLabels = {
   prepared: 'подготовлено',
   not_executed: 'не выполнялось',
   question_required: 'нужно уточнение у клиента',
-  waiting: 'ожидает клиента',
+  waiting: 'вопрос клиенту',
   resolution_profile: 'профиль разрешения',
   dry_run_simulated: 'смоделировано',
-  success: 'успешно',
+  success: 'завершено автоматически',
   unavailable: 'недоступно',
   user_question: 'вопрос клиенту',
   case: 'из данных обращения',
@@ -610,19 +610,28 @@ function clientAgentOutcome(simulation) {
     };
   }
   if ((simulation.missing_slots || []).length || ['pending_auto_fill', 'waiting_operator_approval'].includes(simulation.final_decision)) {
+    if ((simulation.missing_slots || []).length) {
+      return {
+        status: 'waiting',
+        label: 'Вопрос клиенту',
+        summary: 'Агенту не хватает обязательных данных: нужно задать вопрос клиенту.',
+        next_step: simulation.next_question || 'Передайте вопрос клиенту и продолжите после ответа.',
+        missing_slots: simulation.missing_slots || [],
+      };
+    }
     return {
-      status: 'needs_review',
-      label: 'Нужна проверка данных',
-      summary: 'Агент дошел до состояния, где требуется ручная проверка данных или подтверждение действия.',
-      next_step: 'Проверьте недостающие слоты, спорные результаты и ожидающие действия.',
+      status: 'escalated',
+      label: 'Требуется эскалация',
+      summary: 'Агент не может надежно продолжить автоматически: требуется передача оператору.',
+      next_step: 'Проверьте пакет передачи и трассу обработки.',
       missing_slots: simulation.missing_slots || [],
     };
   }
   return {
     status: 'success',
-    label: 'Успешно',
-    summary: 'Агент собрал обязательные данные и не нашел блокирующих проблем.',
-    next_step: 'Проверьте заполненные данные и подготовленные ReAct-вызовы.',
+    label: 'Завершено автоматически',
+    summary: 'Агент собрал обязательные данные и завершил тестовый прогон автоматически.',
+    next_step: 'Проверьте трассу и итоговые данные при необходимости.',
   };
 }
 
@@ -683,21 +692,21 @@ function slotLabel(slotSchema, slotId) {
   return (slotSchema?.slots || []).find((slot) => slot.slot_id === slotId)?.display_name || slotId;
 }
 
-function slotStatus(slot) {
-  const resolution = slotResolutionState(slot);
+function slotStatus(slot, simulation = state.scenarioSimulation) {
+  const resolution = slotResolutionState(slot, simulation);
   if (resolution?.status) return resolution.status;
-  const simulationValue = state.scenarioSimulation?.slot_values?.[slot.slot_id];
+  const simulationValue = simulation?.slot_values?.[slot.slot_id];
   if (simulationValue?.status) return simulationValue.status;
   if (!slot.required) return 'optional';
   return 'missing';
 }
 
-function slotDisplayValue(slot) {
-  const simulationValue = state.scenarioSimulation?.slot_values?.[slot.slot_id];
+function slotDisplayValue(slot, simulation = state.scenarioSimulation, detail = state.scenarioDetail) {
+  const simulationValue = simulation?.slot_values?.[slot.slot_id];
   if (simulationValue?.value !== undefined && simulationValue?.value !== null && simulationValue?.value !== '') {
     return simulationValue.value;
   }
-  const profile = slotResolutionProfile(slot);
+  const profile = slotResolutionProfile(slot, detail);
   if (profile) return profile.display_name;
   if (slot.case_source_ref) return slot.case_source_ref;
   if (slot.extraction_instruction) return slot.extraction_instruction;
@@ -717,10 +726,10 @@ function readableSlotValue(value) {
   return String(value);
 }
 
-function slotResultValue(slot) {
-  const simulationValue = state.scenarioSimulation?.slot_values?.[slot.slot_id];
+function slotResultValue(slot, simulation = state.scenarioSimulation, providedSlots = state.providedSlots) {
+  const simulationValue = simulation?.slot_values?.[slot.slot_id];
   const result = readableSlotValue(simulationValue?.value);
-  const provided = readableSlotValue(state.providedSlots[slot.slot_id]);
+  const provided = readableSlotValue(providedSlots[slot.slot_id]);
   return result || provided || 'не заполнен';
 }
 
@@ -732,17 +741,17 @@ function slotFillMethod(slot) {
   return 'resolution_profile';
 }
 
-function slotResolutionProfile(slot) {
-  return (state.scenarioDetail?.attribute_resolution_profiles || [])
+function slotResolutionProfile(slot, detail = state.scenarioDetail) {
+  return (detail?.attribute_resolution_profiles || [])
     .find((profile) => profile.profile_id === slot.resolution_profile_id);
 }
 
-function slotResolutionState(slot) {
-  return state.scenarioSimulation?.resolution_state?.[slot.slot_id] || null;
+function slotResolutionState(slot, simulation = state.scenarioSimulation) {
+  return simulation?.resolution_state?.[slot.slot_id] || null;
 }
 
 function resolutionQuestion(slot, simulation) {
-  const stateItem = slotResolutionState(slot);
+  const stateItem = slotResolutionState(slot, simulation);
   return stateItem?.pending_question || simulation?.next_question || slotQuestionText(slot) || '';
 }
 
@@ -835,14 +844,14 @@ function formatAutofillFilledSlots(item = {}) {
   return formatOutputValues(item.output_values || {});
 }
 
-function launchRuntimeStatus(launch) {
-  const runtime = launchRuntimeSummary(launch);
+function launchRuntimeStatus(launch, simulation = state.scenarioSimulation) {
+  const runtime = launchRuntimeSummary(launch, simulation);
   return runtime?.status || 'pending';
 }
 
-function launchRuntimeSummary(launch) {
-  const ready = state.scenarioSimulation?.ready_tool_launches || [];
-  const blocked = state.scenarioSimulation?.blocked_tool_launches || [];
+function launchRuntimeSummary(launch, simulation = state.scenarioSimulation) {
+  const ready = simulation?.ready_tool_launches || [];
+  const blocked = simulation?.blocked_tool_launches || [];
   const readyItem = ready.find((item) => item.launch_id === launch.launch_id);
   if (readyItem) return { ...readyItem, status: 'ready' };
   const blockedItem = blocked.find((item) => item.launch_id === launch.launch_id);
@@ -987,17 +996,15 @@ function renderSlotAnswers() {
   elements.slotAnswers.innerHTML = rows.join('');
 }
 
-function renderSteps() {
-  const detail = state.scenarioDetail;
-  if (!state.workflowStarted) {
-    elements.stepsView.innerHTML = '<div class="empty">Сценарная работа начнется после кнопки «Анализировать»</div>';
-    return;
-  }
+function renderFiveStepView(detail, simulation, options = {}) {
   if (!detail) {
-    elements.stepsView.innerHTML = '<div class="empty">Сценарий не загружен</div>';
-    return;
+    return '<div class="empty">Сценарий не загружен</div>';
   }
-  const simulation = state.scenarioSimulation;
+  const providedSlots = options.providedSlots || state.providedSlots || {};
+  const scenarioTitle = options.scenarioName
+    || detail.scenario?.display_name
+    || detail.scenario?.scenario_id
+    || 'н/д';
   const slotSchema = detail.slot_schema || {};
   const route = detail.route || {};
   const policy = detail.orchestrator_policy || {};
@@ -1011,10 +1018,10 @@ function renderSteps() {
     escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group),
     badge(slot.required ? 'required' : 'optional'),
     escapeHtml(fillMethodLabels[slotFillMethod(slot)] || slotFillMethod(slot)),
-    badge(slotStatus(slot)),
-    escapeHtml(slotResultValue(slot)),
-    escapeHtml(state.scenarioSimulation?.slot_values?.[slot.slot_id]?.confidence ?? 'н/д'),
-    escapeHtml(state.scenarioSimulation?.slot_values?.[slot.slot_id]?.reason || 'н/д'),
+    badge(slotStatus(slot, simulation)),
+    escapeHtml(slotResultValue(slot, simulation, providedSlots)),
+    escapeHtml(simulation?.slot_values?.[slot.slot_id]?.confidence ?? 'н/д'),
+    escapeHtml(simulation?.slot_values?.[slot.slot_id]?.reason || 'н/д'),
   ]);
   const resolutionRows = (simulation?.attribute_resolution || []).map((item) => [
     escapeHtml(slotLabel(slotSchema, item.slot_id)),
@@ -1060,7 +1067,7 @@ function renderSteps() {
     ['Блокирующие правила', escapeHtml(formatRuleHits(classification.blocked_by_rules))],
   ];
   const launchRows = (detail.tool_launches || []).map((launch) => {
-    const runtime = launchRuntimeSummary(launch);
+    const runtime = launchRuntimeSummary(launch, simulation);
     const blockReasons = [
       ...(runtime.missing_slots || []).map((slotId) => `не заполнен: ${slotId}`),
       ...(runtime.unknown_required_slots || []).map((slotId) => `нет в схеме: ${slotId}`),
@@ -1104,7 +1111,7 @@ function renderSteps() {
       ];
     })
     .filter(Boolean);
-  elements.stepsView.innerHTML = [
+  return [
     renderAgentOutcomePanel(simulation),
     renderDryRunTracePanel(simulation),
     stepBlock(
@@ -1114,7 +1121,7 @@ function renderSteps() {
         ? 'missing'
         : (simulation?.missing_slots?.length ? 'partial' : 'ready'),
       `<div class="grid">
-        ${metric('Сценарий', escapeHtml(scenarioName()))}
+        ${metric('Сценарий', escapeHtml(scenarioTitle))}
         ${metric('Обязательные слоты', escapeHtml(formatList(slotSchema.required_slots)))}
         ${metric('Автозаполнение', escapeHtml(formatList(slotSchema.auto_fill_slots)))}
         ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
@@ -1178,6 +1185,18 @@ function renderSteps() {
       </div>`,
     ),
   ].join('');
+}
+
+function renderSteps() {
+  const detail = state.scenarioDetail;
+  if (!state.workflowStarted) {
+    elements.stepsView.innerHTML = '<div class="empty">Сценарная работа начнется после кнопки «Анализировать»</div>';
+    return;
+  }
+  elements.stepsView.innerHTML = renderFiveStepView(detail, state.scenarioSimulation, {
+    scenarioName: scenarioName(),
+    providedSlots: state.providedSlots,
+  });
 }
 
 function syncAnalyzeButton() {
@@ -2170,29 +2189,119 @@ function renderSimulationTrace(trace) {
 
 function renderCaseCentricTrace(trace) {
   const events = trace.events || [];
-  if (!events.length) {
-    elements.debugCaseTraceView.innerHTML = '<div class="empty">Нет событий трассы</div>';
+  const steps = trace.steps || [];
+  const hasFiveStepTrace = trace.scenario_detail && trace.simulation_snapshot;
+  if (!events.length && !steps.length && !hasFiveStepTrace) {
+    elements.debugCaseTraceView.innerHTML = '<div class="empty">Нет данных трассы</div>';
     return;
   }
+  const fiveStepView = hasFiveStepTrace
+    ? renderFiveStepView(trace.scenario_detail, trace.simulation_snapshot, {
+        scenarioName:
+          trace.scenario_detail?.scenario?.display_name
+          || trace.debug_item?.scenario_display_name
+          || trace.scenario_detail?.scenario?.scenario_id
+          || trace.debug_item?.scenario_id
+          || 'н/д',
+        providedSlots: trace.debug_item?.text_slots || {},
+      })
+    : `
+      <div class="hint">Для этого обращения нет сохраненного снимка сценария, показана fallback-трасса.</div>
+      <div class="case-trace-steps">
+        ${steps.map(renderCaseTraceStep).join('')}
+      </div>
+    `;
   elements.debugCaseTraceView.innerHTML = `
-    <div class="status-line">Обращение: <strong>${escapeHtml(trace.case_id)}</strong> / событий: ${escapeHtml(events.length)}</div>
-    <div class="case-trace-list">
-      ${events.map((event) => `
-        <details class="case-trace-event">
-          <summary>
-            <span>${escapeHtml(event.created_at || 'н/д')}</span>
-            <strong>${escapeHtml(event.event_type || 'event')}</strong>
-            <span>${escapeHtml(event.summary || '')}</span>
-            ${event.agent_id ? badge(event.agent_id) : ''}
-          </summary>
-          <div class="dry-run-trace-grid">
-            <div><div class="metric-label">Run / Task</div><div class="trace-value">${escapeHtml(event.run_id || 'н/д')} / ${escapeHtml(event.task_id || 'н/д')}</div></div>
-            <div><div class="metric-label">Correlation</div><div class="trace-value">${escapeHtml(event.correlation_id || event.idempotency_key || 'н/д')}</div></div>
-            <div><div class="metric-label">Payload</div><div class="trace-value">${traceJson(event.payload)}</div></div>
-          </div>
-        </details>
-      `).join('')}
+    ${renderCaseTraceSummary(trace)}
+    ${fiveStepView}
+    ${renderCaseTraceEvents(events, trace.agent_outcome?.status === 'error')}
+  `;
+}
+
+function renderCaseTraceSummary(trace) {
+  const summary = trace.summary || {};
+  const outcome = trace.agent_outcome || summary.agent_outcome || {};
+  return `
+    <div class="case-trace-summary">
+      <div class="section-head">
+        <h3>Обращение ${escapeHtml(trace.case_id || summary.case_id || 'н/д')}</h3>
+        ${badge(outcome.status || summary.workflow_category || 'info')}
+      </div>
+      <div class="grid">
+        ${metric('Итог агента', outcome.status ? badge(outcome.status) : escapeHtml(outcome.label || 'н/д'))}
+        ${metric('Ticket ID', escapeHtml(summary.ticket_id || trace.case?.ticket_id || 'н/д'))}
+        ${metric('Workflow state', badge(summary.workflow_state || 'missing'))}
+        ${metric('Runs / Tasks', escapeHtml(`${summary.run_count ?? 0} / ${summary.task_count ?? 0}`))}
+        ${metric('Ожидания', escapeHtml(`${summary.active_wait_count ?? 0} активных / ${summary.wait_count ?? 0} всего`))}
+        ${metric('События', escapeHtml(summary.event_count ?? (trace.events || []).length))}
+      </div>
+      <div class="message-block">
+        <div class="metric-label">Что дальше</div>
+        <p>${escapeHtml(outcome.next_step || outcome.summary || 'н/д')}</p>
+      </div>
     </div>
+  `;
+}
+
+function renderCaseTraceStep(step) {
+  const metrics = step.metrics || [];
+  const tables = step.tables || [];
+  const events = step.events || [];
+  const body = `
+    <div class="message-block">
+      <div class="metric-label">Смысл шага</div>
+      <p>${escapeHtml(step.summary || 'н/д')}</p>
+    </div>
+    ${metrics.length ? `<div class="grid">${metrics.map(renderCaseTraceMetric).join('')}</div>` : ''}
+    ${tables.map(renderCaseTraceTable).join('')}
+    ${events.length ? renderCaseTraceEvents(events, false, 'События шага') : ''}
+  `;
+  return stepBlock(step.order || '?', step.title || 'Шаг', step.status || 'info', body);
+}
+
+function renderCaseTraceMetric(item) {
+  const value = item.kind === 'badge'
+    ? badge(item.status || item.value || 'missing')
+    : escapeHtml(item.value || 'н/д');
+  return metric(item.label || 'Параметр', value);
+}
+
+function renderCaseTraceTable(tableDef) {
+  const rows = (tableDef.rows || []).map((row) => row.map((cell) => escapeHtml(cell ?? 'н/д')));
+  return `
+    <div class="case-trace-table">
+      <h4>${escapeHtml(tableDef.title || 'Данные')}</h4>
+      ${table(tableDef.columns || [], rows)}
+    </div>
+  `;
+}
+
+function renderCaseTraceEvents(events, open = false, title = 'Технические события timeline') {
+  if (!events.length) return '';
+  return `
+    <details class="trace-run-block case-trace-events" ${open ? 'open' : ''}>
+      <summary>
+        <span class="trace-run-title">${escapeHtml(title)}</span>
+        <span class="summary-line">${events.length} событий</span>
+      </summary>
+      <div class="case-trace-list">
+        ${events.map((event) => `
+          <details class="case-trace-event">
+            <summary>
+              <span>${escapeHtml(event.created_at || 'н/д')}</span>
+              <strong>${escapeHtml(event.event_type || 'event')}</strong>
+              <span>${escapeHtml(event.summary || '')}</span>
+              ${event.agent_id ? badge(event.agent_id) : ''}
+            </summary>
+            <div class="dry-run-trace-grid">
+              <div><div class="metric-label">Run / Task</div><div class="trace-value">${escapeHtml(event.run_id || 'н/д')} / ${escapeHtml(event.task_id || 'н/д')}</div></div>
+              <div><div class="metric-label">Correlation</div><div class="trace-value">${escapeHtml(event.correlation_id || event.idempotency_key || 'н/д')}</div></div>
+              <div><div class="metric-label">Payload</div><div class="trace-value">${traceJson(event.payload)}</div></div>
+            </div>
+          </details>
+        `).join('')}
+      </div>
+    </details>
   `;
 }
 

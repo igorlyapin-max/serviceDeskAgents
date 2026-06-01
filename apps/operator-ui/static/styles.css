@@ -372,12 +372,12 @@ label {
   border-left-color: var(--green);
 }
 
-.agent-outcome-needs_review,
 .agent-outcome-waiting {
   border-left-color: var(--amber);
 }
 
 .agent-outcome-error,
+.agent-outcome-needs_review,
 .agent-outcome-escalated {
   border-left-color: var(--red);
 }
@@ -426,6 +426,35 @@ label {
   gap: 10px;
   align-items: center;
   cursor: pointer;
+}
+
+.case-trace-summary {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+}
+
+.case-trace-steps {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.case-trace-table {
+  display: grid;
+  gap: 6px;
+}
+
+.case-trace-table h4 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.case-trace-events {
+  margin-top: 12px;
 }
 
 .span-all {
@@ -832,8 +861,7 @@ tr:last-child td {
 .badge.operator_approval,
 .badge.continue_slot_filling,
 .badge.auto_fill_candidate,
-.badge.waiting,
-.badge.needs_review {
+.badge.waiting {
   background: var(--soft-amber);
   color: var(--amber);
 }
@@ -841,6 +869,7 @@ tr:last-child td {
 .badge.error,
 .badge.failed,
 .badge.blocked,
+.badge.needs_review,
 .badge.escalated {
   background: var(--soft-red);
   color: var(--red);
