@@ -329,6 +329,84 @@
             },
             "additionalProperties": true
           },
+          "async_event_contracts": {
+            "start_systemcenter_runbook_completed": {
+              "display_name": "Завершение ранбука System Center",
+              "description": "Callback о результате длительного выполнения ранбука.",
+              "statuses": [
+                "progress",
+                "success",
+                "error",
+                "timeout",
+                "cancelled"
+              ],
+              "result_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "message"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "runbook_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "progress_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "message"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  }
+                },
+                "additionalProperties": true
+              },
+              "error_schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "contract_version": "1.0",
+              "contract_status": "valid"
+            }
+          },
           "contract_version": "1.0",
           "contract_status": "valid"
         }
@@ -345,6 +423,12 @@
         "type": "header_token",
         "header_name": "X-ServiceDesk-Token",
         "token_env": "N8N_WEBHOOK_TOKEN"
+      },
+      "contract_source": {
+        "type": "openapi_3_1",
+        "enabled": true,
+        "method": "GET",
+        "url": "contracts/openapi.json"
       },
       "operations": {
         "start_systemcenter_runbook": {
@@ -409,6 +493,84 @@
               }
             },
             "additionalProperties": true
+          },
+          "async_event_contracts": {
+            "start_systemcenter_runbook_completed": {
+              "display_name": "Завершение ранбука System Center",
+              "description": "Callback о результате длительного выполнения ранбука через n8n.",
+              "statuses": [
+                "progress",
+                "success",
+                "error",
+                "timeout",
+                "cancelled"
+              ],
+              "result_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "message"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "runbook_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "progress_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "message"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  }
+                },
+                "additionalProperties": true
+              },
+              "error_schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "contract_version": "1.0",
+              "contract_status": "valid"
+            }
           },
           "contract_version": "1.0",
           "contract_status": "valid"

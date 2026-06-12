@@ -181,6 +181,37 @@ class CaseTraceStepsTest(unittest.TestCase):
         self.assertIn("query", tool_table["rows"][0][5])
         self.assertIn("параметр скрыт", tool_table["rows"][0][5])
 
+    def test_react_wait_is_linked_to_steps_four_and_five(self) -> None:
+        detail = detail_for_state(
+            workflow_category="waiting",
+            workflow_state_id="waiting_external_event",
+            waits=[
+                {
+                    "wait_id": "wait-react",
+                    "wait_type": "external_event_wait",
+                    "status": "open",
+                    "deadline_at": "2026-06-02T00:00:00Z",
+                    "correlation_id": "case-test:runbook:wait-react",
+                    "reason": "Ожидание завершения ранбука.",
+                    "origin": {
+                        "kind": "react_call",
+                        "react_call": "start_systemcenter_runbook",
+                        "endpoint_id": "n8n",
+                        "operation_id": "start_systemcenter_runbook",
+                    },
+                    "payload": {},
+                }
+            ],
+        )
+        steps = DebugRuntime._build_case_trace_steps(detail, [])
+
+        react_wait_table = steps[3]["tables"][0]
+        wait_table = steps[4]["tables"][0]
+        self.assertEqual(react_wait_table["rows"][0][0], "start_systemcenter_runbook")
+        self.assertEqual(react_wait_table["rows"][0][1], "n8n")
+        self.assertIn("start_systemcenter_runbook", wait_table["rows"][0][3])
+        self.assertEqual(DebugRuntime._case_trace_agent_outcome(detail)["label"], "Ожидание внешнего события")
+
 
 if __name__ == "__main__":
     unittest.main()

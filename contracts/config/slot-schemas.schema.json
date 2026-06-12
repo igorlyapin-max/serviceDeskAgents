@@ -24,7 +24,6 @@
           "required_slots",
           "auto_fill_slots",
           "question_order",
-          "timeouts",
           "slots"
         ],
         "properties": {
@@ -44,26 +43,6 @@
           },
           "question_order": {
             "$ref": "#/$defs/id_list"
-          },
-          "timeouts": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "reminder_after_seconds",
-              "draft_after_seconds"
-            ],
-            "properties": {
-              "reminder_after_seconds": {
-                "type": "integer",
-                "minimum": 30,
-                "maximum": 1800
-              },
-              "draft_after_seconds": {
-                "type": "integer",
-                "minimum": 60,
-                "maximum": 7200
-              }
-            }
           },
           "slots": {
             "type": "array",

@@ -74,6 +74,12 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
     "min_extraction_confidence": 0.70,
 }
 
+DEFAULT_CLIENT_WAITING_POLICY = {
+    "auto_close_requires_client_confirmation": True,
+    "pause_sla_on_client_wait": True,
+    "client_wait_auto_close_after_hours": 24,
+}
+
 AGENT_OUTCOME_LABELS = {
     "success": "Завершено автоматически",
     "needs_review": "Требуется эскалация",
@@ -595,6 +601,36 @@ def normalize_tool_launch_parameter_bindings(launch: dict[str, Any]) -> None:
         if source == "slot" and value and value not in required_slots:
             required_slots.append(value)
     launch["required_slots"] = required_slots
+    normalize_tool_launch_completion_policy(launch)
+
+
+def normalize_tool_launch_completion_policy(launch: dict[str, Any]) -> None:
+    policy = copy.deepcopy(launch.get("completion_policy") or {})
+    mode = str(policy.get("mode") or "sync")
+    if mode not in {"sync", "external_event", "timer_wait"}:
+        mode = "sync"
+    if mode == "sync":
+        launch["completion_policy"] = {
+            "mode": "sync",
+            "max_wait_seconds": 0,
+            "timeout_action": "resume_agent",
+        }
+        return
+    max_wait_seconds = int(policy.get("max_wait_seconds") or 86400)
+    result = {
+        "mode": mode,
+        "max_wait_seconds": max_wait_seconds,
+        "timeout_action": str(policy.get("timeout_action") or "escalate_operator"),
+    }
+    check_interval_seconds = int(policy.get("check_interval_seconds") or 0)
+    if check_interval_seconds:
+        result["check_interval_seconds"] = check_interval_seconds
+    expected_event_type = str(policy.get("expected_event_type") or "").strip()
+    if expected_event_type:
+        result["expected_event_type"] = expected_event_type
+    elif mode == "external_event":
+        result["expected_event_type"] = f"{launch.get('operation_id') or launch.get('tool_name') or 'operation'}_completed"
+    launch["completion_policy"] = result
 
 
 def canonical_react_parameter_schema(tool_name: str | None) -> dict[str, Any] | None:
@@ -626,6 +662,12 @@ def normalize_operation_definition(operation_id: str | None, operation: dict[str
         operation.setdefault("response_schema", default_response_schema())
     operation.setdefault("contract_version", "1.0")
     operation.setdefault("contract_status", "valid")
+    operation.setdefault("async_event_contracts", {})
+    for event_type, contract in list(operation.get("async_event_contracts", {}).items()):
+        contract.setdefault("display_name", humanize_config_id(event_type))
+        contract.setdefault("statuses", ["progress", "success", "error", "timeout", "cancelled"])
+        contract.setdefault("contract_version", operation.get("contract_version", "1.0"))
+        contract.setdefault("contract_status", operation.get("contract_status", "valid"))
 
 
 def merge_legacy_integration_endpoints(payload: dict[str, Any]) -> dict[str, Any]:
@@ -642,7 +684,7 @@ def merge_legacy_integration_endpoints(payload: dict[str, Any]) -> dict[str, Any
 
         target = endpoints_by_id[endpoint_id]
         target.setdefault("operations", {}).update(endpoint.get("operations", {}))
-        for key in ("base_url", "base_url_env", "auth", "disabled_reason"):
+        for key in ("base_url", "base_url_env", "auth", "disabled_reason", "contract_source"):
             if not target.get(key) and endpoint.get(key):
                 target[key] = endpoint[key]
         target["enabled"] = bool(target.get("enabled", False) or endpoint.get("enabled", False))
@@ -778,6 +820,48 @@ def validate_confidence_overrides(
         )
     )
     return errors
+
+
+def client_waiting_defaults_from_legacy_escalation(payload: dict[str, Any] | None) -> dict[str, Any]:
+    defaults = copy.deepcopy(DEFAULT_CLIENT_WAITING_POLICY)
+    for policy in (payload or {}).get("policies", []):
+        auto_close = policy.get("auto_close") or {}
+        waiting = policy.get("waiting") or {}
+        if "requires_user_confirmation" in auto_close:
+            defaults["auto_close_requires_client_confirmation"] = bool(auto_close["requires_user_confirmation"])
+        if "pause_sla" in waiting:
+            defaults["pause_sla_on_client_wait"] = bool(waiting["pause_sla"])
+        if "auto_close_after_hours" in waiting:
+            try:
+                defaults["client_wait_auto_close_after_hours"] = int(waiting["auto_close_after_hours"])
+            except (TypeError, ValueError):
+                defaults["client_wait_auto_close_after_hours"] = DEFAULT_CLIENT_WAITING_POLICY[
+                    "client_wait_auto_close_after_hours"
+                ]
+        if auto_close or waiting:
+            break
+    return defaults
+
+
+def normalize_channel_waiting_policy(
+    waiting_policy: dict[str, Any] | None,
+    legacy_defaults: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = copy.deepcopy(waiting_policy or {})
+    defaults = copy.deepcopy(DEFAULT_CLIENT_WAITING_POLICY)
+    defaults.update(legacy_defaults or {})
+    for key, value in defaults.items():
+        if key not in result or result[key] is None:
+            result[key] = value
+    try:
+        result["client_wait_auto_close_after_hours"] = int(result["client_wait_auto_close_after_hours"])
+    except (TypeError, ValueError):
+        result["client_wait_auto_close_after_hours"] = DEFAULT_CLIENT_WAITING_POLICY[
+            "client_wait_auto_close_after_hours"
+        ]
+    result["auto_close_requires_client_confirmation"] = bool(result["auto_close_requires_client_confirmation"])
+    result["pause_sla_on_client_wait"] = bool(result["pause_sla_on_client_wait"])
+    return result
 
 
 def normalize_simulation_options(
@@ -1246,6 +1330,7 @@ def normalize_resolution_decision_policy(policy: dict[str, Any] | None) -> dict[
 
 def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(profile)
+    result["status"] = "active"
     result.pop("allowed_scenarios", None)
     target_slot_id = result.get("target_slot_id") or result.get("output_slots", ["value"])[0]
 
@@ -1572,8 +1657,8 @@ def normalize_output_slot_order(items: list[dict[str, Any]], target_slot_id: str
 
 def normalize_slot_autofill_profile(profile: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(profile)
-    result.setdefault("status", "draft")
-    result["enabled"] = result.get("status") == "active"
+    result["status"] = "active"
+    result["enabled"] = True
     result.setdefault("run_order", 1)
     result.setdefault("accept_policy", "single_result")
     result.setdefault("input_mapping", {})
@@ -1796,6 +1881,26 @@ def endpoint_operation_usage_refs(
     for workflow in workflows_payload.get("workflows", []):
         if workflow.get("endpoint_id") == endpoint_id and operation_id in workflow.get("operations", []):
             refs.append(f"n8n_workflow:{workflow.get('workflow_id')}")
+    return refs
+
+
+def endpoint_operation_async_usage_refs(
+    endpoint_id: str,
+    operation_id: str,
+    event_type: str,
+    matrix_payload: dict[str, Any],
+) -> list[str]:
+    refs = []
+    for matrix in matrix_payload.get("matrices", []):
+        for launch in matrix.get("launches", []):
+            completion = launch.get("completion_policy") or {}
+            if (
+                launch.get("endpoint_id") == endpoint_id
+                and launch.get("operation_id") == operation_id
+                and completion.get("mode") == "external_event"
+                and completion.get("expected_event_type") == event_type
+            ):
+                refs.append(f"matrix:{matrix.get('matrix_id')}/{launch.get('launch_id')}")
     return refs
 
 
@@ -2227,6 +2332,106 @@ class ConfigStore:
     def active_payload(self, domain: str) -> dict[str, Any]:
         return self.active_config(domain)["payload"]
 
+    def _legacy_client_waiting_defaults(self) -> dict[str, Any]:
+        active_version = self.active_version("escalation_policies")
+        payload = active_version["payload"] if active_version else self.default_config("escalation_policies")
+        return client_waiting_defaults_from_legacy_escalation(payload)
+
+    def validate_external_event_result_contract(self, wait: dict[str, Any], event: dict[str, Any]) -> None:
+        origin = wait.get("origin") or {}
+        if origin.get("kind") != "react_call":
+            return
+        snapshot = self._wait_contract_snapshot(wait)
+        if snapshot:
+            endpoint_id = snapshot.get("endpoint_id")
+            operation_id = snapshot.get("operation_id")
+            async_contracts = {
+                snapshot.get("event_type"): copy.deepcopy(snapshot.get("async_event_contract") or {})
+            }
+        else:
+            endpoint_id = origin.get("endpoint_id")
+            operation_id = origin.get("operation_id")
+            if not endpoint_id or not operation_id:
+                return
+            endpoint = self._by_id(self.active_payload("integration_endpoints")["endpoints"], "endpoint_id").get(endpoint_id)
+            operation = (endpoint or {}).get("operations", {}).get(operation_id)
+            if not operation:
+                raise ContractValidationError(
+                    "external_event_result",
+                    [f"Не найдена endpoint-операция для ожидания: {endpoint_id}/{operation_id}."],
+                )
+            async_contracts = operation.get("async_event_contracts") or {}
+        if not async_contracts:
+            return
+        event_type = event.get("event_type")
+        async_contract = async_contracts.get(event_type)
+        if not async_contract:
+            raise ContractValidationError(
+                "external_event_result",
+                [f"{endpoint_id}/{operation_id} не содержит async_event_contracts.{event_type}."],
+            )
+        errors = []
+        if async_contract.get("contract_status") == "broken":
+            errors.append(f"{endpoint_id}/{operation_id}/{event_type} имеет contract_status=broken.")
+        status = event.get("status")
+        allowed_statuses = set(async_contract.get("statuses") or [])
+        if allowed_statuses and status not in allowed_statuses:
+            errors.append(
+                f"{endpoint_id}/{operation_id}/{event_type} не допускает status={status}; "
+                f"разрешено: {', '.join(sorted(allowed_statuses))}."
+            )
+        schema_key = {
+            "success": "result_schema",
+            "progress": "progress_schema",
+            "error": "error_schema",
+        }.get(status)
+        payload_key = "error" if status == "error" else "result"
+        schema = async_contract.get(schema_key or "") if schema_key else None
+        if status == "progress" and not schema:
+            schema = async_contract.get("result_schema")
+            schema_key = "result_schema"
+        if schema:
+            if payload_key not in event:
+                errors.append(f"{event_type} status={status} должен содержать {payload_key}.")
+            else:
+                validator = Draft202012Validator(schema)
+                for error in validator.iter_errors(event[payload_key]):
+                    path = ".".join(str(item) for item in error.path) or "$"
+                    errors.append(f"{event_type}.{payload_key}.{path}: {error.message}")
+        if errors:
+            raise ContractValidationError("external_event_result", errors)
+
+    def external_event_contract_snapshot(
+        self,
+        *,
+        endpoint_id: str,
+        operation_id: str,
+        event_type: str,
+    ) -> dict[str, Any]:
+        endpoint = self._by_id(self.active_payload("integration_endpoints")["endpoints"], "endpoint_id").get(endpoint_id)
+        operation = (endpoint or {}).get("operations", {}).get(operation_id)
+        async_contract = (operation or {}).get("async_event_contracts", {}).get(event_type)
+        if not operation or not async_contract:
+            raise ContractValidationError(
+                "external_event_result",
+                [f"Не найден async_event_contracts.{event_type} для {endpoint_id}/{operation_id}."],
+            )
+        return {
+            "schema_version": "1.0",
+            "endpoint_id": endpoint_id,
+            "operation_id": operation_id,
+            "operation_contract_version": operation.get("contract_version"),
+            "event_type": event_type,
+            "async_event_contract": copy.deepcopy(async_contract),
+        }
+
+    @staticmethod
+    def _wait_contract_snapshot(wait: dict[str, Any]) -> dict[str, Any] | None:
+        payload = wait.get("payload") or {}
+        origin = wait.get("origin") or {}
+        snapshot = payload.get("contract_snapshot") or origin.get("contract_snapshot")
+        return snapshot if isinstance(snapshot, dict) else None
+
     def _normalize_payload(self, domain: str, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = copy.deepcopy(payload)
         scenario_names = {
@@ -2238,10 +2443,6 @@ class ConfigStore:
                 scenario.setdefault("tool_launch_matrix_id", f"matrix.{scenario['scenario_id']}")
                 scenario.setdefault("default_channel_id", "debug")
                 scenario.setdefault("allowed_channel_ids", ["messenger_bot", "service_desk", "debug"])
-                if scenario.get("confidence_overrides") is not None:
-                    scenario["confidence_overrides"] = normalize_confidence_thresholds(
-                        scenario.get("confidence_overrides"),
-                    )
         elif domain == "tools":
             endpoint_by_id = {
                 endpoint["endpoint_id"]: endpoint
@@ -2287,6 +2488,7 @@ class ConfigStore:
         elif domain == "slot_schemas":
             for slot_schema in normalized.get("slot_schemas", []):
                 slot_schema.pop("scenario_id", None)
+                slot_schema.pop("timeouts", None)
                 for slot in slot_schema.get("slots", []):
                     normalize_slot_definition(slot)
                     if slot.get("confidence_overrides") is not None:
@@ -2342,10 +2544,19 @@ class ConfigStore:
             for policy in normalized.get("policies", []):
                 scenario_id = policy.pop("scenario_id", None)
                 policy.setdefault("display_name", f"Решение и эскалация: {scenario_names.get(scenario_id or '', policy['policy_id'])}")
+                policy.setdefault("auto_close", {})
+                policy["auto_close"].setdefault("requires_tool_success", True)
+                policy["auto_close"].pop("requires_user_confirmation", None)
+                policy.pop("waiting", None)
                 policy.pop("channel_profile_mapping", None)
                 policy.get("major_incident", {}).pop("notify_on_call", None)
         elif domain == "interaction_channels":
+            legacy_waiting_defaults = self._legacy_client_waiting_defaults()
             for channel in normalized.get("channels", []):
+                channel["waiting_policy"] = normalize_channel_waiting_policy(
+                    channel.get("waiting_policy"),
+                    legacy_waiting_defaults,
+                )
                 channel.setdefault("action_profiles", default_channel_action_profiles(channel))
                 for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
                     normalize_endpoint_reference(channel.get(action_key, {}))
@@ -3011,7 +3222,6 @@ class ConfigStore:
         include_profile: bool = False,
     ) -> dict[str, float]:
         thresholds = self.system_confidence_defaults()
-        thresholds.update(normalize_confidence_thresholds((scenario or {}).get("confidence_overrides")))
         thresholds.update(normalize_confidence_thresholds((slot or {}).get("confidence_overrides")))
         if include_profile:
             thresholds.update(profile_confidence_thresholds(profile))
@@ -4047,8 +4257,28 @@ class ConfigStore:
                 "action_type": tool.get("action_type"),
                 "endpoint_id": launch.get("endpoint_id"),
                 "operation_id": launch.get("operation_id"),
+                "completion_policy": copy.deepcopy(launch.get("completion_policy") or {"mode": "sync"}),
                 "block_reasons": block_reasons,
             }
+            completion_policy = launch_summary["completion_policy"]
+            planned_wait = None
+            if completion_policy.get("mode") in {"external_event", "timer_wait"}:
+                planned_wait = {
+                    "wait_type": "external_event_wait" if completion_policy["mode"] == "external_event" else "timer_wait",
+                    "max_wait_seconds": completion_policy.get("max_wait_seconds"),
+                    "check_interval_seconds": completion_policy.get("check_interval_seconds"),
+                    "expected_event_type": completion_policy.get("expected_event_type"),
+                    "timeout_action": completion_policy.get("timeout_action"),
+                    "origin": {
+                        "kind": "react_call",
+                        "react_call": launch["tool_name"],
+                        "launch_id": launch["launch_id"],
+                        "endpoint_id": launch.get("endpoint_id"),
+                        "operation_id": launch.get("operation_id"),
+                        "parameters": copy.deepcopy(parameters),
+                    },
+                }
+                launch_summary["planned_wait"] = planned_wait
             if block_reasons:
                 append_trace(
                     execution_trace,
@@ -4062,6 +4292,8 @@ class ConfigStore:
                         "operation_id": launch.get("operation_id"),
                         "launch_id": launch["launch_id"],
                         "parameters": parameters,
+                        "completion_policy": completion_policy,
+                        "planned_wait": planned_wait,
                         "missing_slots": missing_for_launch,
                         "unknown_required_slots": unknown_required_slots,
                         "missing_parameter_slots": missing_parameter_slots,
@@ -4092,6 +4324,8 @@ class ConfigStore:
                             "operation_id": launch.get("operation_id"),
                             "launch_id": launch["launch_id"],
                             "parameters": parameters,
+                            "completion_policy": completion_policy,
+                            "planned_wait": planned_wait,
                             "result": {"status": "approval_required"},
                         },
                     )
@@ -4109,6 +4343,8 @@ class ConfigStore:
                             "operation_id": launch.get("operation_id"),
                             "launch_id": launch["launch_id"],
                             "parameters": parameters,
+                            "completion_policy": completion_policy,
+                            "planned_wait": planned_wait,
                             "result": {"status": "prepared", "reason": "Вызов не исполнялся, только подготовлен в dry-run."},
                         },
                     )
@@ -4215,6 +4451,11 @@ class ConfigStore:
             "classification": classification,
             "ready_tool_launches": ready_launches,
             "blocked_tool_launches": blocked_launches,
+            "planned_waits": [
+                item["planned_wait"]
+                for item in [*ready_launches, *blocked_launches]
+                if item.get("planned_wait")
+            ],
             "next_allowed_actions": next_allowed_actions,
             "execution_trace": execution_trace,
             "final_decision": final_decision,
@@ -4622,6 +4863,12 @@ class ConfigStore:
                     f"{endpoint['endpoint_id']} adapter_type={endpoint['adapter_type']} пока не исполняется; "
                     "включенными могут быть только mock или n8n_webhook."
                 )
+            contract_source = endpoint.get("contract_source") or {}
+            if contract_source.get("enabled") and endpoint.get("adapter_type") != "n8n_webhook":
+                errors.append(
+                    f"{endpoint['endpoint_id']} содержит активный contract_source; "
+                    "импорт OpenAPI поддерживается только для adapter_type=n8n_webhook."
+                )
             for operation_id, operation in endpoint["operations"].items():
                 if operation.get("contract_status") == "broken":
                     refs = endpoint_operation_usage_refs(
@@ -4647,6 +4894,31 @@ class ConfigStore:
                     errors.append(
                         f"{endpoint['endpoint_id']}/{operation_id} response_schema невалидна: {error.message}"
                     )
+                async_contracts = operation.get("async_event_contracts") or {}
+                for event_type, async_contract in async_contracts.items():
+                    if async_contract.get("contract_status") == "broken":
+                        refs = endpoint_operation_async_usage_refs(
+                            endpoint["endpoint_id"],
+                            operation_id,
+                            event_type,
+                            self.active_payload("tool_launch_matrix"),
+                        )
+                        if refs:
+                            errors.append(
+                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} имеет "
+                                f"contract_status=broken и используется: {', '.join(refs)}."
+                            )
+                    for schema_key in ("result_schema", "progress_schema", "error_schema"):
+                        schema = async_contract.get(schema_key)
+                        if not schema:
+                            continue
+                        try:
+                            Draft202012Validator.check_schema(schema)
+                        except SchemaError as error:
+                            errors.append(
+                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} "
+                                f"{schema_key} невалидна: {error.message}"
+                            )
                 if operation.get("mock_output") is not None:
                     validator = Draft202012Validator(operation["response_schema"])
                     for error in validator.iter_errors(operation["mock_output"]):
@@ -5325,16 +5597,8 @@ class ConfigStore:
         )
         channel_by_id = self._by_id(self.active_payload("interaction_channels")["channels"], "channel_id")
         channel_ids = set(channel_by_id)
-        system_confidence_defaults = self.system_confidence_defaults()
         for scenario in scenarios:
             scenario_id = scenario["scenario_id"]
-            errors.extend(
-                validate_confidence_overrides(
-                    system_confidence_defaults,
-                    scenario.get("confidence_overrides"),
-                    f"{scenario_id}.confidence_overrides",
-                )
-            )
             if scenario["slot_schema_id"] not in slot_schema_ids:
                 errors.append(f"{scenario_id} ссылается на неизвестную slot_schema_id: {scenario['slot_schema_id']}")
             if scenario["classification_route_id"] not in route_ids:
@@ -5397,6 +5661,11 @@ class ConfigStore:
             for slot in schema["slots"]:
                 fill_method = slot_fill_method(slot)
                 profile_id = slot.get("resolution_profile_id")
+                if fill_method != "llm_extraction" and slot.get("confidence_overrides"):
+                    errors.append(
+                        f"{schema['slot_schema_id']} slot {slot['slot_id']}.confidence_overrides "
+                        "допустим только для способа llm_extraction."
+                    )
                 errors.extend(
                     validate_confidence_overrides(
                         system_confidence_defaults,
@@ -5473,8 +5742,6 @@ class ConfigStore:
                         f"{schema['slot_schema_id']} нарушает порядок вопросов кто -> что -> когда: {slot_id}"
                     )
                 previous_priority = current_priority
-            if schema["timeouts"]["draft_after_seconds"] <= schema["timeouts"]["reminder_after_seconds"]:
-                errors.append(f"{schema['slot_schema_id']} draft timeout должен быть больше reminder timeout.")
         return errors
 
     def _validate_classification_routes(self, payload: dict[str, Any]) -> list[str]:
@@ -5559,6 +5826,7 @@ class ConfigStore:
             tool["tool_name"]: tool
             for tool in self.active_payload("tools")["tools"]
         }
+        endpoint_by_id = self._by_id(self.active_payload("integration_endpoints")["endpoints"], "endpoint_id")
         for matrix in matrices:
             matrix_id = matrix["matrix_id"]
             launch_ids = [launch["launch_id"] for launch in matrix["launches"]]
@@ -5617,6 +5885,32 @@ class ConfigStore:
                         errors.append(f"{launch['launch_id']} не может быть auto в текущей policy ReAct-вызова.")
                 if launch["risk_level"] == "blocked" and launch["execution_level"] != "blocked":
                     errors.append(f"{launch['launch_id']} с risk_level=blocked должен иметь execution_level=blocked.")
+                completion_policy = launch.get("completion_policy") or {"mode": "sync"}
+                completion_mode = completion_policy.get("mode", "sync")
+                if completion_mode == "external_event" and not completion_policy.get("expected_event_type"):
+                    errors.append(f"{launch['launch_id']} external_event должен указывать expected_event_type.")
+                if completion_mode == "external_event":
+                    endpoint = endpoint_by_id.get(launch.get("endpoint_id"))
+                    operation = (endpoint or {}).get("operations", {}).get(launch.get("operation_id"))
+                    event_type = completion_policy.get("expected_event_type")
+                    async_contract = (operation or {}).get("async_event_contracts", {}).get(event_type or "")
+                    if operation and event_type and not async_contract:
+                        errors.append(
+                            f"{launch['launch_id']} ожидает external_event {event_type}, но "
+                            f"{launch['endpoint_id']}/{launch['operation_id']} не содержит async_event_contracts.{event_type}."
+                        )
+                    elif async_contract and async_contract.get("contract_status") == "broken":
+                        errors.append(
+                            f"{launch['launch_id']} использует сломанный async event contract: "
+                            f"{launch['endpoint_id']}/{launch['operation_id']}/{event_type}."
+                        )
+                if completion_mode == "timer_wait":
+                    interval = int(completion_policy.get("check_interval_seconds") or 0)
+                    max_wait = int(completion_policy.get("max_wait_seconds") or 0)
+                    if interval and max_wait and interval > max_wait:
+                        errors.append(f"{launch['launch_id']} interval проверки не должен быть больше max wait.")
+                if completion_mode == "sync" and int(completion_policy.get("max_wait_seconds") or 0) != 0:
+                    errors.append(f"{launch['launch_id']} sync completion должен иметь max_wait_seconds=0.")
         return errors
 
     def _validate_prompt_packs(self, payload: dict[str, Any]) -> list[str]:
@@ -5841,6 +6135,9 @@ def default_interaction_channels() -> dict[str, Any]:
                     "discussion_timeout_seconds": 480,
                     "sla_elapsed_percent_threshold": 0,
                     "on_no_answer": "create_draft",
+                    "auto_close_requires_client_confirmation": True,
+                    "pause_sla_on_client_wait": True,
+                    "client_wait_auto_close_after_hours": 24,
                 },
                 "incomplete_discussion_action": {
                     "action_type": "create_draft",
@@ -5874,6 +6171,9 @@ def default_interaction_channels() -> dict[str, Any]:
                     "discussion_timeout_seconds": 14400,
                     "sla_elapsed_percent_threshold": 30,
                     "on_no_answer": "create_work_order",
+                    "auto_close_requires_client_confirmation": True,
+                    "pause_sla_on_client_wait": True,
+                    "client_wait_auto_close_after_hours": 24,
                 },
                 "incomplete_discussion_action": {
                     "action_type": "save_context",
@@ -5907,6 +6207,9 @@ def default_interaction_channels() -> dict[str, Any]:
                     "discussion_timeout_seconds": 0,
                     "sla_elapsed_percent_threshold": 0,
                     "on_no_answer": "debug_stop",
+                    "auto_close_requires_client_confirmation": True,
+                    "pause_sla_on_client_wait": True,
+                    "client_wait_auto_close_after_hours": 24,
                 },
                 "incomplete_discussion_action": {
                     "action_type": "debug_stop",
@@ -6041,10 +6344,6 @@ def _slot(
 
 
 def default_slot_schemas() -> dict[str, Any]:
-    common_timeouts = {
-        "reminder_after_seconds": 180,
-        "draft_after_seconds": 480,
-    }
     return {
         "schema_version": "1.0",
         "slot_schemas": [
@@ -6054,7 +6353,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "account_type"],
                 "auto_fill_slots": ["user_login", "user_id"],
                 "question_order": ["user_login", "account_type"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot(
                         "user_login",
@@ -6081,7 +6379,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "app_name", "error_text"],
                 "auto_fill_slots": ["device_name"],
                 "question_order": ["user_login", "app_name", "error_text"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot("user_login", "Логин пользователя", "who", user_question="Уточните логин пользователя."),
                     _slot("app_name", "Приложение", "what", user_question="С каким приложением проблема?"),
@@ -6102,7 +6399,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "device_id", "symptom"],
                 "auto_fill_slots": ["device_model"],
                 "question_order": ["user_login", "device_id", "symptom"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot("user_login", "Логин пользователя", "who", user_question="Уточните логин пользователя."),
                     _slot("device_id", "ID устройства", "what", user_question="Уточните имя или инвентарный номер устройства."),
@@ -6123,7 +6419,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "location", "symptom", "affected_users"],
                 "auto_fill_slots": ["subnet"],
                 "question_order": ["user_login", "symptom", "affected_users", "location"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot("user_login", "Логин пользователя", "who", user_question="Уточните логин пользователя."),
                     _slot("symptom", "Симптом", "what", user_question="Что именно недоступно?"),
@@ -6145,7 +6440,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "resource_name", "business_reason", "approver_login"],
                 "auto_fill_slots": ["user_id"],
                 "question_order": ["user_login", "approver_login", "resource_name", "business_reason"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot("user_login", "Логин пользователя", "who", user_question="Уточните логин пользователя."),
                     _slot("resource_name", "Ресурс", "what", user_question="К какому ресурсу нужен доступ?"),
@@ -6167,7 +6461,6 @@ def default_slot_schemas() -> dict[str, Any]:
                 "required_slots": ["user_login", "symptom"],
                 "auto_fill_slots": [],
                 "question_order": ["user_login", "symptom"],
-                "timeouts": common_timeouts,
                 "slots": [
                     _slot("user_login", "Логин пользователя", "who", user_question="Уточните логин пользователя."),
                     _slot("symptom", "Описание проблемы", "what", user_question="Опишите проблему одной фразой."),
@@ -6752,6 +7045,11 @@ def _launch(
         "audit_required": True,
         "log_required": True,
         "stop_on_error": True,
+        "completion_policy": {
+            "mode": "sync",
+            "max_wait_seconds": 0,
+            "timeout_action": "resume_agent",
+        },
     }
     if approval_role:
         result["approval_role"] = approval_role
@@ -6778,7 +7076,7 @@ def _prompt_blocks(display_name: str) -> dict[str, str]:
     return {
         "role_context": f"Ты AI ServiceDesk агент. Текущий сценарий: {display_name}. Работай только в границах утвержденной конфигурации сценария.",
         "behavior_principles": "Задавай один вопрос за раз. Не раскрывай внутренние ReAct-вызовы клиенту. Пиши без жаргона и фиксируй недостающие данные.",
-        "slot_schemas": "Собирай слоты в порядке кто -> что -> когда. Используй auto-fill источники до вопроса клиенту. При таймауте 3 минуты напомни, при 8 минутах сохрани черновик.",
+        "slot_schemas": "Собирай слоты в порядке кто -> что -> когда. Используй auto-fill источники до вопроса клиенту. Напоминания, timeout ожидания и действия при отсутствии ответа применяй из выбранного канала взаимодействия.",
         "classification_confidence": "Сначала используй правила классификации с позитивными и негативными признаками. Если confidence ниже 0.85, используй LLM few-shot. Если ниже 0.70, передай человеку с топ-3 категориями. Если ниже 0.50, не принимай финальное решение автоматически.",
         "react_planning": "Используй цикл Думай -> Действуй -> Наблюдай. Максимум 6 итераций. При двух ошибках ReAct-вызовов подряд запускай действие эскалации выбранного канала.",
         "tool_rules": "Проверяй required slots и parameter bindings перед каждым ReAct-вызовом ИИ. Action-вызовы в MVP запускаются только после подтверждения оператора.",
@@ -6812,11 +7110,6 @@ def default_escalation_policies() -> dict[str, Any]:
                 "display_name": f"Решение и эскалация: {item['display_name']}",
                 "auto_close": {
                     "requires_tool_success": True,
-                    "requires_user_confirmation": True,
-                },
-                "waiting": {
-                    "pause_sla": True,
-                    "auto_close_after_hours": 24,
                 },
                 "handoff_conditions": [
                     "two_tool_errors",

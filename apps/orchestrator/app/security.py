@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -12,6 +13,7 @@ from typing import Any, Mapping
 
 from .action_gates import DEFAULT_STATE_DB_PATH, utc_now
 from .contracts import ContractRegistry
+from .runtime_guardrails import is_non_local_environment
 
 
 SENSITIVE_DETAIL_KEY_MARKERS = (
@@ -141,7 +143,12 @@ class SecurityManager:
         ip_address: str | None = None,
         request_id: str | None = None,
     ) -> SecurityContext:
-        expected_token = os.getenv("INTEGRATION_CALLBACK_TOKEN", "dev-callback-token")
+        source_token_env = self._callback_token_env_name(endpoint_id)
+        expected_token = os.getenv(source_token_env)
+        if not expected_token:
+            if is_non_local_environment():
+                raise CallbackTokenInvalid(f"Для callback source {endpoint_id} не задан {source_token_env}.")
+            expected_token = os.getenv("INTEGRATION_CALLBACK_TOKEN", "dev-callback-token")
         actual_token = headers.get("x-servicedesk-callback-token")
         if expected_token and actual_token != expected_token:
             raise CallbackTokenInvalid("Callback token отсутствует или неверен.")
@@ -154,6 +161,11 @@ class SecurityManager:
             ip_address=ip_address,
             request_id=request_id,
         )
+
+    @staticmethod
+    def _callback_token_env_name(endpoint_id: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9]+", "_", str(endpoint_id or "")).strip("_").upper()
+        return f"INTEGRATION_CALLBACK_TOKEN__{normalized or 'DEFAULT'}"
 
     def require_permission(self, context: SecurityContext, permission: str) -> None:
         if permission not in self.permissions_by_id:

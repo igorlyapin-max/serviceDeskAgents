@@ -4,19 +4,21 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Консоль отладки ServiceDesk</title>
-    <link rel="stylesheet" href="/debug/static/styles.css">
+    <link rel="stylesheet" href="/debug/static/styles.css?v=audit_hardening_20260612">
+    <script defer src="/debug/static/theme_plugin.js?v=audit_hardening_20260612"></script>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div>
-          <h1>Консоль отладки ServiceDesk</h1>
-          <div class="subhead" id="apiStatus">API ожидается</div>
+        <div class="topbar-brand">
+          <div class="topbar-product">ServiceDesk</div>
+          <div class="topbar-context">Консоль отладки</div>
         </div>
         <div class="operator-strip">
           <label for="operatorId">Инициатор</label>
           <input id="operatorId" name="operatorId" value="admin-1" autocomplete="off">
         </div>
+        <div id="local-theme-plugin" class="theme-plugin-mount" aria-label="Theme controls"></div>
       </header>
 
       <nav class="debug-nav" role="tablist" aria-label="Разделы консоли отладки">
@@ -26,6 +28,13 @@
         <button class="debug-tab" data-debug-tab="waits" type="button" role="tab" aria-selected="false">Активные ожидания</button>
         <button class="debug-tab" data-debug-tab="captures" type="button" role="tab" aria-selected="false">Mock из endpoint-вызовов</button>
       </nav>
+
+      <section class="page-header" aria-labelledby="debugPageTitle">
+        <div class="page-title">
+          <h1 id="debugPageTitle">Одиночный прогон</h1>
+          <div class="subhead" id="apiStatus">API ожидается</div>
+        </div>
+      </section>
 
       <main class="workspace debug-panel" data-debug-panel="single">
         <section class="ticket-pane" aria-labelledby="ticket-title">
@@ -286,6 +295,6 @@
       </main>
     </div>
 
-    <script src="/debug/static/app.js?v=stage14_debug_simulation_capture"></script>
+    <script src="/debug/static/app.js?v=audit_hardening_20260612"></script>
   </body>
 </html>

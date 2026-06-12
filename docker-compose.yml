@@ -8,7 +8,10 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-servicedesk}
       POSTGRES_USER: ${POSTGRES_USER:-servicedesk}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-servicedesk_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      N8N_DB_NAME: ${N8N_DB_NAME:-n8n}
+      N8N_DB_USER: ${N8N_DB_USER:-n8n}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD in .env}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
     volumes:
@@ -79,13 +82,14 @@ services:
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:-n8n}
       DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:-n8n_dev_password}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD in .env}
       N8N_PORT: 5678
       N8N_HOST: 0.0.0.0
       N8N_PROTOCOL: http
       WEBHOOK_URL: http://localhost:${N8N_PORT:-5678}/
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-replace_with_32_plus_chars_dev_key}
-      N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:-replace_with_dev_webhook_token}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:?Set N8N_WEBHOOK_TOKEN in .env}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       GENERIC_TIMEZONE: Europe/Moscow
@@ -103,7 +107,7 @@ services:
       - llm
     command: ["--config", "/app/config/litellm.yaml", "--host", "0.0.0.0", "--port", "4000"]
     environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-litellm-master-key}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
       MODEL_ACTIVE_PROVIDER: ${MODEL_ACTIVE_PROVIDER:-vllm_cpu}
       LITELLM_MODEL_ALIAS: ${LITELLM_MODEL_ALIAS:-local-opt-125m}
       LITELLM_UPSTREAM_MODEL: ${LITELLM_UPSTREAM_MODEL:-hosted_vllm/facebook/opt-125m}

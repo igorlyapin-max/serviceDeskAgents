@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Администратор AI ServiceDesk</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/admin/static/styles.css">
+    <link rel="stylesheet" href="/admin/static/styles.css?v=audit_hardening_20260612">
+    <script defer src="/admin/static/theme_plugin.js?v=audit_hardening_20260612"></script>
   </head>
   <body>
     <div class="admin-shell">
@@ -16,12 +17,10 @@
         </div>
         <nav class="nav-list">
           <button class="nav-item active" type="button" data-view="dashboard">Панель обзора</button>
-          <button class="nav-item" type="button" data-view="processing">Поток обработки</button>
           <div class="nav-group" aria-label="Сценарии обработки">
             <div class="nav-group-title">Сценарии обработки</div>
             <div class="nav-sublist">
               <button class="nav-item nav-subitem" type="button" data-view="scenarios">Сценарии</button>
-              <button class="nav-item nav-subitem" type="button" data-view="orchestrationGraph">Граф оркестрации</button>
               <button class="nav-item nav-subitem" type="button" data-view="scenarioSlots">0. Слоты</button>
               <button class="nav-item nav-subitem" type="button" data-view="slotAutofill">0.1 Автозаполнение слотов</button>
               <button class="nav-item nav-subitem" type="button" data-view="resolution">1. Разрешение атрибутов</button>
@@ -33,7 +32,6 @@
               <button class="nav-item nav-subitem" type="button" data-view="interactionChannels">Каналы взаимодействия</button>
             </div>
           </div>
-          <button class="nav-item" type="button" data-view="knowledge">База знаний</button>
           <div class="nav-group" aria-label="Вызовы и интеграции">
             <div class="nav-group-title">Вызовы и интеграции</div>
             <div class="nav-sublist">
@@ -42,32 +40,44 @@
               <button class="nav-item nav-subitem" type="button" data-view="operationBindings">Привязка операций</button>
             </div>
           </div>
-          <button class="nav-item" type="button" data-view="workflow">Рабочий процесс</button>
-          <button class="nav-item" type="button" data-view="models">Модели</button>
-          <button class="nav-item" type="button" data-view="quality">Контроль качества</button>
-          <button class="nav-item" type="button" data-view="audit">Аудит</button>
-          <button class="nav-item" type="button" data-view="security">Безопасность</button>
+          <div class="nav-group" aria-label="Настройки">
+            <div class="nav-group-title">Настройки</div>
+            <div class="nav-sublist">
+              <button class="nav-item nav-subitem" type="button" data-view="knowledge">База знаний</button>
+              <button class="nav-item nav-subitem" type="button" data-view="models">Модели</button>
+              <button class="nav-item nav-subitem" type="button" data-view="security">Безопасность</button>
+            </div>
+          </div>
         </nav>
       </aside>
 
       <main class="main">
         <header class="topbar">
-          <div>
-            <h1 id="viewTitle">Панель обзора</h1>
-            <div class="subhead" id="apiStatus">Ожидание API</div>
+          <div class="topbar-brand">
+            <div class="topbar-product">AI ServiceDesk</div>
+            <div class="topbar-context">Администрирование</div>
           </div>
           <div class="admin-actions">
             <label for="actorId">Инициатор</label>
             <input id="actorId" value="admin-1" autocomplete="off">
-            <button id="refreshButton" type="button">Обновить</button>
           </div>
+          <div id="local-theme-plugin" class="theme-plugin-mount" aria-label="Theme controls"></div>
         </header>
 
+        <section class="page-header" aria-labelledby="viewTitle">
+          <div class="page-title">
+            <h1 id="viewTitle">Панель обзора</h1>
+            <div class="subhead" id="apiStatus">Ожидание API</div>
+          </div>
+          <div class="page-actions">
+            <button id="refreshButton" type="button">Обновить</button>
+          </div>
+        </section>
         <section id="notice" class="notice" hidden></section>
         <section id="viewContent" class="view-content" aria-live="polite"></section>
       </main>
     </div>
 
-    <script src="/admin/static/app.js?v=stage13_40_processing_open_case"></script>
+    <script src="/admin/static/app.js?v=audit_hardening_20260612"></script>
   </body>
 </html>

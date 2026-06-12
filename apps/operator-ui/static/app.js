@@ -29,6 +29,7 @@ const state = {
 };
 
 const elements = {
+  debugPageTitle: document.getElementById('debugPageTitle'),
   apiStatus: document.getElementById('apiStatus'),
   operatorId: document.getElementById('operatorId'),
   ticketForm: document.getElementById('ticketForm'),
@@ -111,6 +112,7 @@ const visibleLabels = {
   error: 'ошибка',
   failed: 'ошибка',
   escalated: 'требуется эскалация',
+  cancel: 'отменить',
   incomplete: 'неполно',
   info: 'информация',
   agent_with_confirmation: 'агент + подтверждение',
@@ -145,6 +147,13 @@ const visibleLabels = {
   filled_by_model: 'заполнено моделью',
   candidate_below_threshold: 'результат ниже порога',
   waiting_operator_approval: 'ожидает подтверждения',
+  external_event_wait: 'ожидание external event',
+  timer_wait: 'таймер/повторная проверка',
+  external_event: 'external event/callback',
+  sync: 'синхронно',
+  resume_agent: 'возобновить агента',
+  escalate_operator: 'эскалировать оператору',
+  mark_failed: 'завершить ошибкой',
   prepared: 'подготовлено',
   not_executed: 'не выполнялось',
   question_required: 'нужно уточнение у клиента',
@@ -195,6 +204,10 @@ const visibleLabels = {
   state_changing_actions: 'действия с изменением состояния',
   communication_handoff: 'коммуникация и эскалация',
   react_call: 'ReAct-вызов чтения',
+  client_question: 'вопрос клиенту',
+  approval: 'согласование',
+  timer: 'таймер',
+  system_policy: 'политика системы',
   ticket_history: 'история заявок',
   case_data: 'данные обращения',
   auto_fill_if_confident: 'заполнить при достаточной уверенности',
@@ -356,6 +369,27 @@ function badge(status) {
   return `<span class="badge ${escapeHtml(normalized)}">${escapeHtml(visibleLabels[normalized] || label)}</span>`;
 }
 
+function stripHtml(value) {
+  const template = document.createElement('template');
+  template.innerHTML = String(value ?? '');
+  return template.content.textContent.trim();
+}
+
+function statusStrip(items) {
+  const visibleItems = items.filter(Boolean).slice(0, 5);
+  if (!visibleItems.length) return '<div class="empty">Нет статуса</div>';
+  return `
+    <div class="status-strip">
+      ${visibleItems.map((item) => `
+        <div class="status-strip-item ${item.risk ? 'risk' : ''}">
+          <div class="status-strip-label">${escapeHtml(item.label)}</div>
+          <div class="status-strip-value">${item.value}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
 function metric(label, value) {
   return `
     <div class="metric">
@@ -365,18 +399,51 @@ function metric(label, value) {
   `;
 }
 
+function mobileResourceCards(headers, rows) {
+  return `
+    <div class="resource-card-list" aria-label="Список ресурсов">
+      ${rows.map((row) => {
+        const actionIndex = row.findIndex((cell) => String(cell).includes('<button'));
+        const statusIndex = row.findIndex((cell) => String(cell).includes('class="badge'));
+        const titleIndex = row.findIndex((cell, index) => index !== actionIndex && index !== statusIndex && stripHtml(cell));
+        const title = titleIndex >= 0 ? row[titleIndex] : row[0];
+        const facts = row
+          .map((cell, index) => ({ cell, index }))
+          .filter(({ cell, index }) => index !== actionIndex && index !== titleIndex && index !== statusIndex && stripHtml(cell))
+          .slice(0, 4);
+        return `
+          <article class="resource-card">
+            <div class="resource-card-title">${title}</div>
+            ${statusIndex >= 0 ? `<div class="resource-card-status">${row[statusIndex]}</div>` : ''}
+            ${facts.length ? `<div class="resource-card-facts">
+              ${facts.map(({ cell, index }) => `
+                <div class="resource-card-fact">
+                  <div class="resource-card-label">${escapeHtml(headers[index] || '')}</div>
+                  <div class="resource-card-value">${cell}</div>
+                </div>
+              `).join('')}
+            </div>` : ''}
+            ${actionIndex >= 0 ? `<div class="resource-card-actions">${row[actionIndex]}</div>` : ''}
+          </article>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function table(headers, rows) {
   if (!rows.length) {
     return '<div class="empty">Нет данных</div>';
   }
   return `
-    <div class="table-wrap">
+    <div class="table-wrap has-resource-cards">
       <table>
         <thead>
           <tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr>
         </thead>
         <tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>
       </table>
+      ${mobileResourceCards(headers, rows)}
     </div>
   `;
 }
@@ -434,6 +501,8 @@ function traceResult(item) {
   if (details.output_values !== undefined) return details.output_values;
   const fallback = {};
   for (const key of [
+    'planned_wait',
+    'completion_policy',
     'output_slots',
     'missing_required_result_fields',
     'candidate_count',
@@ -479,6 +548,7 @@ function traceStatusHint(status) {
     failed: 'Шаг завершился ошибкой.',
     approval_required: 'Требуется подтверждение оператора перед выполнением.',
     question_required: 'Нужно уточнение у клиента.',
+    waiting: 'Открыто ожидание результата или ответа.',
     started: 'Шаг начат.',
   };
   return hints[String(status || '').toLowerCase()] || '';
@@ -571,6 +641,18 @@ function formatMap(map) {
   return entries.length
     ? entries.map(([key, value]) => `${escapeHtml(key)} = ${escapeHtml(value)}`).join(', ')
     : 'н/д';
+}
+
+function normalizeWaitingPolicy(waitingPolicy = {}) {
+  return {
+    first_reminder_after_seconds: waitingPolicy.first_reminder_after_seconds ?? 0,
+    discussion_timeout_seconds: waitingPolicy.discussion_timeout_seconds ?? 0,
+    sla_elapsed_percent_threshold: waitingPolicy.sla_elapsed_percent_threshold ?? 0,
+    on_no_answer: waitingPolicy.on_no_answer || 'debug_stop',
+    auto_close_requires_client_confirmation: waitingPolicy.auto_close_requires_client_confirmation ?? true,
+    pause_sla_on_client_wait: waitingPolicy.pause_sla_on_client_wait ?? true,
+    client_wait_auto_close_after_hours: waitingPolicy.client_wait_auto_close_after_hours ?? 24,
+  };
 }
 
 function clientAgentOutcome(simulation) {
@@ -844,6 +926,63 @@ function formatAutofillFilledSlots(item = {}) {
   return formatOutputValues(item.output_values || {});
 }
 
+function formatDurationSeconds(seconds) {
+  const value = Number(seconds || 0);
+  if (!value) return 'нет ожидания';
+  if (value % 86400 === 0) return `${value / 86400} д`;
+  if (value % 3600 === 0) return `${value / 3600} ч`;
+  if (value % 60 === 0) return `${value / 60} мин`;
+  return `${value} сек`;
+}
+
+function completionPolicySummary(policy = {}) {
+  const mode = policy.mode || 'sync';
+  if (mode === 'sync') return 'синхронно';
+  const parts = [
+    visibleLabels[mode] || mode,
+    `до ${formatDurationSeconds(policy.max_wait_seconds)}`,
+  ];
+  if (policy.check_interval_seconds) {
+    parts.push(`проверка ${formatDurationSeconds(policy.check_interval_seconds)}`);
+  }
+  if (policy.expected_event_type) {
+    parts.push(`событие ${policy.expected_event_type}`);
+  }
+  if (policy.timeout_action) {
+    parts.push(`timeout: ${visibleLabels[policy.timeout_action] || policy.timeout_action}`);
+  }
+  return parts.join('; ');
+}
+
+function waitOriginSummary(origin = {}) {
+  if (!origin || !origin.kind) return 'н/д';
+  const kind = visibleLabels[origin.kind] || origin.kind;
+  if (origin.kind === 'react_call') {
+    const call = origin.react_call || origin.tool_name || 'ReAct-вызов';
+    const endpoint = origin.endpoint_id || 'endpoint н/д';
+    const operation = origin.operation_id || 'операция н/д';
+    return `${kind}: ${call} -> ${endpoint}/${operation}`;
+  }
+  if (origin.kind === 'client_question') {
+    return `${kind}: ${formatList(origin.slot_ids || origin.expected_slots || [])}`;
+  }
+  if (origin.kind === 'approval') {
+    return `${kind}: ${formatList(origin.approval_ids || [])}`;
+  }
+  return `${kind}: ${origin.reason || origin.wait_type || 'н/д'}`;
+}
+
+function waitPlanSummary(wait = {}) {
+  const parts = [
+    visibleLabels[wait.wait_type] || wait.wait_type || 'ожидание',
+    wait.max_wait_seconds ? `до ${formatDurationSeconds(wait.max_wait_seconds)}` : '',
+    wait.check_interval_seconds ? `проверка ${formatDurationSeconds(wait.check_interval_seconds)}` : '',
+    wait.expected_event_type ? `событие ${wait.expected_event_type}` : '',
+    wait.timeout_action ? `timeout: ${visibleLabels[wait.timeout_action] || wait.timeout_action}` : '',
+  ].filter(Boolean);
+  return parts.join('; ') || 'н/д';
+}
+
 function launchRuntimeStatus(launch, simulation = state.scenarioSimulation) {
   const runtime = launchRuntimeSummary(launch, simulation);
   return runtime?.status || 'pending';
@@ -1001,6 +1140,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
     return '<div class="empty">Сценарий не загружен</div>';
   }
   const providedSlots = options.providedSlots || state.providedSlots || {};
+  const runtimeWaits = options.runtimeWaits || simulation?.runtime_waits || [];
   const scenarioTitle = options.scenarioName
     || detail.scenario?.display_name
     || detail.scenario?.scenario_id
@@ -1010,7 +1150,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
   const policy = detail.orchestrator_policy || {};
   const escalation = detail.escalation_policy || {};
   const channel = simulation?.interaction_channel || detail.interaction_channel || {};
-  const waitingPolicy = simulation?.waiting_policy || channel.waiting_policy || {};
+  const waitingPolicy = normalizeWaitingPolicy(simulation?.waiting_policy || channel.waiting_policy || {});
   const escalationAction = simulation?.escalation_action || channel.escalation_action || {};
   const channelProfiles = simulation?.channel_action_profiles || detail.channel_action_profiles || {};
   const slotRows = orderedSlots(slotSchema).map((slot) => [
@@ -1068,6 +1208,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
   ];
   const launchRows = (detail.tool_launches || []).map((launch) => {
     const runtime = launchRuntimeSummary(launch, simulation);
+    const completionPolicy = runtime.completion_policy || launch.completion_policy || { mode: 'sync' };
     const blockReasons = [
       ...(runtime.missing_slots || []).map((slotId) => `не заполнен: ${slotId}`),
       ...(runtime.unknown_required_slots || []).map((slotId) => `нет в схеме: ${slotId}`),
@@ -1076,6 +1217,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
       badge(runtime.status),
       escapeHtml(launch.tool_name),
       badge(launch.target_execution_level || launch.execution_level),
+      escapeHtml(completionPolicySummary(completionPolicy)),
       escapeHtml(formatList(launch.required_slots)),
       formatMap(launch.parameter_bindings),
       escapeHtml(`${launch.endpoint_id} / ${launch.operation_id}`),
@@ -1083,6 +1225,24 @@ function renderFiveStepView(detail, simulation, options = {}) {
       formatList(blockReasons),
     ];
   });
+  const plannedWaitRows = (simulation?.planned_waits || [])
+    .filter(Boolean)
+    .map((wait) => [
+      badge('planned'),
+      badge(wait.wait_type),
+      escapeHtml(waitOriginSummary(wait.origin)),
+      escapeHtml(waitPlanSummary(wait)),
+      escapeHtml(wait.expected_event_type || 'н/д'),
+      escapeHtml(visibleLabels[wait.timeout_action] || wait.timeout_action || 'н/д'),
+    ]);
+  const runtimeWaitRows = (runtimeWaits || []).map((wait) => [
+    badge(wait.status),
+    badge(wait.wait_type),
+    escapeHtml(waitOriginSummary(wait.origin)),
+    escapeHtml(wait.deadline_at || 'н/д'),
+    escapeHtml(wait.correlation_id || 'н/д'),
+    escapeHtml((wait.payload || {}).last_external_event ? formatTraceInlineValue((wait.payload || {}).last_external_event) : 'н/д'),
+  ]);
   const packageLabels = {
     slots: 'собранные слоты',
     react_history: 'история ReAct',
@@ -1159,7 +1319,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
       4,
       'Выполнение и инструменты',
       simulation?.blocked_tool_launches?.length ? 'blocked' : 'ready',
-      `${table(['Готовность', 'ReAct-вызов', 'Вид запуска', 'Слоты', 'Параметры вызова', 'Подключение / операция', 'Риск', 'Причина блокировки'], launchRows)}
+      `${table(['Готовность', 'ReAct-вызов', 'Вид запуска', 'Получение результата', 'Слоты', 'Параметры вызова', 'Подключение / операция', 'Риск', 'Причина блокировки'], launchRows)}
       <div class="hint">Action-инструменты в MVP запускаются через подтверждение оператора, даже если вид запуска отмечен как авто.</div>`,
     ),
     stepBlock(
@@ -1167,8 +1327,9 @@ function renderFiveStepView(detail, simulation, options = {}) {
       'Решение и эскалация',
       simulation?.final_decision || 'pending',
       `<div class="grid">
-        ${metric('Автозакрытие', escapeHtml(escalation.auto_close?.requires_user_confirmation ? 'после подтверждения клиента' : 'по политике'))}
-        ${metric('Ожидание ответа клиента', escapeHtml(`${escalation.waiting?.auto_close_after_hours || 'н/д'} ч`))}
+        ${metric('Автозакрытие', escapeHtml(waitingPolicy.auto_close_requires_client_confirmation ? 'после подтверждения клиента' : 'по политике канала'))}
+        ${metric('Ожидание ответа клиента', escapeHtml(`${waitingPolicy.client_wait_auto_close_after_hours || 'н/д'} ч`))}
+        ${metric('SLA при ожидании', escapeHtml(waitingPolicy.pause_sla_on_client_wait ? 'приостанавливается' : 'продолжается'))}
         ${metric('Таймаут канала', escapeHtml(`${waitingPolicy.first_reminder_after_seconds ?? 'н/д'} сек / ${waitingPolicy.discussion_timeout_seconds ?? 'н/д'} сек`))}
         ${metric('Клиент не ответил', badge(waitingPolicy.on_no_answer || 'missing'))}
         ${metric('Эскалация оператору', badge(escalationAction.action_type || 'missing'))}
@@ -1178,6 +1339,8 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Ожидает клиента', badge(simulation?.awaiting_client_response ? 'yes' : 'no'))}
         ${metric('Передано оператору', badge(simulation?.operator_escalation?.required ? 'yes' : 'no'))}
       </div>
+      ${plannedWaitRows.length ? table(['Статус', 'Тип', 'Источник', 'План ожидания', 'Ожидаемое событие', 'Timeout'], plannedWaitRows) : ''}
+      ${runtimeWaitRows.length ? table(['Статус', 'Тип', 'Источник', 'Deadline', 'Correlation', 'Последнее событие'], runtimeWaitRows) : ''}
       ${profileRows.length ? table(['Событие', 'Профиль канала', 'Действие', 'ReAct-вызов / подключение / операция'], profileRows) : ''}
       <div class="message-block">
         <div class="metric-label">Уведомление клиенту</div>
@@ -1389,17 +1552,21 @@ function renderKnowledge() {
   const manifest = knowledge.index_manifest;
   if (!manifest) {
     elements.knowledgeStatus.innerHTML = [
-      metric('Статус', badge(knowledge.status)),
-      metric('Путь индекса', escapeHtml(knowledge.index_path || 'н/д')),
+      statusStrip([
+        { label: 'Статус', value: badge(knowledge.status), risk: knowledge.status === 'error' },
+        { label: 'Путь индекса', value: escapeHtml(knowledge.index_path || 'н/д') },
+      ]),
       `<div class="message-block"><div class="metric-label">Ошибка</div><p>${escapeHtml(knowledge.error?.message || 'н/д')}</p></div>`,
     ].join('');
     return;
   }
   elements.knowledgeStatus.innerHTML = [
-    metric('Статус', badge(manifest.status)),
-    metric('Построен', escapeHtml(manifest.built_at)),
-    metric('Документы', String(manifest.document_count)),
-    metric('Фрагменты', String(manifest.chunk_count)),
+    statusStrip([
+      { label: 'Статус', value: badge(manifest.status), risk: manifest.status === 'error' },
+      { label: 'Построен', value: escapeHtml(manifest.built_at) },
+      { label: 'Документы', value: escapeHtml(manifest.document_count) },
+      { label: 'Фрагменты', value: escapeHtml(manifest.chunk_count) },
+    ]),
     `<div class="message-block"><div class="metric-label">Источники</div><p>${escapeHtml(
       manifest.sources.map((source) => `${source.source_id}: ${source.status}`).join(', '),
     )}</p></div>`,
@@ -1421,10 +1588,12 @@ function renderAnalysis() {
 
   const decision = analysis.ai_decision?.decision;
   elements.summaryView.innerHTML = [
-    metric('Заявка', escapeHtml(analysis.ticket_id)),
-    metric('Состояние', badge(analysis.workflow_state?.id)),
-    metric('Решение', escapeHtml(decision?.type || 'invalid')),
-    metric('RAG', badge(analysis.rag_trace?.status || 'н/д')),
+    statusStrip([
+      { label: 'Состояние', value: badge(analysis.workflow_state?.id), risk: ['failed', 'blocked', 'error'].includes(analysis.workflow_state?.id) },
+      { label: 'Решение', value: escapeHtml(decision?.type || 'invalid'), risk: ['error', 'invalid'].includes(decision?.type) },
+      { label: 'RAG', value: badge(analysis.rag_trace?.status || 'н/д'), risk: analysis.rag_trace?.status === 'error' },
+      { label: 'Заявка', value: escapeHtml(analysis.ticket_id) },
+    ]),
     `<div class="message-block"><div class="metric-label">Сообщение оператору</div><p>${escapeHtml(
       analysis.operator_message || '',
     )}</p></div>`,
@@ -1857,6 +2026,16 @@ async function copyResult() {
 
 function setDebugTab(tabId) {
   state.activeDebugTab = tabId || 'single';
+  const titleByTab = {
+    single: 'Одиночный прогон',
+    flow: 'Мультиагентный поток',
+    traces: 'Трассы обращений',
+    waits: 'Активные ожидания',
+    captures: 'Mock из endpoint-вызовов',
+  };
+  if (elements.debugPageTitle) {
+    elements.debugPageTitle.textContent = titleByTab[state.activeDebugTab] || state.activeDebugTab;
+  }
   elements.debugTabs.forEach((tab) => {
     const active = tab.dataset.debugTab === state.activeDebugTab;
     tab.classList.toggle('active', active);
@@ -2196,7 +2375,7 @@ function renderCaseCentricTrace(trace) {
     return;
   }
   const fiveStepView = hasFiveStepTrace
-    ? renderFiveStepView(trace.scenario_detail, trace.simulation_snapshot, {
+      ? renderFiveStepView(trace.scenario_detail, trace.simulation_snapshot, {
         scenarioName:
           trace.scenario_detail?.scenario?.display_name
           || trace.debug_item?.scenario_display_name
@@ -2204,6 +2383,7 @@ function renderCaseCentricTrace(trace) {
           || trace.debug_item?.scenario_id
           || 'н/д',
         providedSlots: trace.debug_item?.text_slots || {},
+        runtimeWaits: trace.waits || [],
       })
     : `
       <div class="hint">Для этого обращения нет сохраненного снимка сценария, показана fallback-трасса.</div>
@@ -2313,10 +2493,12 @@ async function loadDebugWaits() {
       wait.case_id ? `<button type="button" data-action="debug-open-case" data-case-id="${escapeHtml(wait.case_id)}">${escapeHtml(wait.case_id)}</button>` : 'н/д',
       badge(wait.wait_type),
       badge(wait.status),
+      escapeHtml(waitOriginSummary(wait.origin)),
       escapeHtml(wait.deadline_at || 'н/д'),
+      escapeHtml(wait.correlation_id || 'н/д'),
       escapeHtml(wait.reason || 'н/д'),
     ]);
-    elements.debugWaitsView.innerHTML = table(['Ожидание', 'Case', 'Тип', 'Статус', 'Deadline', 'Причина'], rows);
+    elements.debugWaitsView.innerHTML = table(['Ожидание', 'Case', 'Тип', 'Статус', 'Источник', 'Deadline', 'Correlation', 'Причина'], rows);
   } catch (error) {
     elements.debugWaitsView.innerHTML = `<div class="empty">Ожидания не загружены: ${escapeHtml(error.message)}</div>`;
   }

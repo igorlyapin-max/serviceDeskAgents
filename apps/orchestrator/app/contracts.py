@@ -84,6 +84,9 @@ class ContractRegistry:
             "integration_callback": self.contracts_root
             / "integrations"
             / "integration-callback.schema.json",
+            "external_event": self.contracts_root
+            / "integrations"
+            / "external-event.schema.json",
             "execution_policy_result": self.contracts_root
             / "execution"
             / "execution-policy-result.schema.json",
@@ -268,6 +271,18 @@ class ContractRegistry:
                     errors.append(
                         f"{endpoint['endpoint_id']}/{operation_id} response_schema невалидна: {error.message}"
                     )
+                for event_type, async_contract in (operation.get("async_event_contracts") or {}).items():
+                    for schema_key in ("result_schema", "progress_schema", "error_schema"):
+                        schema = async_contract.get(schema_key)
+                        if not schema:
+                            continue
+                        try:
+                            Draft202012Validator.check_schema(schema)
+                        except SchemaError as error:
+                            errors.append(
+                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} "
+                                f"{schema_key} невалидна: {error.message}"
+                            )
                 if operation.get("mock_output") is not None:
                     validator = Draft202012Validator(operation["response_schema"])
                     for error in validator.iter_errors(operation["mock_output"]):

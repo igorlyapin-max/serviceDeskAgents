@@ -53,10 +53,12 @@ The `Processing Scenarios` area configures orchestrator behavior around five ste
 - `2. Classification and Route` - rules, confidence and ticket route;
 - `3. ReAct Planning` - iteration limits and stop conditions;
 - `4. ReAct Calls and Launch Matrix` - scenario-available calls and launch mode;
-- `5. Decision and Escalation` - close, wait and operator handoff conditions;
+- `5. Decision and Escalation` - close and operator handoff conditions;
 - `6. Prompts` - prompt pack with mandatory system prompt blocks.
 
 Scenario changes go through draft, validation, regression and activation. Active configuration changes only after successful activation.
+
+Client-response waiting is an interaction-channel property, not a slot-schema property. The `Interaction Channels` area configures the first reminder, discussion timeout, no-answer action, SLA pause and client-wait auto-close.
 
 ## Calls and Integrations
 
@@ -173,9 +175,13 @@ A captured response with `not_sanitized` status cannot be used in bulk dry-run. 
 
 Every HTTP response receives `X-Request-ID`, and audit events store the request id in event details. This makes it possible to connect a UI action, backend log and audit event.
 
-The `/metrics` endpoint exposes Prometheus-compatible counters and duration sums for HTTP requests, integration calls and duplicate callbacks. In the MVP this is a lightweight built-in registry without an external collector.
+The `/metrics` endpoint exposes Prometheus-compatible counters and duration sums for HTTP requests, integration calls and duplicate callbacks. In the MVP this is a lightweight built-in registry without an external collector. By default, the endpoint is available only from loopback IPs; an external collector must be explicitly added to `METRICS_ALLOWED_IPS`.
 
 A repeated callback with the same `invocation_id` is treated as idempotent: the backend returns the previously saved result and marks the response as `duplicate`.
+
+Long-running actions use `wait_state` plus an external result. The platform creates a wait with `case_id`, `wait_id`, `correlation_id` and `origin`, while n8n, a timer worker or another endpoint returns the result to `POST /external-events/{source}`. `origin` shows what opened the wait: a ReAct call, client question, approval, timer or system policy. The external system never changes case business state directly: it sends an `external_event` with `progress`, `success`, `error`, `timeout` or `cancelled` status, and the platform closes the wait, records the timeline event and queues processing continuation. Re-delivery is deduplicated by `idempotency_key`.
+
+For ReAct calls with asynchronous completion, the result contract is defined on the endpoint operation through `async_event_contracts`. The contract key must match `expected_event_type` from the ReAct launch matrix. The platform validates `success.result`, `progress.result` and `error.error` with that JSON Schema before updating `wait_state`. `wait_state` and the idempotency receipt store a safe compact external event version: secrets are masked and large payloads are replaced with a summary.
 
 ## Audit and Security
 

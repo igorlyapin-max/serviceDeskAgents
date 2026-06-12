@@ -105,6 +105,48 @@
                 },
                 "stop_on_error": {
                   "type": "boolean"
+                },
+                "completion_policy": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "mode",
+                    "max_wait_seconds",
+                    "timeout_action"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "sync",
+                        "external_event",
+                        "timer_wait"
+                      ]
+                    },
+                    "max_wait_seconds": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800
+                    },
+                    "check_interval_seconds": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 604800
+                    },
+                    "expected_event_type": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "timeout_action": {
+                      "type": "string",
+                      "enum": [
+                        "resume_agent",
+                        "escalate_operator",
+                        "debug_stop",
+                        "mark_failed",
+                        "cancel"
+                      ]
+                    }
+                  }
                 }
               }
             }

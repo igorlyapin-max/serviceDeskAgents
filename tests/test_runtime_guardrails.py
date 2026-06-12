@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 from apps.orchestrator.app.runtime_guardrails import (
     RuntimeConfigurationError,
+    local_security_warnings,
+    metrics_client_allowed,
+    readiness_http_status,
     security_headers,
+    sanitize_log_value,
     validate_startup_environment,
 )
 
@@ -34,12 +38,71 @@ class RuntimeGuardrailsTest(unittest.TestCase):
         with patch.dict(os.environ, {"APP_ENV": "local", "SECURITY_AUTH_MODE": "dev_header"}, clear=False):
             validate_startup_environment()
 
+    def test_staging_rejects_dev_auth_and_stdout_only_logging(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "staging",
+                "SECURITY_AUTH_MODE": "dev_header",
+                "LOG_SINKS": "stdout",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("второй log sink", str(context.exception))
+        self.assertIn("SECURITY_AUTH_MODE", str(context.exception))
+
+    def test_unknown_environment_is_rejected(self) -> None:
+        with patch.dict(os.environ, {"APP_ENV": "sandbox"}, clear=True):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("APP_ENV=sandbox", str(context.exception))
+
+    def test_local_reports_dev_auth_warning(self) -> None:
+        with patch.dict(os.environ, {"APP_ENV": "local", "SECURITY_AUTH_MODE": "dev_header"}, clear=True):
+            warnings = local_security_warnings()
+
+        self.assertTrue(any("SECURITY_AUTH_MODE=dev_header" in item for item in warnings))
+
+    def test_metrics_allowlist_accepts_loopback_and_cidr(self) -> None:
+        self.assertTrue(metrics_client_allowed("127.0.0.1"))
+        self.assertTrue(metrics_client_allowed("10.10.5.7", ["10.10.0.0/16"]))
+
+    def test_metrics_allowlist_rejects_unknown_ip(self) -> None:
+        self.assertFalse(metrics_client_allowed("192.0.2.10", ["127.0.0.1", "::1"]))
+        self.assertFalse(metrics_client_allowed(None, ["127.0.0.1"]))
+
     def test_security_headers_include_static_ui_policy(self) -> None:
         headers = security_headers(https_enabled=True)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
         self.assertIn("Strict-Transport-Security", headers)
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+
+    def test_readiness_http_status_supports_error_and_strict_degraded(self) -> None:
+        self.assertEqual(readiness_http_status({"status": "ok"}), 200)
+        self.assertEqual(readiness_http_status({"status": "error"}), 503)
+        with patch.dict(os.environ, {"READYZ_STRICT": "true"}, clear=True):
+            self.assertEqual(readiness_http_status({"status": "degraded"}), 503)
+        with patch.dict(os.environ, {"READYZ_STRICT": "false"}, clear=True):
+            self.assertEqual(readiness_http_status({"status": "degraded"}), 200)
+
+    def test_log_sanitizer_masks_english_and_russian_secret_keys(self) -> None:
+        sanitized = sanitize_log_value(
+            "details",
+            {
+                "api_token": "secret-token",
+                "пароль": "secret-password",
+                "safe": "visible",
+            },
+        )
+
+        self.assertEqual(sanitized["api_token"], "параметр скрыт")
+        self.assertEqual(sanitized["пароль"], "параметр скрыт")
+        self.assertEqual(sanitized["safe"], "visible")
 
 
 if __name__ == "__main__":

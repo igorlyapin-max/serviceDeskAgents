@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .action_gates import ActionGateConflict, ActionGateNotFound, utc_now
 from .cases import CaseNotFound
+from .config_assistant import compile_attribute_resolution_step, compile_slot_autofill_profile
 from .config_registry import (
     CONFIG_DOMAINS,
     ConfigDraftNotFound,
@@ -25,12 +26,16 @@ from .contracts import ContractValidationError
 from .debug_runtime import DebugRuntime, DebugRuntimeError
 from .local_env import LocalEnvError, set_local_env_value
 from .metrics import metrics
-from .processing import ProcessingConflict, ProcessingNotFound, ProcessingStore
+from .openapi_contracts import OpenApiContractError, preview_openapi_contract
+from .processing import ExternalEventIdempotencyConflict, ProcessingConflict, ProcessingNotFound, ProcessingStore
 from .runtime_guardrails import (
     RuntimeConfigurationError,
     configure_logging,
     is_production_environment,
     log_json,
+    log_local_security_warnings,
+    metrics_client_allowed,
+    readiness_http_status,
     readiness_report,
     require_local_secret_write_allowed,
     security_headers,
@@ -48,8 +53,9 @@ from .workflow import TicketWorkflow
 
 
 configure_logging()
-validate_startup_environment()
 logger = logging.getLogger("servicedesk.orchestrator")
+validate_startup_environment()
+log_local_security_warnings(logger)
 
 
 class TicketAnalyzeRequest(BaseModel):
@@ -133,6 +139,31 @@ class AdminConfigRollbackRequest(BaseModel):
 class AdminN8nWorkflowOperationRequest(BaseModel):
     operator_id: str = Field()
     execution_id: str | None = Field(default=None)
+
+
+class AdminOpenApiContractPreviewRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    endpoint_id: str | None = Field(default=None)
+    endpoint: dict[str, Any] | None = Field(default=None)
+    contract_source: dict[str, Any] | None = Field(default=None)
+
+
+class AdminSlotAutofillCompileRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    instruction: str = Field(default="", max_length=4000)
+    slot_schema_id: str = Field()
+    react_call: str | None = Field(default=None)
+    target_slots: list[str] | None = Field(default=None)
+
+
+class AdminAttributeResolutionStepCompileRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    instruction: str = Field(default="", max_length=4000)
+    scenario_id: str | None = Field(default=None)
+    slot_schema_id: str | None = Field(default=None)
+    react_call: str | None = Field(default=None)
+    step_name: str | None = Field(default=None)
+    previous_steps: list[dict[str, Any]] | None = Field(default=None)
 
 
 class AdminScenarioSimulationRequest(BaseModel):
@@ -238,6 +269,25 @@ class IntegrationCallbackRequest(BaseModel):
     extensions: dict[str, Any] | None = Field(default=None)
 
 
+class ExternalEventRequest(BaseModel):
+    schema_version: str = Field(default="1.0")
+    event_id: str = Field()
+    case_id: str = Field()
+    ticket_id: str | None = Field(default=None)
+    wait_id: str | None = Field(default=None)
+    correlation_id: str = Field()
+    source: str | None = Field(default=None)
+    event_type: str = Field()
+    status: str = Field()
+    received_at: str | None = Field(default=None)
+    idempotency_key: str = Field()
+    result: dict[str, Any] | None = Field(default=None)
+    error: dict[str, Any] | None = Field(default=None)
+    attachments: list[dict[str, Any]] | None = Field(default=None)
+    raw_reference: str | None = Field(default=None)
+    metadata: dict[str, Any] | None = Field(default=None)
+
+
 app = FastAPI(title="ServiceDesk AI Orchestrator", version="0.1.0")
 workflow = TicketWorkflow()
 config_store = ConfigStore(workflow.contracts)
@@ -250,6 +300,12 @@ security = SecurityManager(workflow.contracts)
 audit_store = AuditStore(workflow.contracts)
 OPERATOR_UI_ROOT = Path(__file__).resolve().parents[2] / "operator-ui" / "static"
 ADMIN_UI_ROOT = Path(__file__).resolve().parents[2] / "admin-ui" / "static"
+
+
+def ui_index_response(path: Path) -> FileResponse:
+    response = FileResponse(path)
+    response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.middleware("http")
@@ -487,6 +543,94 @@ def callback_context_dependency(
             action="callbacks.receive",
             resource_type="integration_endpoint",
             resource_id=endpoint_id,
+            permission="callbacks.write",
+            outcome="denied",
+            request_method=request.method,
+            request_path=request.url.path,
+            status_code=403,
+            details={"message": str(error)},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "permission_denied",
+                "message": str(error),
+            },
+        ) from error
+
+
+def external_event_context_dependency(
+    source: str,
+    request: Request,
+) -> SecurityContext:
+    try:
+        context = security.callback_context(
+            request.headers,
+            endpoint_id=source,
+            ip_address=client_ip(request),
+            request_id=request_id(request),
+        )
+        security.check_rate_limit(context)
+        security.require_permission(context, "callbacks.write")
+        return context
+    except CallbackTokenInvalid as error:
+        audit_store.record(
+            security.anonymous_context(
+                actor_id=f"endpoint:{source}",
+                ip_address=client_ip(request),
+                request_id=request_id(request),
+            ),
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            outcome="denied",
+            request_method=request.method,
+            request_path=request.url.path,
+            status_code=403,
+            details={"message": str(error)},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "callback_token_invalid",
+                "message": str(error),
+            },
+        ) from error
+    except RateLimitExceeded as error:
+        audit_store.record(
+            security.anonymous_context(
+                actor_id=f"endpoint:{source}",
+                ip_address=client_ip(request),
+                request_id=request_id(request),
+            ),
+            action="security.rate_limit",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            outcome="denied",
+            request_method=request.method,
+            request_path=request.url.path,
+            status_code=429,
+            details={"message": str(error)},
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "rate_limit_exceeded",
+                "message": str(error),
+            },
+        ) from error
+    except PermissionDenied as error:
+        audit_store.record(
+            security.anonymous_context(
+                actor_id=f"endpoint:{source}",
+                ip_address=client_ip(request),
+                request_id=request_id(request),
+            ),
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
             permission="callbacks.write",
             outcome="denied",
             request_method=request.method,
@@ -778,27 +922,57 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/readyz")
-def readyz() -> dict[str, Any]:
-    return readiness_report(
+def readyz(response: Response) -> dict[str, Any]:
+    report = readiness_report(
         config_store=config_store,
         workflow=workflow,
         processing_store=processing_store,
     )
+    response.status_code = readiness_http_status(report)
+    return report
 
 
 @app.get("/metrics")
-def metrics_endpoint() -> PlainTextResponse:
+def metrics_endpoint(request: Request) -> PlainTextResponse:
+    ip_address = client_ip(request)
+    if not metrics_client_allowed(ip_address):
+        message = "Доступ к /metrics запрещен для этого IP."
+        log_json(
+            logger,
+            logging.WARNING,
+            "metrics_access_denied",
+            request_id=request_id(request),
+            ip_address=ip_address,
+            path=request.url.path,
+        )
+        audit_store.record(
+            security.anonymous_context(ip_address=ip_address, request_id=request_id(request)),
+            action="metrics.read",
+            resource_type="metrics",
+            outcome="denied",
+            request_method=request.method,
+            request_path=request.url.path,
+            status_code=403,
+            details={"message": message},
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "metrics_access_denied",
+                "message": message,
+            },
+        )
     return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/operator")
 def operator_ui() -> FileResponse:
-    return FileResponse(OPERATOR_UI_ROOT / "index.html")
+    return ui_index_response(OPERATOR_UI_ROOT / "index.html")
 
 
 @app.get("/debug")
 def debug_ui() -> FileResponse:
-    return FileResponse(OPERATOR_UI_ROOT / "index.html")
+    return ui_index_response(OPERATOR_UI_ROOT / "index.html")
 
 
 @app.get("/operator/scenarios")
@@ -1389,7 +1563,7 @@ def debug_endpoint_capture_mark_contract_broken(
 
 @app.get("/admin")
 def admin_ui() -> FileResponse:
-    return FileResponse(ADMIN_UI_ROOT / "index.html")
+    return ui_index_response(ADMIN_UI_ROOT / "index.html")
 
 
 @app.post("/tickets/analyze")
@@ -1703,6 +1877,124 @@ def integration_callback(
                 "message": str(error),
             }
         raise HTTPException(status_code=400, detail=detail) from error
+
+
+@app.post("/external-events/{source}")
+def external_event(
+    source: str,
+    request: ExternalEventRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(external_event_context_dependency),
+) -> dict[str, Any]:
+    payload = {
+        key: value
+        for key, value in model_to_dict(request).items()
+        if value is not None
+    }
+    if payload.get("source") and payload["source"] != source:
+        audit_error(
+            context,
+            http_request,
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            status_code=400,
+            message="source в external event не совпадает с URL path.",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "source_mismatch",
+                "message": "source в external event должен совпадать с URL path.",
+            },
+        )
+    payload["source"] = source
+    payload.setdefault("received_at", utc_now())
+    try:
+        workflow.contracts.require_valid("external_event", payload)
+        if not processing_store.external_event_receipt(payload["idempotency_key"]):
+            wait = processing_store.active_wait_by_correlation(
+                payload["correlation_id"],
+                case_id=payload.get("case_id"),
+            )
+            if not wait:
+                raise ProcessingNotFound(payload["correlation_id"])
+            config_store.validate_external_event_result_contract(wait, payload)
+        result = processing_store.record_external_event(payload)
+        audit_success(
+            context,
+            http_request,
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            details={
+                "case_id": payload.get("case_id"),
+                "wait_id": result.get("wait", {}).get("wait_id"),
+                "correlation_id": payload.get("correlation_id"),
+                "event_id": payload.get("event_id"),
+                "event_type": payload.get("event_type"),
+                "status": payload.get("status"),
+                "duplicate": result.get("duplicate", False),
+            },
+        )
+        return result
+    except ProcessingNotFound as error:
+        audit_error(
+            context,
+            http_request,
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            status_code=404,
+            message=str(error),
+        )
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "wait_not_found",
+                "message": f"Активное ожидание не найдено: {error}",
+            },
+        ) from error
+    except ProcessingConflict as error:
+        code = "external_event_idempotency_conflict" if isinstance(error, ExternalEventIdempotencyConflict) else "external_event_conflict"
+        audit_error(
+            context,
+            http_request,
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            status_code=409,
+            message=str(error),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": code,
+                "message": str(error),
+            },
+        ) from error
+    except ContractValidationError as error:
+        audit_error(
+            context,
+            http_request,
+            action="external_events.receive",
+            resource_type="external_event_source",
+            resource_id=source,
+            permission="callbacks.write",
+            status_code=400,
+            message="External event не прошел валидацию контракта.",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "contract_name": error.contract_name,
+                "errors": error.errors,
+            },
+        ) from error
 
 
 @app.get("/approvals/{approval_id}")
@@ -2399,6 +2691,76 @@ def admin_integration_endpoint_catalog(
     return workflow.contracts.integration_endpoint_catalog
 
 
+@app.post("/admin/integration-endpoints/openapi/preview")
+def admin_integration_endpoint_openapi_preview(
+    payload: AdminOpenApiContractPreviewRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="integration_endpoints",
+        mode="manage",
+        action="admin.integration_endpoints.openapi.preview",
+    )
+    if not payload.endpoint_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "endpoint_required",
+                "message": "Для preview OpenAPI передайте endpoint_id сохраненного endpoint.",
+            },
+        )
+    active_endpoints = config_store.active_payload("integration_endpoints").get("endpoints", [])
+    endpoint = next((dict(item) for item in active_endpoints if item.get("endpoint_id") == payload.endpoint_id), {})
+    if not endpoint:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "endpoint_not_found",
+                "message": f"Endpoint не найден: {payload.endpoint_id}. Сохраните endpoint перед импортом OpenAPI.",
+            },
+        )
+    if payload.contract_source:
+        endpoint["contract_source"] = payload.contract_source
+    try:
+        result = preview_openapi_contract(endpoint, endpoint.get("contract_source") or {})
+    except OpenApiContractError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.integration_endpoints.openapi.preview",
+            resource_type="integration_endpoint",
+            resource_id=endpoint.get("endpoint_id"),
+            permission=permission,
+            status_code=400,
+            message=str(error),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "openapi_contract_error",
+                "message": str(error),
+            },
+        ) from error
+    audit_success(
+        context,
+        http_request,
+        action="admin.integration_endpoints.openapi.preview",
+        resource_type="integration_endpoint",
+        resource_id=endpoint.get("endpoint_id"),
+        permission=permission,
+        details={
+            "operator_id": payload.operator_id,
+            "operation_count": len(result.get("operations", {})),
+            "warning_count": len(result.get("warnings", [])),
+            "source_url": result.get("source_url"),
+        },
+    )
+    return result
+
+
 @app.get("/admin/catalog/workflow")
 def admin_workflow_catalog(
     context: SecurityContext = Depends(
@@ -2629,6 +2991,108 @@ def admin_simulate_scenario(
         return result
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
+
+
+def assistant_slot_schema(
+    *,
+    slot_schema_id: str | None = None,
+    scenario_id: str | None = None,
+) -> dict[str, Any]:
+    slot_schemas = config_store.active_payload("slot_schemas").get("slot_schemas", [])
+    resolved_slot_schema_id = slot_schema_id
+    if not resolved_slot_schema_id and scenario_id:
+        scenarios = config_store.active_payload("service_scenarios").get("scenarios", [])
+        scenario = next((item for item in scenarios if item.get("scenario_id") == scenario_id), None)
+        resolved_slot_schema_id = (scenario or {}).get("slot_schema_id")
+    slot_schema = next((item for item in slot_schemas if item.get("slot_schema_id") == resolved_slot_schema_id), None)
+    if not slot_schema:
+        raise ConfigRegistryError(f"Схема слотов не найдена: {resolved_slot_schema_id or 'не указана'}")
+    return slot_schema
+
+
+@app.post("/admin/config-assistant/slot-autofill/compile")
+def admin_config_assistant_slot_autofill_compile(
+    request: AdminSlotAutofillCompileRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="slot_autofill_profiles",
+        mode="manage",
+        action="admin.config_assistant.slot_autofill.compile",
+    )
+    try:
+        result = compile_slot_autofill_profile(
+            instruction=request.instruction,
+            slot_schema=assistant_slot_schema(slot_schema_id=request.slot_schema_id),
+            tools=config_store.active_payload("tools").get("tools", []),
+            react_call=request.react_call,
+            target_slots=request.target_slots,
+        )
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+    audit_success(
+        context,
+        http_request,
+        action="admin.config_assistant.slot_autofill.compile",
+        resource_type="config_assistant",
+        resource_id=request.slot_schema_id,
+        permission=permission,
+        details={
+            "operator_id": request.operator_id,
+            "react_call": result.get("references", {}).get("react_call"),
+            "validation_error_count": len(result.get("validation_errors", [])),
+            "warning_count": len(result.get("warnings", [])),
+        },
+    )
+    return result
+
+
+@app.post("/admin/config-assistant/attribute-resolution-step/compile")
+def admin_config_assistant_attribute_resolution_step_compile(
+    request: AdminAttributeResolutionStepCompileRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="attribute_resolution_profiles",
+        mode="manage",
+        action="admin.config_assistant.attribute_resolution_step.compile",
+    )
+    try:
+        slot_schema = assistant_slot_schema(
+            slot_schema_id=request.slot_schema_id,
+            scenario_id=request.scenario_id,
+        )
+        result = compile_attribute_resolution_step(
+            instruction=request.instruction,
+            slot_schema=slot_schema,
+            tools=config_store.active_payload("tools").get("tools", []),
+            react_call=request.react_call,
+            step_name=request.step_name,
+            previous_steps=request.previous_steps,
+        )
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+    audit_success(
+        context,
+        http_request,
+        action="admin.config_assistant.attribute_resolution_step.compile",
+        resource_type="config_assistant",
+        resource_id=slot_schema.get("slot_schema_id"),
+        permission=permission,
+        details={
+            "operator_id": request.operator_id,
+            "react_call": result.get("references", {}).get("react_call"),
+            "validation_error_count": len(result.get("validation_errors", [])),
+            "warning_count": len(result.get("warnings", [])),
+        },
+    )
+    return result
 
 
 @app.get("/admin/config/domains")

@@ -22,7 +22,6 @@
           "policy_id",
           "display_name",
           "auto_close",
-          "waiting",
           "handoff_conditions",
           "major_incident",
           "handoff_package",
@@ -41,33 +40,11 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "requires_tool_success",
-              "requires_user_confirmation"
+              "requires_tool_success"
             ],
             "properties": {
               "requires_tool_success": {
                 "type": "boolean"
-              },
-              "requires_user_confirmation": {
-                "type": "boolean"
-              }
-            }
-          },
-          "waiting": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "pause_sla",
-              "auto_close_after_hours"
-            ],
-            "properties": {
-              "pause_sla": {
-                "type": "boolean"
-              },
-              "auto_close_after_hours": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 168
               }
             }
           },

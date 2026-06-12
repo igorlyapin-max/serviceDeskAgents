@@ -509,6 +509,7 @@ class DebugRuntime:
             "debug_item": debug_item,
             "scenario_detail": scenario_detail,
             "simulation_snapshot": simulation_snapshot,
+            "waits": detail.get("waits") or [],
             "agent_outcome": agent_outcome,
             "summary": self._case_trace_summary(detail, events, agent_outcome),
             "steps": steps,
@@ -708,11 +709,27 @@ class DebugRuntime:
                 value_preview(wait.get("wait_id")),
                 value_preview(wait.get("wait_type")),
                 value_preview(wait.get("status")),
+                value_preview(wait.get("origin"), limit=420),
                 value_preview(wait.get("deadline_at")),
+                value_preview(wait.get("correlation_id")),
                 value_preview(wait.get("reason")),
                 value_preview((wait.get("payload") or {}).get("question")),
+                value_preview((wait.get("payload") or {}).get("last_external_event"), limit=420),
             ]
             for wait in waits
+        ]
+        react_wait_rows = [
+            [
+                value_preview((wait.get("origin") or {}).get("react_call")),
+                value_preview((wait.get("origin") or {}).get("endpoint_id")),
+                value_preview((wait.get("origin") or {}).get("operation_id")),
+                value_preview(wait.get("wait_id")),
+                value_preview(wait.get("status")),
+                value_preview(wait.get("deadline_at")),
+                value_preview(wait.get("correlation_id")),
+            ]
+            for wait in waits
+            if (wait.get("origin") or {}).get("kind") == "react_call"
         ]
         approval_rows = [
             [
@@ -809,6 +826,11 @@ class DebugRuntime:
                         ],
                         tool_rows,
                     ),
+                    cls._trace_table(
+                        "Ожидания, открытые ReAct-вызовами",
+                        ["ReAct", "Endpoint", "Операция", "Wait", "Статус", "Deadline", "Correlation"],
+                        react_wait_rows,
+                    ),
                 ],
                 events=cls._events_for_step(events, {"tool_result_recorded", "integration_callback_received", "processing_external_event_received"}),
             ),
@@ -824,10 +846,14 @@ class DebugRuntime:
                     cls._trace_metric("Операторских ожиданий", len(operator_waits)),
                 ],
                 tables=[
-                    cls._trace_table("Ожидания", ["Wait", "Тип", "Статус", "Deadline", "Причина", "Вопрос"], wait_rows),
+                    cls._trace_table(
+                        "Ожидания",
+                        ["Wait", "Тип", "Статус", "Источник", "Deadline", "Correlation", "Причина", "Вопрос", "Последнее внешнее событие"],
+                        wait_rows,
+                    ),
                     cls._trace_table("Согласования", ["Gate", "Action", "Статус", "Описание"], approval_rows),
                 ],
-                events=cls._events_for_step(events, {"wait_state", "processing_wait_opened", "approval_decisioned"}),
+                events=cls._events_for_step(events, {"wait_state", "processing_wait_opened", "processing_external_event_received", "approval_decisioned"}),
             ),
         ]
 
@@ -841,6 +867,11 @@ class DebugRuntime:
         waits = detail.get("waits") or []
         has_client_wait = any(item.get("wait_type") == "client_wait" and item.get("status") in {"open", "waiting"} for item in waits)
         has_operator_wait = any(item.get("wait_type") == "operator_approval" and item.get("status") in {"open", "waiting"} for item in waits)
+        has_external_wait = any(
+            item.get("wait_type") in {"external_event_wait", "timer_wait"}
+            and item.get("status") in {"open", "waiting", "reminded"}
+            for item in waits
+        )
         run_statuses = {run.get("status") for run in runs}
         if analysis.get("failure") or "failed" in run_statuses or state.get("category") in {"error", "blocked"}:
             return cls._agent_outcome(
@@ -848,6 +879,14 @@ class DebugRuntime:
                 analysis.get("operator_message") or "Обработка обращения завершилась технической ошибкой.",
                 AGENT_OUTCOME_NEXT_STEPS["error"],
             )
+        if has_external_wait and not has_client_wait:
+            outcome = cls._agent_outcome(
+                "waiting",
+                analysis.get("operator_message") or "Агент ожидает внешнее событие или таймер для продолжения обработки.",
+                "Дождитесь callback/timer event или завершите ожидание вручную в потоке обработки.",
+            )
+            outcome["label"] = "Ожидание внешнего события"
+            return outcome
         if has_client_wait or state.get("category") == "waiting" or decision.get("type") == "clarification_needed":
             return cls._agent_outcome(
                 "waiting",
@@ -1679,6 +1718,16 @@ class DebugRuntime:
                 approval_count=len(approval_requests),
             )
         if result_status == "waiting" or workflow_state.get("category") == "waiting":
+            if str(workflow_state.get("id") or "").startswith("waiting_external"):
+                outcome = cls._agent_outcome(
+                    "waiting",
+                    operator_message or "Агент ожидает внешнее событие или таймер для продолжения обработки.",
+                    "Дождитесь callback/timer event или завершите ожидание вручную в потоке обработки.",
+                    workflow_state=workflow_state.get("id"),
+                    decision=decision.get("type"),
+                )
+                outcome["label"] = "Ожидание внешнего события"
+                return outcome
             return cls._agent_outcome(
                 "waiting",
                 operator_message or "Агент ожидает ответ клиента.",

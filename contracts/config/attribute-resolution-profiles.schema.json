@@ -203,6 +203,13 @@
           "minLength": 1,
           "maxLength": 600
         },
+        "configuration_instruction": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "generated_structure_metadata": {
+          "$ref": "#/$defs/generated_structure_metadata"
+        },
         "parameter_mapping": {
           "type": "object",
           "additionalProperties": {
@@ -378,6 +385,27 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 600
+        }
+      }
+    },
+    "generated_structure_metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "generator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "mode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       }
     }

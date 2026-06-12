@@ -76,6 +76,34 @@ TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "escalated", "timed
 ACTIVE_TASK_STATUSES = {"queued", "running", "leased"}
 RETRYABLE_TASK_STATUSES = {"failed", "expired", "cancelled", "blocked"}
 ACTIVE_WAIT_STATUSES = {"open", "reminded"}
+EXTERNAL_EVENT_TERMINAL_STATUSES = {"success", "error", "timeout", "cancelled"}
+EXTERNAL_EVENT_WAIT_STATUS = {
+    "success": "completed",
+    "error": "failed",
+    "timeout": "timed_out",
+    "cancelled": "cancelled",
+}
+WAIT_ORIGIN_KINDS = {"react_call", "client_question", "approval", "timer", "system_policy", "unknown"}
+SENSITIVE_ORIGIN_KEYWORDS = (
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "key",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "session",
+    "токен",
+    "пароль",
+    "секрет",
+    "ключ",
+    "авторизация",
+    "куки",
+    "сессия",
+)
 
 
 class ProcessingNotFound(KeyError):
@@ -83,6 +111,10 @@ class ProcessingNotFound(KeyError):
 
 
 class ProcessingConflict(ValueError):
+    pass
+
+
+class ExternalEventIdempotencyConflict(ProcessingConflict):
     pass
 
 
@@ -286,6 +318,225 @@ class ProcessingStore:
                 "operator_id": decision.get("actor_id"),
             },
         )
+
+    def open_external_wait(
+        self,
+        case_id: str,
+        *,
+        source: str,
+        event_type: str,
+        reason: str,
+        wait_type: str = "external_event_wait",
+        deadline_seconds: int | None = None,
+        correlation_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+        origin: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        case = self.case_store.require(case_id)
+        run = self.latest_run(case_id)
+        if not run:
+            raise ProcessingNotFound(f"У кейса {case_id} нет processing run для ожидания.")
+        if run["status"] in TERMINAL_RUN_STATUSES:
+            raise ProcessingConflict(f"Запуск {run['run_id']} уже завершен в статусе {run['status']}.")
+
+        now = utc_now()
+        wait_id = new_wait_id()
+        wait_payload = copy.deepcopy(payload or {})
+        origin_payload = origin if origin is not None else wait_payload.pop("origin", None)
+        wait_payload.setdefault("expected_event_type", event_type)
+        wait_payload.setdefault("resume_policy", "resume_agent")
+        wait_payload.setdefault("source", source)
+        wait_correlation_id = correlation_id or f"{case_id}:{wait_type}:{run['run_id']}:{wait_id}"
+        if self.active_wait_by_correlation(wait_correlation_id, case_id=case_id):
+            raise ProcessingConflict(
+                f"У кейса {case_id} уже есть активное ожидание с correlation_id={wait_correlation_id}."
+            )
+        wait_origin = self._normalize_wait_origin(
+            origin_payload,
+            default_kind="timer" if wait_type == "timer_wait" else "system_policy",
+            reason=reason,
+            wait_type=wait_type,
+        )
+        wait_origin.setdefault("source", source)
+        wait_origin.setdefault("correlation_id", wait_correlation_id)
+        wait = {
+            "schema_version": "1.0",
+            "wait_id": wait_id,
+            "run_id": run["run_id"],
+            "case_id": case_id,
+            "ticket_id": case["ticket_id"],
+            "wait_type": wait_type,
+            "status": "open",
+            "channel_id": source,
+            "deadline_at": add_seconds(now, deadline_seconds) if deadline_seconds else None,
+            "correlation_id": wait_correlation_id,
+            "created_at": now,
+            "updated_at": now,
+            "reason": reason,
+            "expected_event_type": event_type,
+            "resume_policy": "resume_agent",
+            "origin": wait_origin,
+            "payload": wait_payload,
+        }
+
+        run["status"] = "waiting"
+        run["current_step"] = wait_type
+        run["updated_at"] = now
+        run["completed_at"] = None
+        self._save_run(run)
+        with self._connect() as connection:
+            self._insert_wait(connection, wait)
+
+        self._append_case_event(
+            case_id,
+            "processing_wait_opened",
+            self._wait_summary(wait),
+            {
+                "run_id": run["run_id"],
+                "wait_id": wait_id,
+                "wait_type": wait_type,
+                "correlation_id": wait["correlation_id"],
+                "expected_event_type": event_type,
+                "source": source,
+                "deadline_at": wait.get("deadline_at"),
+                "origin": wait.get("origin"),
+            },
+        )
+        self._enqueue(
+            "timer.commands" if wait_type == "timer_wait" else "integration.events",
+            case_id,
+            "wait_opened",
+            {
+                "case_id": case_id,
+                "ticket_id": case["ticket_id"],
+                "run_id": run["run_id"],
+                "wait": wait,
+            },
+            idempotency_key=f"{case_id}:wait_opened:{wait_id}",
+        )
+        return wait
+
+    def external_event_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select receipt_json
+                from external_event_receipts
+                where idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return json.loads(row["receipt_json"]) if row else None
+
+    def record_external_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        event = copy.deepcopy(event)
+        event.setdefault("received_at", utc_now())
+        receipt = self.external_event_receipt(event["idempotency_key"])
+        if receipt:
+            self._ensure_external_event_receipt_matches(receipt, event)
+            return self._external_event_duplicate_result(receipt)
+
+        wait = self.active_wait_by_correlation(
+            event["correlation_id"],
+            case_id=event.get("case_id"),
+        )
+        if not wait:
+            raise ProcessingNotFound(event["correlation_id"])
+        self._ensure_external_event_source_matches(wait, event)
+        if event.get("wait_id") and event["wait_id"] != wait["wait_id"]:
+            raise ProcessingConflict(
+                f"wait_id {event['wait_id']} не совпадает с активным ожиданием {wait['wait_id']}."
+            )
+        expected_event_type = wait.get("expected_event_type") or (wait.get("payload") or {}).get("expected_event_type")
+        if expected_event_type and expected_event_type != event["event_type"]:
+            raise ProcessingConflict(
+                f"event_type {event['event_type']} не совпадает с ожидаемым {expected_event_type}."
+            )
+
+        now = utc_now()
+        event["received_at"] = event.get("received_at") or now
+        safe_event = self._external_event_for_storage(event)
+        event_summary = self._external_event_summary(safe_event)
+        wait.setdefault("external_events", []).append(copy.deepcopy(event_summary))
+        wait.setdefault("payload", {})["last_external_event"] = event_summary
+        wait["updated_at"] = now
+
+        resume_task = None
+        run = self.latest_run(wait["case_id"])
+        if event["status"] in EXTERNAL_EVENT_TERMINAL_STATUSES:
+            wait["status"] = EXTERNAL_EVENT_WAIT_STATUS[event["status"]]
+            wait["completed_at"] = now
+            wait["completion_event_id"] = event["event_id"]
+            if run and run.get("run_id") == wait.get("run_id") and run.get("status") not in TERMINAL_RUN_STATUSES:
+                run["status"] = "queued"
+                run["current_step"] = "external_event_received"
+                run["updated_at"] = now
+                run["completed_at"] = None
+                run.setdefault("resume_events", []).append(copy.deepcopy(event_summary))
+                self._save_run(run)
+                resume_task = self._build_external_event_resume_task(run, wait, safe_event, now)
+                with self._connect() as connection:
+                    self._insert_task(connection, resume_task)
+
+        self._save_wait(wait)
+        self._append_case_event(
+            wait["case_id"],
+            "processing_external_event_received",
+            f"Получено внешнее событие {event['event_type']} со статусом {event['status']}.",
+            {
+                "run_id": wait["run_id"],
+                "wait_id": wait["wait_id"],
+                "wait_type": wait["wait_type"],
+                "correlation_id": event["correlation_id"],
+                "source": event["source"],
+                "event_type": event["event_type"],
+                "event_status": event["status"],
+                "external_event": safe_event,
+                "origin": wait.get("origin"),
+            },
+        )
+        self._enqueue(
+            "integration.events",
+            wait["case_id"],
+            "external_event_received",
+            {
+                "case_id": wait["case_id"],
+                "ticket_id": wait["ticket_id"],
+                "run_id": wait["run_id"],
+                "wait_id": wait["wait_id"],
+                "origin": wait.get("origin"),
+                "external_event": safe_event,
+            },
+            idempotency_key=event["idempotency_key"],
+        )
+        if resume_task:
+            self._enqueue(
+                "agent.tasks",
+                wait["case_id"],
+                "external_event_resume_requested",
+                {
+                    "case_id": wait["case_id"],
+                    "ticket_id": wait["ticket_id"],
+                    "run_id": wait["run_id"],
+                    "wait": wait,
+                    "external_event": safe_event,
+                    "task": resume_task,
+                },
+                idempotency_key=resume_task["idempotency_key"],
+            )
+
+        result = {
+            "schema_version": "1.0",
+            "accepted": True,
+            "duplicate": False,
+            "external_event": safe_event,
+            "wait": wait,
+            "case": self.case_store.require(wait["case_id"]),
+        }
+        if resume_task:
+            result["resume_task"] = resume_task
+        self._record_external_event_receipt(event, result)
+        return result
 
     def overview(self) -> dict[str, Any]:
         with self._connect() as connection:
@@ -636,6 +887,33 @@ class ProcessingStore:
             ).fetchone()
         return json.loads(row["wait_json"]) if row else None
 
+    def active_wait_by_correlation(
+        self,
+        correlation_id: str,
+        *,
+        case_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        placeholders = ", ".join("?" for _ in ACTIVE_WAIT_STATUSES)
+        parameters: list[Any] = [correlation_id, *sorted(ACTIVE_WAIT_STATUSES)]
+        case_filter = ""
+        if case_id:
+            case_filter = "and case_id = ?"
+            parameters.append(case_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                select wait_json
+                from wait_states
+                where correlation_id = ?
+                  and status in ({placeholders})
+                  {case_filter}
+                order by created_at desc, wait_id desc
+                limit 1
+                """,
+                parameters,
+            ).fetchone()
+        return json.loads(row["wait_json"]) if row else None
+
     def stale_task_count(self) -> int:
         now = utc_now()
         with self._connect() as connection:
@@ -701,6 +979,40 @@ class ProcessingStore:
         }
 
     @staticmethod
+    def _build_external_event_resume_task(
+        run: dict[str, Any],
+        wait: dict[str, Any],
+        event: dict[str, Any],
+        now: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "task_id": new_task_id(),
+            "run_id": run["run_id"],
+            "case_id": run["case_id"],
+            "ticket_id": run["ticket_id"],
+            "task_type": "langgraph_resume",
+            "topic": "agent.tasks",
+            "status": "queued",
+            "worker_id": None,
+            "attempt": 1,
+            "lease_until": None,
+            "heartbeat_at": None,
+            "idempotency_key": f"{run['case_id']}:{wait['wait_id']}:{event['event_id']}:resume",
+            "created_at": now,
+            "updated_at": now,
+            "extensions": {
+                "wait_id": wait["wait_id"],
+                "correlation_id": event["correlation_id"],
+                "external_event_id": event["event_id"],
+                "external_event_type": event["event_type"],
+                "external_event_status": event["status"],
+                "source": event["source"],
+                "origin": copy.deepcopy(wait.get("origin")),
+            },
+        }
+
+    @staticmethod
     def _build_wait_from_analysis(
         run: dict[str, Any],
         analysis: dict[str, Any],
@@ -718,19 +1030,36 @@ class ProcessingStore:
                 "question": decision.get("question"),
                 "expected_slots": decision.get("missing_fields", []),
             }
+            origin = {
+                "kind": "client_question",
+                "question": decision.get("question"),
+                "slot_ids": decision.get("missing_fields", []),
+                "channel_id": "debug",
+            }
         elif analysis.get("approval_requests"):
             wait_type = "operator_approval"
             reason = "Ожидается решение оператора по согласованию действия."
+            approval_ids = [
+                item.get("gate_id") or item.get("approval_id")
+                for item in analysis.get("approval_requests", [])
+                if item.get("gate_id") or item.get("approval_id")
+            ]
             payload = {
-                "approval_ids": [
-                    item.get("gate_id") or item.get("approval_id")
-                    for item in analysis.get("approval_requests", [])
-                    if item.get("gate_id") or item.get("approval_id")
-                ],
+                "approval_ids": approval_ids,
+            }
+            origin = {
+                "kind": "approval",
+                "approval_ids": approval_ids,
+                "channel_id": "debug",
             }
         elif workflow_state_id == "waiting_for_user":
             wait_type = "client_wait"
             reason = "Workflow находится в ожидании ответа клиента."
+            origin = {
+                "kind": "client_question",
+                "workflow_state_id": workflow_state_id,
+                "channel_id": "debug",
+            }
         if not wait_type:
             return None
 
@@ -749,6 +1078,12 @@ class ProcessingStore:
             "created_at": now,
             "updated_at": now,
             "reason": reason,
+            "origin": ProcessingStore._normalize_wait_origin(
+                origin,
+                default_kind="client_question" if wait_type == "client_wait" else "approval",
+                reason=reason,
+                wait_type=wait_type,
+            ),
             "payload": payload,
         }
 
@@ -1081,6 +1416,218 @@ class ProcessingStore:
             return "Открыто ожидание согласования оператора."
         return "Открыто ожидание внешнего события."
 
+    @staticmethod
+    def _normalize_wait_origin(
+        origin: dict[str, Any] | None,
+        *,
+        default_kind: str,
+        reason: str | None = None,
+        wait_type: str | None = None,
+    ) -> dict[str, Any]:
+        cleaned = copy.deepcopy(origin) if isinstance(origin, dict) else {}
+        kind = str(cleaned.get("kind") or default_kind or "unknown")
+        if kind not in WAIT_ORIGIN_KINDS:
+            kind = "unknown"
+        cleaned["kind"] = kind
+        if reason and not cleaned.get("reason"):
+            cleaned["reason"] = reason
+        if wait_type and not cleaned.get("wait_type"):
+            cleaned["wait_type"] = wait_type
+        return ProcessingStore._sanitize_wait_origin(cleaned)
+
+    @staticmethod
+    def _sanitize_wait_origin(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).lower()
+                if any(keyword in normalized_key for keyword in SENSITIVE_ORIGIN_KEYWORDS):
+                    result[key] = "параметр скрыт"
+                else:
+                    result[key] = ProcessingStore._sanitize_wait_origin(item)
+            return result
+        if isinstance(value, list):
+            return [ProcessingStore._sanitize_wait_origin(item) for item in value]
+        return copy.deepcopy(value)
+
+    @staticmethod
+    def _external_event_summary(event: dict[str, Any]) -> dict[str, Any]:
+        summary = {
+            "event_id": event["event_id"],
+            "correlation_id": event["correlation_id"],
+            "source": event["source"],
+            "event_type": event["event_type"],
+            "status": event["status"],
+            "received_at": event["received_at"],
+        }
+        for key in ("result", "error", "raw_reference", "metadata"):
+            if key in event:
+                summary[key] = ProcessingStore._compact_external_event_value(event[key])
+        return summary
+
+    @staticmethod
+    def _compact_external_event_value(value: Any, *, limit: int = 4000) -> Any:
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if len(serialized) <= limit:
+            return copy.deepcopy(value)
+        return {
+            "summary": "payload слишком большой для wait_state; полный payload хранится в receipt события.",
+            "size_bytes": len(serialized.encode("utf-8")),
+            "preview": serialized[: min(500, len(serialized))],
+        }
+
+    @staticmethod
+    def _sanitize_external_event_payload(value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).lower()
+                if any(keyword in normalized_key for keyword in SENSITIVE_ORIGIN_KEYWORDS):
+                    result[key] = "параметр скрыт"
+                else:
+                    result[key] = ProcessingStore._sanitize_external_event_payload(item)
+            return result
+        if isinstance(value, list):
+            return [ProcessingStore._sanitize_external_event_payload(item) for item in value]
+        return copy.deepcopy(value)
+
+    @staticmethod
+    def _external_event_for_storage(event: dict[str, Any]) -> dict[str, Any]:
+        safe_event = ProcessingStore._sanitize_external_event_payload(event)
+        for key in ("result", "error", "raw_reference", "metadata"):
+            if key in safe_event:
+                safe_event[key] = ProcessingStore._compact_external_event_value(safe_event[key])
+        return safe_event
+
+    @staticmethod
+    def _external_event_duplicate_result(receipt: dict[str, Any]) -> dict[str, Any]:
+        result = receipt.get("result") or {}
+        wait = result.get("wait") if isinstance(result, dict) else None
+        resume_task = result.get("resume_task") if isinstance(result, dict) else None
+        response: dict[str, Any] = {
+            "schema_version": "1.0",
+            "accepted": True,
+            "duplicate": True,
+            "idempotency_key": receipt.get("idempotency_key"),
+            "event_id": receipt.get("event_id"),
+            "source": receipt.get("source"),
+            "case_id": receipt.get("case_id"),
+            "correlation_id": receipt.get("correlation_id"),
+            "wait_id": receipt.get("wait_id"),
+            "event_type": receipt.get("event_type"),
+            "status": receipt.get("status"),
+        }
+        if isinstance(wait, dict):
+            response["wait"] = {
+                key: wait.get(key)
+                for key in (
+                    "wait_id",
+                    "case_id",
+                    "ticket_id",
+                    "wait_type",
+                    "status",
+                    "correlation_id",
+                    "expected_event_type",
+                )
+                if wait.get(key) not in (None, "", [], {})
+            }
+        if isinstance(resume_task, dict):
+            response["resume_task"] = {
+                key: resume_task.get(key)
+                for key in ("task_id", "run_id", "case_id", "status", "topic", "idempotency_key")
+                if resume_task.get(key) not in (None, "", [], {})
+            }
+        return response
+
+    @staticmethod
+    def _ensure_external_event_receipt_matches(receipt: dict[str, Any], event: dict[str, Any]) -> None:
+        expected = {
+            "event_id": event.get("event_id"),
+            "source": event.get("source"),
+            "case_id": event.get("case_id"),
+            "correlation_id": event.get("correlation_id"),
+            "wait_id": event.get("wait_id"),
+            "event_type": event.get("event_type"),
+            "status": event.get("status"),
+        }
+        mismatched = [
+            key
+            for key, value in expected.items()
+            if value not in (None, "") and receipt.get(key) not in (None, "", value)
+        ]
+        if mismatched:
+            raise ExternalEventIdempotencyConflict(
+                "external_event_idempotency_conflict: idempotency_key уже использован для другого события "
+                f"({', '.join(sorted(mismatched))})."
+            )
+
+    @staticmethod
+    def _ensure_external_event_source_matches(wait: dict[str, Any], event: dict[str, Any]) -> None:
+        expected_sources = {
+            str(value)
+            for value in (
+                wait.get("channel_id"),
+                (wait.get("payload") or {}).get("source"),
+                (wait.get("origin") or {}).get("source"),
+                (wait.get("origin") or {}).get("endpoint_id"),
+            )
+            if value
+        }
+        if expected_sources and event.get("source") not in expected_sources:
+            raise ProcessingConflict(
+                f"source {event.get('source')} не совпадает с ожидаемым источником ожидания: "
+                f"{', '.join(sorted(expected_sources))}."
+            )
+
+    def _record_external_event_receipt(
+        self,
+        event: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        receipt = {
+            "schema_version": "1.0",
+            "idempotency_key": event["idempotency_key"],
+            "event_id": event["event_id"],
+            "wait_id": event.get("wait_id"),
+            "event_type": event["event_type"],
+            "source": event["source"],
+            "case_id": event["case_id"],
+            "correlation_id": event["correlation_id"],
+            "status": event["status"],
+            "created_at": now,
+            "updated_at": now,
+            "result": copy.deepcopy(result),
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into external_event_receipts (
+                    idempotency_key,
+                    source,
+                    case_id,
+                    correlation_id,
+                    status,
+                    receipt_json,
+                    created_at,
+                    updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(idempotency_key) do nothing
+                """,
+                (
+                    receipt["idempotency_key"],
+                    receipt["source"],
+                    receipt["case_id"],
+                    receipt["correlation_id"],
+                    receipt["status"],
+                    self._to_json(receipt),
+                    receipt["created_at"],
+                    receipt["updated_at"],
+                ),
+            )
+        return receipt
+
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -1164,6 +1711,32 @@ class ProcessingStore:
             connection.execute("create index if not exists idx_processing_outbox_topic on processing_outbox(topic)")
             connection.execute("create index if not exists idx_processing_outbox_key on processing_outbox(message_key)")
             connection.execute("create index if not exists idx_processing_outbox_status on processing_outbox(status)")
+            connection.execute(
+                """
+                create table if not exists external_event_receipts (
+                    idempotency_key text primary key,
+                    source text not null,
+                    case_id text not null,
+                    correlation_id text not null,
+                    status text not null,
+                    receipt_json text not null,
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_external_event_receipts_case_id
+                on external_event_receipts(case_id)
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_external_event_receipts_correlation_id
+                on external_event_receipts(correlation_id)
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
