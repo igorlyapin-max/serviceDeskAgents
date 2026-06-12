@@ -41,6 +41,12 @@ const state = {
   orchestrationGraphPanY: 34,
   processingCaseId: '',
   modelRoutingBaseVersionId: '',
+  referenceAutocomplete: {
+    textarea: null,
+    start: -1,
+    selectedIndex: 0,
+    items: [],
+  },
   lastData: {
     toolCatalog: [],
     integrationEndpoints: [],
@@ -1303,31 +1309,12 @@ function renderSlotAutofillEditor({ profile, profiles, slotSchemas, scenarios, t
           <select name="slot_schema_id" data-slot-autofill-schema>${referenceOptions(slotSchemas, 'slot_schema_id', slotSchema.slot_schema_id, 'display_name')}</select>
           <span class="field-help">Слоты для маппинга и создаваемые слоты относятся только к выбранной схеме.</span>
         </label>
-        <label>ReAct-вызов чтения
-          <select name="react_call" data-slot-autofill-react-call>${slotAutofillToolOptions(tools, current.react_call)}</select>
-          <span class="field-help">Для автозаполнения доступны только read-only вызовы. Привязка к endpoint берется из меню "Вызовы и интеграции".</span>
-        </label>
-        <label>Порядок запуска
-          <input name="run_order" type="number" min="1" max="100" value="${escapeHtml(current.run_order || 1)}">
-        </label>
-        <label>Когда принимать результат
-          <select name="accept_policy">${optionList(['single_result', 'always'], current.accept_policy || 'single_result', slotAutofillPolicyLabels())}</select>
-        </label>
-        <label>Если нет результата
-          <select name="on_no_result">${optionList(['continue', 'ask_client', 'operator_handoff'], current.on_no_result || 'continue', slotAutofillFailureLabels())}</select>
-        </label>
-        <label>Если несколько результатов
-          <select name="on_ambiguous_result">${optionList(['continue', 'ask_client', 'operator_handoff'], current.on_ambiguous_result || 'ask_client', slotAutofillFailureLabels())}</select>
-        </label>
       </div>
-      <label>Описание
-        <textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea>
-      </label>
       <fieldset class="launch-editor">
         <legend>Инструкция настройки</legend>
         <label>Что должен сделать профиль
           <textarea name="configuration_instruction" data-slot-autofill-instruction rows="5" placeholder="Вызови get_user_login. В параметр user_fio передай слот &quot;Фамилия Имя Отчество&quot;. Если результат единственный, заполни слот &quot;Логин пользователя&quot; из поля user_login.">${escapeHtml(current.configuration_instruction || '')}</textarea>
-          <span class="field-help">LLM-помощник использует этот текст только для формирования структуры. Runtime исполняет маппинги ниже.</span>
+          <span class="field-help">Укажите ReAct-вызов, правило принятия результата и действия для случаев "нет результата" / "несколько результатов". Runtime исполняет сформированную структуру ниже.</span>
         </label>
         ${slotAutofillStructurePreview(current)}
         <div class="scenario-editor-actions">
@@ -1337,6 +1324,30 @@ function renderSlotAutofillEditor({ profile, profiles, slotSchemas, scenarios, t
       </fieldset>
       <details class="launch-editor">
         <summary>Расширенные настройки структуры</summary>
+        <label>Описание
+          <textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea>
+        </label>
+        <fieldset class="launch-editor">
+          <legend>Параметры запуска профиля</legend>
+          <div class="grid two">
+            <label>ReAct-вызов чтения
+              <select name="react_call" data-slot-autofill-react-call>${slotAutofillToolOptions(tools, current.react_call)}</select>
+              <span class="field-help">Для автозаполнения доступны только read-only вызовы. Привязка к endpoint берется из меню "Вызовы и интеграции".</span>
+            </label>
+            <label>Порядок запуска
+              <input name="run_order" type="number" min="1" max="100" value="${escapeHtml(current.run_order || 1)}">
+            </label>
+            <label>Когда принимать результат
+              <select name="accept_policy">${optionList(['single_result', 'always'], current.accept_policy || 'single_result', slotAutofillPolicyLabels())}</select>
+            </label>
+            <label>Если нет результата
+              <select name="on_no_result">${optionList(['continue', 'ask_client', 'operator_handoff'], current.on_no_result || 'continue', slotAutofillFailureLabels())}</select>
+            </label>
+            <label>Если несколько результатов
+              <select name="on_ambiguous_result">${optionList(['continue', 'ask_client', 'operator_handoff'], current.on_ambiguous_result || 'ask_client', slotAutofillFailureLabels())}</select>
+            </label>
+          </div>
+        </fieldset>
         <fieldset class="launch-editor">
           <legend>Входные параметры ReAct-вызова</legend>
           <div class="meta">Параметры берутся из контракта ReAct-вызова. Источником может быть слот схемы, поле обращения, контекст, константа или секрет.</div>
@@ -1842,7 +1853,6 @@ function channelCreateTemplate(source, channels) {
       message_template: 'Остановить сценарий и показать причину эскалации.',
     },
     action_profiles: template.action_profiles || defaultChannelActionProfiles(template.channel_id || 'debug'),
-    audit_required: template.audit_required ?? true,
     enabled: template.enabled ?? true,
   };
 }
@@ -1890,7 +1900,6 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
       <div class="grid two">
         <label>Режим<select name="mode">${optionList(['online_interactive', 'offline_interactive', 'debug'], current.mode)}</select></label>
         <label>Канал включен<select name="enabled">${booleanOptions(current.enabled)}</select></label>
-        <label>Аудит обязателен<select name="audit_required">${booleanOptions(current.audit_required)}</select></label>
       </div>
       <fieldset class="launch-editor">
         <legend>Уточнения у клиента</legend>
@@ -2096,6 +2105,20 @@ function renderScenarioEditor({
           <span class="field-help">Сценарий можно запускать только в выбранных каналах. Канал по умолчанию должен входить в этот список.</span>
         </label>
       </div>
+      <details class="launch-editor">
+        <summary>Наблюдаемость сценария</summary>
+        <div class="grid two">
+          <label class="checkbox-line">
+            <input type="checkbox" name="audit_required" value="true" ${scenario.audit_required ?? true ? 'checked' : ''}>
+            <span>Аудит включен</span>
+          </label>
+          <label class="checkbox-line">
+            <input type="checkbox" name="log_required" value="true" ${scenario.log_required ?? true ? 'checked' : ''}>
+            <span>Логирование включено</span>
+          </label>
+        </div>
+        <div class="meta">Настройка применяется ко всем ReAct-вызовам, профилям разрешения атрибутов и эскалациям внутри сценария.</div>
+      </details>
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.scenarioOperation === 'create' ? 'Создать сценарий' : 'Сохранить изменения'}</button>
       </div>
@@ -2104,23 +2127,26 @@ function renderScenarioEditor({
 }
 
 async function renderResolutionProfiles() {
-  const [active, slotSchemasConfig, scenariosConfig, toolsConfig, endpointsConfig] = await Promise.all([
+  const [active, slotSchemasConfig, scenariosConfig, toolsConfig, endpointsConfig, matricesConfig] = await Promise.all([
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/slot_schemas'),
     api('/admin/config/active/service_scenarios'),
     api('/admin/config/active/tools'),
     api('/admin/config/active/integration_endpoints'),
+    api('/admin/config/active/tool_launch_matrix'),
   ]);
   const profiles = active.payload?.profiles || [];
   const slotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
   const scenarios = scenariosConfig.payload?.scenarios || [];
   const tools = toolsConfig.payload?.tools || [];
   const endpoints = endpointsConfig.payload?.endpoints || [];
+  const toolMatrices = matricesConfig.payload?.matrices || [];
   state.lastData.resolutionProfiles = profiles;
   state.lastData.slotSchemas = slotSchemas;
   state.lastData.serviceScenarios = scenarios;
   state.lastData.toolCatalog = tools;
   state.lastData.integrationEndpoints = endpoints;
+  state.lastData.toolMatrices = toolMatrices;
   if (!profiles.some((profile) => profile.profile_id === state.resolutionProfileId)) {
     state.resolutionProfileId = profiles[0]?.profile_id || '';
   }
@@ -2139,6 +2165,7 @@ async function renderResolutionProfiles() {
     scenarios,
     tools,
     endpoints,
+    toolMatrices,
   });
   elements.viewContent.innerHTML = [
     section(
@@ -2208,14 +2235,22 @@ function buildResolutionSlotContext(profile, slotSchemas, scenarios) {
   const usedSchemaIds = new Set((slotSchemas || [])
     .filter((schema) => (schema.slots || []).some((slot) => slot.resolution_profile_id === profile?.profile_id))
     .map((schema) => schema.slot_schema_id));
+  if (profile?.slot_schema_id) {
+    usedSchemaIds.add(profile.slot_schema_id);
+  }
   const usedScenarios = (scenarios || []).filter((scenario) => usedSchemaIds.has(scenario.slot_schema_id));
   const profileId = profile?.profile_id || '';
   if (state.resolutionSlotProfileId !== profileId) {
     state.resolutionSlotProfileId = profileId;
-    state.resolutionSlotScenarioId = usedScenarios[0]?.scenario_id || state.scenarioId || (scenarios || [])[0]?.scenario_id || '';
+    state.resolutionSlotScenarioId = usedScenarios[0]?.scenario_id
+      || (scenarios || []).find((scenario) => scenario.slot_schema_id === profile?.slot_schema_id)?.scenario_id
+      || state.scenarioId
+      || (scenarios || [])[0]?.scenario_id
+      || '';
   }
   const selectedScenario = (scenarios || []).find((scenario) => scenario.scenario_id === state.resolutionSlotScenarioId)
     || usedScenarios[0]
+    || (scenarios || []).find((scenario) => scenario.slot_schema_id === profile?.slot_schema_id)
     || (scenarios || []).find((scenario) => scenario.scenario_id === state.scenarioId)
     || (scenarios || [])[0]
     || null;
@@ -2320,7 +2355,17 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
   `;
 }
 
-function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [] }) {
+function toolsForScenario(tools = [], scenarios = [], toolMatrices = [], scenario = null, referencedToolNames = []) {
+  const matrix = scenario
+    ? (toolMatrices || []).find((item) => item.matrix_id === scenario.tool_launch_matrix_id)
+    : null;
+  const allowedNames = new Set((matrix?.launches || []).map((launch) => launch.tool_name).filter(Boolean));
+  const referenced = new Set((referencedToolNames || []).filter(Boolean));
+  const result = (tools || []).filter((tool) => !allowedNames.size || allowedNames.has(tool.tool_name) || referenced.has(tool.tool_name));
+  return result.length ? result : tools;
+}
+
+function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [], toolMatrices = [] }) {
   if (state.resolutionOperation === 'delete') {
     if (!profile) {
       return '<div class="empty">Нет выбранного профиля для удаления</div>';
@@ -2353,14 +2398,21 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
   const fallbackOptions = ['ask_user', 'operator_handoff', 'escalate', 'leave_empty']
     .map((value) => `<option value="${value}" ${fallbackAction === value ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`)
     .join('');
-  const selectedInputSlots = profileInputSlotIds(current);
   const enrichmentSteps = profileEnrichmentSteps(current, tools, endpoints);
   const outputRules = profileOutputRules(current);
   const llmScript = current.llm_resolution_script || {};
-  return `
-    <form class="scenario-editor panel" data-form="resolution-profile-editor">
-      <input type="hidden" name="profile_id" value="${escapeHtml(current.profile_id || '')}">
-      <div class="grid two">
+  const contextTools = toolsForScenario(
+    tools,
+    scenarios,
+    toolMatrices,
+    slotContext.selectedScenario,
+    enrichmentSteps.map((step) => step.react_call),
+  );
+	  return `
+	    <form class="scenario-editor panel" data-form="resolution-profile-editor">
+	      <input type="hidden" name="profile_id" value="${escapeHtml(current.profile_id || '')}">
+	      <input type="hidden" name="slot_schema_id" value="${escapeHtml(slotContext.schema?.slot_schema_id || current.slot_schema_id || '')}">
+	      <div class="grid two">
         <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
       </div>
       <label>Описание<textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea></label>
@@ -2375,21 +2427,12 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <input name="max_attempts" type="number" min="1" max="10" value="${escapeHtml(current.max_attempts || 1)}">
           <span class="field-help">Сколько раз можно уточнять признаки и повторять операцию разрешения.</span>
         </label>
-        <label>Audit<select name="audit_required">${booleanOptions(current.audit_required)}</select></label>
-        <label>Log<select name="log_required">${booleanOptions(current.log_required)}</select></label>
       </div>
-      <fieldset class="launch-editor">
-        <legend>Входные слоты</legend>
-        <label>Слоты, которые подаются в обогащение и LLM-правило
-          <select name="input_slots" multiple size="6">${resolutionSlotMultiOptions(slotContext, selectedInputSlots)}</select>
-          <span class="field-help">Выбираются из схемы слотов сценария. Эти значения можно использовать в параметрах ReAct-вызовов и в LLM-скрипте разрешения.</span>
-        </label>
-      </fieldset>
       <fieldset class="launch-editor enrichment-builder">
         <legend>Обогащение контекста</legend>
-        <div class="meta">Шаги выполняются сверху вниз. Каждый ReAct-вызов сохраняет результат как именованную сущность, которую можно использовать в следующих шагах и LLM-правиле.</div>
+        <div class="meta">Шаги выполняются сверху вниз. Результат каждого ReAct-вызова доступен следующим шагам и LLM-правилу через ссылку вида step.</div>
         <div data-enrichment-step-list>
-          ${renderEnrichmentStepCards(enrichmentSteps, slotContext, outputRules, tools)}
+          ${renderEnrichmentStepCards(enrichmentSteps, slotContext, outputRules, contextTools)}
         </div>
         <button type="button" data-action="enrichment-step-add">Добавить шаг обогащения</button>
       </fieldset>
@@ -2474,12 +2517,6 @@ function profileResolverOperation(profile = {}) {
   };
 }
 
-function profileInputSlotIds(profile = {}) {
-  return (profile.input_slots || [])
-    .map((slot) => slot.slot_id)
-    .filter(Boolean);
-}
-
 function profileOutputSlotIds(profile = {}) {
   return (profile.output_slots_order || profile.output_slots || [])
     .map((slot) => (typeof slot === 'string' ? slot : slot.slot_id))
@@ -2545,25 +2582,6 @@ function selectedCandidateOperation(profile, tools, endpoints) {
   const operation = endpoint?.operations?.[source.operation_id] || null;
   const tool = (tools || []).find((item) => item.tool_name === source.tool_name) || null;
   return { tool, endpoint, operation };
-}
-
-function profileOperationResultEntity(profile = {}, tools = [], endpoints = []) {
-  if (profile.operation_result_entity) {
-    return profile.operation_result_entity;
-  }
-  const { operation } = selectedCandidateOperation(profile, tools, endpoints);
-  const fields = inferResultFieldsFromOperation(operation);
-  return {
-    entity_name: inferResultEntityName(operation),
-    entity_description: operation?.description || 'Результат ReAct-вызова.',
-    available_fields: fields,
-  };
-}
-
-function inferResultEntityName(operation) {
-  const output = operation?.mock_output || {};
-  const listKey = Object.keys(output).find((key) => Array.isArray(output[key]));
-  return listKey || 'result';
 }
 
 function inferResultFieldsFromOperation(operation) {
@@ -2646,14 +2664,13 @@ function profileEnrichmentSteps(profile = {}, tools = [], endpoints = []) {
   if (source.source_type !== 'react_call' || !source.tool_name) {
     return [];
   }
-  const resultEntity = profileOperationResultEntity(profile, tools, endpoints);
+  const { operation } = selectedCandidateOperation(profile, tools, endpoints);
   return [{
-    step_name: `Получить ${resultEntity.entity_name || source.tool_name}`,
+    step_id: 'step1',
+    step_name: `Получить ${source.tool_name}`,
     react_call: source.tool_name,
     parameter_mapping: source.parameter_mapping || {},
-    result_entity_name: resultEntity.entity_name || 'result',
-    result_entity_description: resultEntity.entity_description || 'Результат ReAct-вызова.',
-    result_fields: resultEntity.available_fields || [],
+    result_fields: inferResultFieldsFromOperation(operation),
     on_error: 'continue_to_llm',
   }];
 }
@@ -2672,7 +2689,6 @@ function renderEnrichmentStepCards(steps, slotContext, outputRules, tools) {
         <span>N</span>
         <span>Шаг</span>
         <span>ReAct-вызов</span>
-        <span>Результат</span>
         <span>При ошибке</span>
         <span>Действия</span>
       </div>
@@ -2693,11 +2709,10 @@ function normalizeEnrichmentStep(step = {}, index = 0, tools = []) {
   const tool = findToolInCatalog(tools, step.react_call) || (step.react_call ? null : tools[0]) || null;
   const reactCall = step.react_call || tool?.tool_name || '';
   return {
+    step_id: normalizeEnrichmentStepId(step.step_id, index),
     step_name: step.step_name || '',
     react_call: reactCall,
     parameter_mapping: step.parameter_mapping || {},
-    result_entity_name: step.result_entity_name || inferEntityNameFromTool(tool, index),
-    result_entity_description: step.result_entity_description || 'Результат ReAct-вызова.',
     result_fields: step.result_fields?.length ? step.result_fields : resultFieldsFromTool(tool),
     on_error: step.on_error || 'continue_to_llm',
     configuration_instruction: step.configuration_instruction || '',
@@ -2705,22 +2720,18 @@ function normalizeEnrichmentStep(step = {}, index = 0, tools = []) {
   };
 }
 
-function inferEntityNameFromTool(tool, index = 0) {
-  if (!tool?.tool_name) return `entity_${index + 1}`;
-  const name = String(tool.tool_name)
-    .replace(/^search_/, '')
-    .replace(/^find_/, '')
-    .replace(/^get_/, '')
-    .replace(/^query_/, '')
-    .replace(/_by_.+$/, '')
-    .replace(/_from_.+$/, '');
-  return name || `entity_${index + 1}`;
+function normalizeEnrichmentStepId(stepId, index = 0) {
+  const value = String(stepId || '').trim();
+  if (/^step[1-9][0-9]*$/.test(value)) {
+    return value;
+  }
+  return `step${index + 1}`;
 }
 
 function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], active = false) {
   const tool = findToolInCatalog(tools, step.react_call) || null;
   const stepTitle = step.step_name || tool?.description || step.react_call || 'новый ReAct-вызов';
-  const resultFieldsCount = step.result_fields?.length || 0;
+  const stepId = normalizeEnrichmentStepId(step.step_id, index);
   return `
     <div class="enrichment-step-card ${active ? 'active' : ''}" data-enrichment-step-card data-enrichment-step-index="${index}">
       ${active ? '' : `<textarea hidden data-enrichment-step-json>${escapeHtml(JSON.stringify(step))}</textarea>`}
@@ -2728,10 +2739,9 @@ function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slot
         <span class="enrichment-step-number">${index + 1}</span>
         <span>
           <strong>${escapeHtml(stepTitle)}</strong>
-          <small>${escapeHtml(resultFieldsCount ? `Контракт результата: ${resultFieldsCount} полей` : 'Контракт результата не описан')}</small>
+          <small>${escapeHtml(`Ссылка: ${stepId}`)}</small>
         </span>
         <span>${escapeHtml(tool?.description || step.react_call || 'не выбран')}</span>
-        <span>${escapeHtml(step.result_entity_name || 'не задано')}</span>
         <span>${escapeHtml(enrichmentOnErrorLabel(step.on_error))}</span>
         <span class="row-actions">
           <button type="button" data-action="enrichment-step-edit" data-step-index="${index}" ${active ? 'disabled' : ''}>Изменить</button>
@@ -2746,49 +2756,38 @@ function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slot
 function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = []) {
   const tool = findToolInCatalog(tools, step.react_call) || tools[0] || null;
   const reactCall = step.react_call || tool?.tool_name || '';
-  const resultFieldsEntity = {
-    available_fields: step.result_fields?.length ? step.result_fields : resultFieldsFromTool(tool),
-  };
+  const stepId = normalizeEnrichmentStepId(step.step_id, index);
   return `
     <div class="enrichment-step-editor" data-enrichment-step-editor>
+      <input type="hidden" data-enrichment-step-id value="${escapeHtml(stepId)}">
       <fieldset class="launch-editor">
         <legend>Инструкция настройки шага</legend>
         <label>Что должен сделать шаг
-          <textarea data-enrichment-configuration-instruction rows="5" placeholder="Вызови get_user_login. В параметр user_fio передай слот &quot;Фамилия Имя Отчество&quot;. Результат сохрани как users. Если ошибка, эскалируй оператору.">${escapeHtml(step.configuration_instruction || '')}</textarea>
+          <textarea data-enrichment-configuration-instruction rows="5" placeholder="Вызови get_user_login. В параметр user_fio передай слот &quot;Фамилия Имя Отчество&quot;. Если результат не найден, эскалируй оператору.">${escapeHtml(step.configuration_instruction || '')}</textarea>
           <span class="field-help">Помощник настройки сформирует структуру шага. Runtime использует ReAct-вызов, маппинг параметров и LLM-правило ниже, а не свободный текст напрямую.</span>
         </label>
         <input type="hidden" data-enrichment-generated-metadata value="${escapeHtml(jsonPretty(step.generated_structure_metadata || {}))}">
         <div class="scenario-editor-actions">
           <button type="button" data-action="resolution-step-compile">Сформировать структуру шага</button>
-          <span class="meta" data-resolution-step-compile-status>Будут обновлены ReAct-вызов, входные параметры, сущность результата и поля результата активного шага.</span>
+          <span class="meta" data-resolution-step-compile-status>Будут обновлены ReAct-вызов и входные параметры активного шага.</span>
         </div>
       </fieldset>
-      <div class="grid two enrichment-editor-main">
-        <label>Название шага
-          <input data-enrichment-step-name value="${escapeHtml(step.step_name || '')}" autocomplete="off" placeholder="Поиск получателя">
-        </label>
-        <label>ReAct-вызов
-          <select data-enrichment-react-call>${toolCatalogOptions(tools, reactCall)}</select>
-          <span class="field-help">Привязка к endpoint-операции берется из меню "Вызовы и интеграции".</span>
-        </label>
-        <label>Имя сущности результата
-          <input data-enrichment-result-entity value="${escapeHtml(step.result_entity_name || inferEntityNameFromTool(tool, index))}" autocomplete="off" placeholder="users">
-          <span class="field-help">Под этим именем результат ReAct-вызова доступен следующим шагам и LLM-правилу. Для ссылок используйте формат entity:&lt;сущность&gt;.&lt;поле&gt;, например entity:users.login.</span>
-        </label>
-        <label>Действие при ошибке
-          <select data-enrichment-on-error>${enrichmentOnErrorOptions(step.on_error || 'continue_to_llm')}</select>
-        </label>
-      </div>
-      ${renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, index)}
-      <details class="launch-editor enrichment-result-contract">
-        <summary>Контракт результата: ${(resultFieldsEntity.available_fields || []).length} полей</summary>
-        ${renderOperationResultFieldRows(resultFieldsEntity)}
-      </details>
       <details class="launch-editor">
-        <summary>Дополнительно</summary>
-        <label>Описание сущности результата
-          <textarea data-enrichment-result-description rows="2">${escapeHtml(step.result_entity_description || '')}</textarea>
-        </label>
+        <summary>Параметры выполнения</summary>
+        <div class="grid two enrichment-editor-main">
+          <label>Название шага
+            <input data-enrichment-step-name value="${escapeHtml(step.step_name || '')}" autocomplete="off" placeholder="Поиск получателя">
+          </label>
+          <label>ReAct-вызов
+            <select data-enrichment-react-call>${toolCatalogOptions(tools, reactCall)}</select>
+            <span class="field-help">Привязка к endpoint-операции берется из меню "Вызовы и интеграции".</span>
+          </label>
+          <label>Действие при ошибке
+            <select data-enrichment-on-error>${enrichmentOnErrorOptions(step.on_error || 'continue_to_llm')}</select>
+            <span class="field-help">Результат шага доступен ниже по ссылке ${escapeHtml(`\${step.${stepId}.react.${reactCall || '<react_call>'}.output.<field>}`)}.</span>
+          </label>
+        </div>
+        ${renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, index)}
       </details>
     </div>
   `;
@@ -2903,16 +2902,32 @@ function enrichmentSourceOptionObjects(slotContext, outputRules, previousSteps, 
     add(`output:${rule.slot_id}`, `Выходной слот: ${slot?.display_name || rule.slot_id}`);
   }
   for (const step of previousSteps || []) {
-    const entityName = step.result_entity_name;
-    if (!entityName) continue;
-    add(`entity:${entityName}`, `Сущность ${entityName}`);
-    for (const field of step.result_fields || []) {
-      if (field.field_id) {
-        add(`entity:${entityName}.${field.field_id}`, `Сущность ${entityName}: ${field.display_name || field.field_id}`);
+    const stepId = normalizeEnrichmentStepId(step.step_id, (previousSteps || []).indexOf(step));
+    const reactCall = step.react_call || '';
+    const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
+    if (reactCall) {
+      for (const parameter of reactParameterNames(tool || {})) {
+        add(
+          `step:${stepId}.react.${reactCall}.input.${parameter}`,
+          `Шаг ${stepId.replace('step', '')}: вход ${reactCall}.${parameter}`,
+        );
+      }
+    }
+    for (const field of stepResultFields(step, tool)) {
+      if (!field.field_id) continue;
+      if (reactCall) {
+        add(
+          `step:${stepId}.react.${reactCall}.output.${field.field_id}`,
+          `Шаг ${stepId.replace('step', '')}: результат ${reactCall}.${field.display_name || field.field_id}`,
+        );
       }
     }
   }
   return Array.from(values, ([value, label]) => ({ value, label }));
+}
+
+function stepResultFields(step = {}, tool = null) {
+  return step.result_fields?.length ? step.result_fields : resultFieldsFromTool(tool);
 }
 
 function enrichmentSourceLabel(sourceRef, slotContext, outputRules, previousSteps) {
@@ -2927,11 +2942,12 @@ function enrichmentSourceLabel(sourceRef, slotContext, outputRules, previousStep
     const known = (outputRules || []).some((rule) => rule.slot_id === value);
     return `${known ? 'Выходной слот' : 'Выходной слот вне списка'}: ${slot?.display_name || value}`;
   }
-  if (source === 'entity') {
-    const [entityName, fieldId] = value.split('.', 2);
-    const step = (previousSteps || []).find((item) => item.result_entity_name === entityName);
-    const field = (step?.result_fields || []).find((item) => item.field_id === fieldId);
-    return fieldId ? `Сущность ${entityName}: ${field?.display_name || fieldId}` : `Сущность ${entityName}`;
+  if (source === 'step') {
+    const match = value.match(/^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$/);
+    if (match) {
+      const [, stepId, reactCall, kind, field] = match;
+      return `Шаг ${stepId.replace('step', '')}: ${kind === 'input' ? 'вход' : 'результат'} ${reactCall}.${field}`;
+    }
   }
   if (source === 'constant') return `Константа: ${value}`;
   if (source === 'secret') return `Секрет: ${value}`;
@@ -2986,12 +3002,11 @@ function renderOperationResultFieldRow(field = {}) {
 
 function resultFieldsFromTool(tool) {
   const names = reactResultFieldNames(tool || {});
-  const properties = schemaProperties(tool?.result_schema || {});
   if (!names.length) {
     return [{ field_id: 'value', display_name: 'Значение', field_type: 'unknown', description: '' }];
   }
   return names.map((name) => {
-    const schema = properties[name] || {};
+    const schema = schemaAtPath(tool?.result_schema || {}, name) || {};
     return {
       field_id: name,
       display_name: schema.title || humanizeTechnicalKey(name),
@@ -3063,8 +3078,8 @@ function renderResolutionOutputRow(rule = {}, slotContext = { slots: [] }, optio
         <select data-resolution-output-required>${booleanOptions(rule.required_for_success ?? false)}</select>
       </label>
       <label>Источник значения
-        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="users.login">
-        <span class="field-help">Поле или путь в именованной сущности результата, например users.login. Итоговое решение принимает LLM-правило.</span>
+        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="login">
+        <span class="field-help">Поле или путь в результате шага, например login или 0.user_login. Итоговое решение принимает LLM-правило.</span>
       </label>
       <label>Если не заполнен
         <select data-resolution-output-fallback>${fallbackOptions}</select>
@@ -3086,13 +3101,16 @@ function defaultResolutionResponseContract() {
 
 function defaultResolutionScriptText(profile = {}) {
   const outputSlots = profileOutputSlotIds(profile).join(', ') || profile.target_slot_id || 'целевой слот';
-  const entityNames = profileEnrichmentSteps(profile)
-    .map((step) => step.result_entity_name)
-    .filter(Boolean)
+  const stepRefs = profileEnrichmentSteps(profile)
+    .map((step, index) => {
+      const stepId = normalizeEnrichmentStepId(step.step_id, index);
+      const reactCall = step.react_call || 'react_call';
+      return `${stepId}.react.${reactCall}.output.<field>`;
+    })
     .join(', ') || 'нет результатов ReAct-вызовов';
   return [
-    'Проанализируй входные слоты и именованные результаты ReAct-вызовов.',
-    `Доступные сущности результата: ${entityNames}.`,
+    'Проанализируй входные слоты и результаты шагов обогащения.',
+    `Доступные ссылки на результаты: ${stepRefs}.`,
     `Заполняй только разрешенные выходные слоты: ${outputSlots}.`,
     'Если результат однозначный, верни решение fill и значения слотов.',
     'Если данных недостаточно или результатов несколько, задай один уточняющий вопрос.',
@@ -3103,20 +3121,14 @@ function defaultResolutionScriptText(profile = {}) {
 function resolutionProfileCreateTemplate(source, profiles) {
   const template = source || profiles[0] || {};
   const targetSlotId = template.target_slot_id || '';
-  const inputSlotIds = profileInputSlotIds(template);
   const outputRules = profileOutputRules(template);
   return {
     profile_id: nextProfileId(template.profile_id || 'profile.custom.attribute', profiles),
-    display_name: '',
-    status: 'active',
-    description: '',
-    target_slot_id: targetSlotId,
-    input_slots: (inputSlotIds.length ? inputSlotIds : [targetSlotId].filter(Boolean)).map((slotId) => ({
-      slot_id: slotId,
-      required_for_operation: true,
-      can_ask_user: true,
-      description: '',
-    })),
+	    display_name: '',
+	    status: 'active',
+	    description: '',
+	    slot_schema_id: template.slot_schema_id || '',
+	    target_slot_id: targetSlotId,
     enrichment_steps: [],
     output_slots_order: outputRules,
     llm_resolution_script: {
@@ -3141,8 +3153,6 @@ function resolutionProfileCreateTemplate(source, profiles) {
       operator_handoff: 0.5,
     },
     max_attempts: template.max_attempts || 1,
-    audit_required: template.audit_required ?? true,
-    log_required: template.log_required ?? true,
   };
 }
 
@@ -3265,6 +3275,8 @@ function scenarioCreateTemplate(source, serviceScenarios) {
     escalation_policy_id: template.escalation_policy_id || '',
     default_channel_id: template.default_channel_id || 'debug',
     allowed_channel_ids: template.allowed_channel_ids || ['messenger_bot', 'service_desk', 'debug'],
+    audit_required: template.audit_required ?? true,
+    log_required: template.log_required ?? true,
     tags: template.tags || [],
   };
 }
@@ -3837,8 +3849,6 @@ function toolMatrixCreateTemplate(source, matrices) {
         endpoint_id: 'mock',
         operation_id: 'check_zabbix_status',
         risk_level: 'low',
-        audit_required: true,
-        log_required: true,
         stop_on_error: true,
         completion_policy: {
           mode: 'sync',
@@ -3906,6 +3916,155 @@ function toolCatalogOptions(tools, selectedToolName) {
     selected,
     'Каталог ReAct-вызовов пуст',
   );
+}
+
+function referenceHelperSlotItems(slots = []) {
+  return (slots || []).map((slot) => ({
+    token: `\${slot.${slot.slot_id}}`,
+    label: slot.display_name ? `${slot.display_name} (${slot.slot_id})` : slot.slot_id,
+    detail: slotOptionLabel(slot, { scenarioCount: 1 }),
+  }));
+}
+
+function referenceHelperReactItems(tools = []) {
+  return (tools || []).map((tool) => ({
+    token: `\${ReAct.${tool.tool_name}}`,
+    label: tool.description ? `${tool.tool_name} — ${tool.description}` : tool.tool_name,
+    detail: tool.display_name || tool.description || tool.tool_name,
+  }));
+}
+
+function referenceHelperParameterItems(tool, kind) {
+  if (!tool?.tool_name) return [];
+  const names = kind === 'input' ? reactParameterNames(tool) : reactResultFieldNames(tool);
+  const properties = kind === 'input' ? schemaProperties(tool.parameters_schema || {}) : schemaProperties(tool.result_schema || {});
+  return names.map((name) => {
+    const schema = kind === 'input' ? (properties[name] || {}) : (schemaAtPath(tool.result_schema || {}, name) || {});
+    const prefix = `paramReAct.${tool.tool_name}.${kind}`;
+    return {
+      token: `\${${prefix}.${name}}`,
+      label: schema.title ? `${schema.title} (${name})` : name,
+      detail: `${tool.tool_name}: ${schema.description || schema.title || name}`,
+    };
+  });
+}
+
+function referenceHelperStepItems(previousSteps = []) {
+  const items = [];
+  for (const [index, step] of (previousSteps || []).entries()) {
+    const stepId = normalizeEnrichmentStepId(step.step_id, index);
+    const reactCall = step.react_call || '';
+    if (!reactCall) continue;
+    const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
+    for (const parameter of reactParameterNames(tool || {})) {
+      items.push({
+        token: `\${step.${stepId}.react.${reactCall}.input.${parameter}}`,
+        label: `Шаг ${index + 1}: вход ${reactCall}.${parameter}`,
+        detail: step.step_name || reactCall,
+      });
+    }
+    for (const field of stepResultFields(step, tool)) {
+      if (!field.field_id) continue;
+      items.push({
+        token: `\${step.${stepId}.react.${reactCall}.output.${field.field_id}}`,
+        label: `Шаг ${index + 1}: результат ${reactCall}.${field.field_id}`,
+        detail: field.description || field.display_name || step.step_name || reactCall,
+      });
+    }
+  }
+  return items;
+}
+
+function isReferenceAutocompleteTextarea(target) {
+  return target?.matches?.(
+    [
+      '[data-slot-autofill-instruction]',
+      '[data-enrichment-configuration-instruction]',
+      '[name="llm_resolution_script_text"]',
+    ].join(','),
+  );
+}
+
+function referenceAutocompleteGroup(title, items) {
+  return (items || []).map((item) => ({ ...item, group: title }));
+}
+
+function referenceAutocompleteItems({ slots = [], tools = [], selectedTool = null, previousSteps = [] } = {}) {
+  const selected = selectedTool?.tool_name ? selectedTool : null;
+  const parameterTools = selected ? [selected] : (tools || []);
+  return [
+    ...referenceAutocompleteGroup('Слоты', referenceHelperSlotItems(slots)),
+    ...referenceAutocompleteGroup('ReAct-вызовы', referenceHelperReactItems(tools)),
+    ...referenceAutocompleteGroup('Входные параметры', parameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'input'))),
+    ...referenceAutocompleteGroup('Поля результата', parameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'output'))),
+    ...referenceAutocompleteGroup('Параметры шагов', referenceHelperStepItems(previousSteps)),
+  ];
+}
+
+function safeEnrichmentStepFromCard(card, index = 0) {
+  if (!card.querySelector('[data-enrichment-step-editor]')) {
+    try {
+      return JSON.parse(card.querySelector('[data-enrichment-step-json]')?.value || '{}');
+    } catch {
+      return {};
+    }
+  }
+  const reactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
+  return {
+    step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
+    step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
+    react_call: reactCall,
+  };
+}
+
+function safeEnrichmentStepsFromForm(form, limit = Infinity) {
+  return Array.from(form?.querySelectorAll('[data-enrichment-step-card]') || [])
+    .slice(0, limit)
+    .map((card, index) => safeEnrichmentStepFromCard(card, index))
+    .filter((step) => step && (step.react_call || step.result_fields?.length));
+}
+
+function referenceAutocompleteContextForTextarea(textarea) {
+  const form = textarea.closest('form');
+  if (!form) return null;
+  if (textarea.matches('[data-slot-autofill-instruction]')) {
+    const schemaId = form.querySelector('[name="slot_schema_id"]')?.value || '';
+    const slotSchema = (state.lastData.slotSchemas || []).find((schema) => schema.slot_schema_id === schemaId) || { slots: [] };
+    const tools = (state.lastData.toolCatalog || []).filter((tool) => tool.action_type === 'read_only');
+    const selectedToolName = form.querySelector('[data-slot-autofill-react-call]')?.value || '';
+    return {
+      slots: slotSchema.slots || [],
+      tools,
+      selectedTool: findToolInCatalog(tools, selectedToolName) || null,
+      previousSteps: [],
+    };
+  }
+  if (textarea.matches('[data-enrichment-configuration-instruction]')) {
+    const card = textarea.closest('[data-enrichment-step-card]');
+    const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
+    const index = Math.max(0, cards.indexOf(card));
+    const slotContext = currentResolutionSlotContextFromForm(form);
+    const steps = safeEnrichmentStepsFromForm(form);
+    const tools = currentResolutionToolsFromForm(form, steps);
+    const selectedToolName = card?.querySelector('[data-enrichment-react-call]')?.value || '';
+    return {
+      slots: slotContext.slots || [],
+      tools,
+      selectedTool: findToolInCatalog(tools, selectedToolName) || null,
+      previousSteps: safeEnrichmentStepsFromForm(form, index),
+    };
+  }
+  if (textarea.matches('[name="llm_resolution_script_text"]')) {
+    const slotContext = currentResolutionSlotContextFromForm(form);
+    const steps = safeEnrichmentStepsFromForm(form);
+    return {
+      slots: slotContext.slots || [],
+      tools: currentResolutionToolsFromForm(form, steps),
+      selectedTool: null,
+      previousSteps: steps,
+    };
+  }
+  return null;
 }
 
 function toolBindingValue(binding) {
@@ -4288,8 +4447,6 @@ function renderLaunchCard(
           <label>Режим исполнения сейчас<select name="execution_mode_${index}">${activeOptionList(activeLaunchExecutionModes, launchMode)}</select></label>
           <label>Риск<select name="risk_level_${index}">${optionList(['low', 'medium', 'high', 'critical', 'blocked'], launch.risk_level)}</select></label>
           <label>Роль согласования<input name="approval_role_${index}" value="${escapeHtml(launch.approval_role || '')}" autocomplete="off"></label>
-          <label>Аудит<select name="audit_required_${index}">${booleanOptions(launch.audit_required)}</select></label>
-          <label>Логирование<select name="log_required_${index}">${booleanOptions(launch.log_required)}</select></label>
           <label>Остановить при ошибке<select name="stop_on_error_${index}">${booleanOptions(launch.stop_on_error)}</select></label>
         </div>`,
       )}
@@ -6019,6 +6176,40 @@ function schemaProperties(schema = {}) {
   return schema.properties || {};
 }
 
+function schemaType(schema = {}) {
+  const value = schema.type;
+  return Array.isArray(value) ? value.find((item) => item !== 'null') : value;
+}
+
+function schemaAtPath(schema = {}, path = '') {
+  if (!path) return schema;
+  let current = schema;
+  for (const rawPart of String(path).replaceAll('[]', '').split('.')) {
+    if (!rawPart) continue;
+    if (schemaType(current) === 'array') {
+      current = current.items || {};
+      if (/^\d+$/.test(rawPart)) continue;
+    }
+    current = schemaProperties(current)[rawPart];
+    if (!current) return null;
+  }
+  return current;
+}
+
+function schemaResultFieldNames(schema = {}, prefix = '') {
+  const names = [];
+  for (const name of Object.keys(schemaProperties(schema))) {
+    const path = prefix ? `${prefix}.${name}` : name;
+    names.push(path);
+    const property = schemaProperties(schema)[name] || {};
+    const nestedSchema = schemaType(property) === 'array' ? (property.items || {}) : property;
+    if (['object', 'array'].includes(schemaType(property)) && Object.keys(schemaProperties(nestedSchema)).length) {
+      names.push(...schemaResultFieldNames(nestedSchema, path));
+    }
+  }
+  return names;
+}
+
 function operationParameterNames(operation = {}, parameterMapping = {}) {
   const schema = operation.request_schema || defaultOperationRequestSchema();
   return Array.from(new Set([
@@ -6038,7 +6229,7 @@ function reactParameterNames(tool = {}) {
 function reactResultFieldNames(tool = {}) {
   return Array.from(new Set([
     ...schemaRequired(tool.result_schema || {}),
-    ...Object.keys(schemaProperties(tool.result_schema || {})),
+    ...schemaResultFieldNames(tool.result_schema || {}),
   ]));
 }
 
@@ -7392,6 +7583,8 @@ async function saveScenarioForm(form) {
     escalation_policy_id: data.get('escalation_policy_id'),
     default_channel_id: data.get('default_channel_id'),
     allowed_channel_ids: selectedValues(form.elements.allowed_channel_ids),
+    audit_required: data.get('audit_required') === 'true',
+    log_required: data.get('log_required') === 'true',
     tags: parseExistingScenarioTags(data.get('existing_tags')),
   });
   await applyScenarioMutation(state.scenarioOperation, scenario);
@@ -7449,12 +7642,6 @@ function resolutionProfileBootstrapTemplate(slot, profiles) {
     status: 'active',
     description: `Черновик профиля разрешения для слота ${slot.slot_id}. Настройте источник данных и LLM-правила в разделе "1. Разрешение атрибутов".`,
     target_slot_id: slot.slot_id,
-    input_slots: [{
-      slot_id: slot.slot_id,
-      required_for_operation: true,
-      can_ask_user: true,
-      description: `Исходное значение слота ${slotName}.`,
-    }],
     enrichment_steps: [],
     output_slots_order: [{
       slot_id: slot.slot_id,
@@ -7485,8 +7672,6 @@ function resolutionProfileBootstrapTemplate(slot, profiles) {
       operator_handoff: 0.5,
     },
     max_attempts: 1,
-    audit_required: true,
-    log_required: true,
   };
   profile.llm_resolution_script.script_text = defaultResolutionScriptText(profile);
   return profile;
@@ -7789,8 +7974,6 @@ async function saveToolLaunchForm(form) {
       endpoint_id: binding.endpoint_id,
       operation_id: binding.operation_id,
       risk_level: value('risk_level'),
-      audit_required: parseBoolean(value('audit_required')),
-      log_required: parseBoolean(value('log_required')),
       stop_on_error: parseBoolean(value('stop_on_error')),
       completion_policy: completionPolicyFromCard(card),
     };
@@ -7925,7 +8108,6 @@ async function saveInteractionChannelForm(form) {
     incomplete_discussion_action: parseChannelAction(data, 'incomplete_discussion_action'),
     escalation_action: parseChannelAction(data, 'escalation_action'),
     action_profiles: parseChannelProfileCards(form),
-    audit_required: parseBoolean(data.get('audit_required')),
     enabled: parseBoolean(data.get('enabled')),
   };
   await applyInteractionChannelMutation(state.interactionChannelOperation, channel);
@@ -8169,30 +8351,27 @@ async function saveResolutionProfileForm(form) {
   if (!/^[a-z][a-z0-9_.-]*$/.test(targetSlotId)) {
     throw new Error('Ключ целевого слота должен начинаться с латинской буквы и содержать только латиницу, цифры, _, - или точку.');
   }
-  const inputSlotIds = formList(data, 'input_slots');
-  if (!inputSlotIds.length && targetSlotId) {
-    inputSlotIds.push(targetSlotId);
-  }
   const outputRules = parseResolutionOutputRules(form, targetSlotId);
   const outputSlotIds = outputRules.map((rule) => rule.slot_id);
+  const slotContext = currentResolutionSlotContextFromForm(form);
+  const availableSlotIds = new Set([
+    ...outputSlotIds,
+    targetSlotId,
+    ...(slotContext.slots || []).map((slot) => slot.slot_id),
+  ].filter(Boolean));
   const clarificationSlots = formList(data, 'clarification_slots')
-    .filter((slotId) => inputSlotIds.includes(slotId) || outputSlotIds.includes(slotId));
+    .filter((slotId) => availableSlotIds.has(slotId));
   const handoffSlots = formList(data, 'handoff_package')
-    .filter((slotId) => inputSlotIds.includes(slotId) || outputSlotIds.includes(slotId));
+    .filter((slotId) => availableSlotIds.has(slotId));
   const enrichmentSteps = parseEnrichmentSteps(form);
   const existingProfile = currentResolutionProfileById(String(data.get('profile_id') || '').trim());
   const profile = {
     profile_id: String(data.get('profile_id') || '').trim(),
-    display_name: String(data.get('display_name') || '').trim(),
-    status: existingProfile?.status || 'active',
-    description: String(data.get('description') || '').trim(),
-    target_slot_id: targetSlotId,
-    input_slots: inputSlotIds.map((slotId) => ({
-      slot_id: slotId,
-      required_for_operation: true,
-      can_ask_user: true,
-      description: '',
-    })),
+	    display_name: String(data.get('display_name') || '').trim(),
+	    status: existingProfile?.status || 'active',
+	    description: String(data.get('description') || '').trim(),
+	    slot_schema_id: slotContext.schema?.slot_schema_id || String(data.get('slot_schema_id') || '').trim(),
+	    target_slot_id: targetSlotId,
     enrichment_steps: enrichmentSteps,
     output_slots_order: outputRules,
     llm_resolution_script: {
@@ -8207,8 +8386,6 @@ async function saveResolutionProfileForm(form) {
       fallback_action: String(data.get('fallback_action') || 'ask_user').trim(),
     },
     max_attempts: parseInt(data.get('max_attempts'), 10),
-    audit_required: parseBoolean(data.get('audit_required')),
-    log_required: parseBoolean(data.get('log_required')),
   };
   if (!profile.llm_resolution_script.script_text) {
     profile.llm_resolution_script.script_text = defaultResolutionScriptText(profile);
@@ -8242,38 +8419,27 @@ async function deleteResolutionProfileForm() {
 }
 
 async function saveSlotAutofillProfileForm(form) {
-  const data = new FormData(form);
-  const output = parseSlotAutofillOutputRows(form);
+  const draft = slotAutofillDraftFromForm(form);
+  const existingProfile = currentSlotAutofillProfileById(draft.profile_id);
+  let output = { mappings: draft.output_mapping || [], newSlots: [] };
+  let profile = draft;
+  if (slotAutofillInstructionNeedsCompile(draft, existingProfile)) {
+    const compiled = await compileSlotAutofillDraft(draft);
+    const validationErrors = compiled.result.validation_errors || [];
+    if (validationErrors.length) {
+      throw new Error(`Инструкция не преобразована в структуру: ${validationErrors.join('; ')}`);
+    }
+    profile = compiled.profile;
+    output = { mappings: profile.output_mapping || [], newSlots: [] };
+  } else {
+    output = parseSlotAutofillOutputRows(form);
+    profile = {
+      ...draft,
+      output_mapping: output.mappings,
+    };
+  }
   if (!output.mappings.length) {
     throw new Error('Добавьте хотя бы одно поле результата, которое заполняет слот.');
-  }
-  const profileId = String(data.get('profile_id') || '').trim();
-  const existingProfile = currentSlotAutofillProfileById(profileId);
-  const profile = {
-    profile_id: profileId,
-    display_name: String(data.get('display_name') || '').trim(),
-    status: existingProfile?.status || 'active',
-    description: String(data.get('description') || '').trim(),
-    slot_schema_id: String(data.get('slot_schema_id') || '').trim(),
-    enabled: existingProfile?.enabled ?? true,
-    react_call: String(data.get('react_call') || '').trim(),
-    run_order: parseInt(data.get('run_order') || '1', 10),
-    accept_policy: String(data.get('accept_policy') || 'single_result').trim(),
-    input_mapping: parseSlotAutofillInputMapping(form),
-    output_mapping: output.mappings,
-    on_no_result: String(data.get('on_no_result') || 'continue').trim(),
-    on_ambiguous_result: String(data.get('on_ambiguous_result') || 'ask_client').trim(),
-  };
-  const configurationInstruction = String(data.get('configuration_instruction') || '').trim();
-  if (configurationInstruction) {
-    profile.configuration_instruction = configurationInstruction;
-  }
-  const generatedMetadata = String(data.get('generated_structure_metadata') || '').trim();
-  if (generatedMetadata) {
-    const parsedMetadata = parseJsonField(generatedMetadata, 'Метаданные сформированной структуры');
-    if (Object.keys(parsedMetadata).length) {
-      profile.generated_structure_metadata = parsedMetadata;
-    }
   }
   if (!profile.profile_id || !profile.display_name || !profile.slot_schema_id || !profile.react_call) {
     throw new Error('Заполните название, схему слотов и ReAct-вызов.');
@@ -8387,33 +8553,72 @@ function slotAutofillDraftFromForm(form) {
   };
 }
 
-async function compileSlotAutofillProfile(target) {
-  const form = target.closest('form');
-  if (!form) return;
-  const draft = slotAutofillDraftFromForm(form);
+function slotAutofillInstructionNeedsCompile(draft, existingProfile) {
+  const instruction = String(draft.configuration_instruction || '').trim();
+  if (!instruction) {
+    return false;
+  }
+  const sourceInstruction = String(draft.generated_structure_metadata?.source_instruction || '').trim();
+  if (sourceInstruction) {
+    return sourceInstruction !== instruction;
+  }
+  if (state.slotAutofillOperation === 'create') {
+    return true;
+  }
+  return String(existingProfile?.configuration_instruction || '').trim() !== instruction;
+}
+
+function slotAutofillCompileReactCall(draft) {
+  const instruction = String(draft.configuration_instruction || '').toLowerCase();
+  const mentionedTool = (state.lastData.toolCatalog || [])
+    .filter((tool) => tool.action_type === 'read_only')
+    .find((tool) => {
+      const toolName = String(tool.tool_name || '').toLowerCase();
+      return toolName && instruction.includes(toolName);
+    });
+  return mentionedTool ? '' : draft.react_call;
+}
+
+async function compileSlotAutofillDraft(draft) {
   if (!draft.configuration_instruction) {
     throw new Error('Заполните инструкцию настройки профиля автозаполнения.');
   }
-  const status = form.querySelector('[data-slot-autofill-compile-status]');
-  if (status) {
-    status.textContent = 'Формирование структуры...';
-  }
+  const compileReactCall = slotAutofillCompileReactCall(draft);
   const result = await api('/admin/config-assistant/slot-autofill/compile', {
     method: 'POST',
     body: JSON.stringify({
       operator_id: state.actorId,
       instruction: draft.configuration_instruction,
       slot_schema_id: draft.slot_schema_id,
-      react_call: draft.react_call,
-      target_slots: (draft.output_mapping || []).map((item) => item.target_slot),
+      react_call: compileReactCall || null,
     }),
   });
   const structure = result.structure || {};
-  const profile = {
-    ...draft,
-    ...structure,
-    generated_structure_metadata: structure.generated_structure_metadata || draft.generated_structure_metadata || {},
+  const generatedMetadata = {
+    ...(draft.generated_structure_metadata || {}),
+    ...(structure.generated_structure_metadata || {}),
+    source_instruction: draft.configuration_instruction,
   };
+  return {
+    result,
+    profile: {
+      ...draft,
+      ...structure,
+      configuration_instruction: draft.configuration_instruction,
+      generated_structure_metadata: generatedMetadata,
+    },
+  };
+}
+
+async function compileSlotAutofillProfile(target) {
+  const form = target.closest('form');
+  if (!form) return;
+  const draft = slotAutofillDraftFromForm(form);
+  const status = form.querySelector('[data-slot-autofill-compile-status]');
+  if (status) {
+    status.textContent = 'Формирование структуры...';
+  }
+  const { result, profile } = await compileSlotAutofillDraft(draft);
   const slotSchemas = state.lastData.slotSchemas || [];
   const scenarios = state.lastData.serviceScenarios || [];
   const tools = (state.lastData.toolCatalog || []).filter((tool) => tool.action_type === 'read_only');
@@ -8425,14 +8630,21 @@ async function compileSlotAutofillProfile(target) {
     scenarios,
     tools,
   }).trim();
-  form.replaceWith(wrapper.firstElementChild);
+  const nextForm = wrapper.firstElementChild;
+  form.replaceWith(nextForm);
   syncAllSlotAutofillOutputRows();
   syncAllSlotAutofillSourceRows();
   const issues = [...(result.validation_errors || []), ...(result.warnings || [])];
+  const nextStatus = nextForm?.querySelector?.('[data-slot-autofill-compile-status]');
+  if (nextStatus) {
+    nextStatus.textContent = issues.length
+      ? 'Структура обновлена с замечаниями. Проверьте поля перед сохранением.'
+      : 'Структура обновлена из инструкции. Сохраните профиль.';
+  }
   setNotice(
     issues.length
       ? `Структура сформирована с замечаниями: ${issues.join('; ')}`
-      : 'Структура профиля автозаполнения сформирована. Проверьте и сохраните профиль.',
+      : 'Структура профиля автозаполнения обновлена из инструкции. Проверьте и сохраните профиль.',
     issues.length ? 'error' : 'success',
   );
 }
@@ -8484,6 +8696,8 @@ function compactScenarioPayload(scenario) {
     allowed_channel_ids: scenario.allowed_channel_ids?.length
       ? scenario.allowed_channel_ids
       : [String(scenario.default_channel_id || '').trim()].filter(Boolean),
+    audit_required: Boolean(scenario.audit_required),
+    log_required: Boolean(scenario.log_required),
   };
   if (scenario.tags?.length) {
     result.tags = scenario.tags;
@@ -9245,20 +9459,14 @@ function parseEnrichmentStepCard(card, index) {
     }
   }
   const reactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
-  const entityName = card.querySelector('[data-enrichment-result-entity]')?.value?.trim() || '';
   if (!reactCall) {
     throw new Error(`В шаге обогащения ${index + 1} выберите ReAct-вызов.`);
   }
-  if (!entityName || !/^[a-z][a-z0-9_.-]*$/.test(entityName)) {
-    throw new Error(`В шаге обогащения ${index + 1} укажите корректное имя сущности результата.`);
-  }
   return {
+    step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
     react_call: reactCall,
     parameter_mapping: parseEnrichmentParameterMapping(card),
-    result_entity_name: entityName,
-    result_entity_description: card.querySelector('[data-enrichment-result-description]')?.value?.trim() || 'Результат ReAct-вызова.',
-    result_fields: parseOperationResultFields(card),
     on_error: card.querySelector('[data-enrichment-on-error]')?.value || 'continue_to_llm',
     configuration_instruction: card.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
     generated_structure_metadata: parseJsonField(
@@ -9270,21 +9478,19 @@ function parseEnrichmentStepCard(card, index) {
 
 function parseEnrichmentSteps(form) {
   const steps = [];
-  const seenEntities = new Set();
   const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
   for (const [index, card] of cards.entries()) {
-    const step = parseEnrichmentStepCard(card, index);
+    const parsedStep = parseEnrichmentStepCard(card, index);
+    const step = {
+      ...parsedStep,
+      step_id: normalizeEnrichmentStepId(parsedStep.step_id, index),
+    };
+    delete step.result_fields;
+    delete step.result_entity_name;
+    delete step.result_entity_description;
     if (!step.react_call) {
       throw new Error(`В шаге обогащения ${index + 1} выберите ReAct-вызов.`);
     }
-    const entityName = step.result_entity_name || '';
-    if (!entityName || !/^[a-z][a-z0-9_.-]*$/.test(entityName)) {
-      throw new Error(`В шаге обогащения ${index + 1} укажите корректное имя сущности результата.`);
-    }
-    if (seenEntities.has(entityName)) {
-      throw new Error(`Сущность результата дублируется: ${entityName}.`);
-    }
-    seenEntities.add(entityName);
     steps.push(step);
   }
   return steps;
@@ -9387,6 +9593,233 @@ function removeSlotAutofillOutputRow(target) {
   row.remove();
 }
 
+function referenceAutocompletePopup() {
+  let popup = document.querySelector('[data-reference-autocomplete]');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.className = 'reference-autocomplete';
+    popup.dataset.referenceAutocomplete = 'true';
+    popup.hidden = true;
+    document.body.appendChild(popup);
+  }
+  return popup;
+}
+
+function activeReferenceFragment(textarea) {
+  const cursor = textarea.selectionStart ?? 0;
+  if (cursor !== (textarea.selectionEnd ?? cursor)) {
+    return null;
+  }
+  const before = textarea.value.slice(0, cursor);
+  const start = before.lastIndexOf('${');
+  if (start < 0) {
+    return null;
+  }
+  const query = before.slice(start + 2);
+  if (query.includes('}') || /[\s"'«»]/.test(query)) {
+    return null;
+  }
+  return { start, end: cursor, query };
+}
+
+function filterReferenceAutocompleteItems(items, query) {
+  const normalized = String(query || '').toLowerCase();
+  const result = normalized
+    ? items.filter((item) => {
+      const tokenText = String(item.token || '').replace(/^\$\{|\}$/g, '').toLowerCase();
+      const searchText = `${tokenText} ${item.label || ''} ${item.detail || ''} ${item.group || ''}`.toLowerCase();
+      return searchText.includes(normalized);
+    })
+    : items;
+  return result.slice(0, 80);
+}
+
+function positionReferenceAutocomplete(textarea, popup) {
+  const rect = textarea.getBoundingClientRect();
+  const width = Math.min(Math.max(280, rect.width), 440, window.innerWidth - 16);
+  let left = rect.left;
+  let top = rect.bottom + 4;
+  if (window.innerWidth > 760) {
+    const style = window.getComputedStyle(textarea);
+    const fontSize = Number.parseFloat(style.fontSize) || 13;
+    const lineHeight = Number.parseFloat(style.lineHeight) || fontSize * 1.45;
+    const paddingLeft = Number.parseFloat(style.paddingLeft) || 10;
+    const paddingTop = Number.parseFloat(style.paddingTop) || 8;
+    const before = textarea.value.slice(0, textarea.selectionStart ?? 0);
+    const lines = before.split('\n');
+    const currentLine = lines[lines.length - 1] || '';
+    const charWidth = Math.max(7, fontSize * 0.55);
+    left = rect.left + paddingLeft + Math.min(currentLine.length * charWidth, Math.max(0, rect.width - width - 12));
+    top = rect.top + paddingTop + (lines.length * lineHeight) - textarea.scrollTop + 4;
+  }
+  if (top + 280 > window.innerHeight) {
+    top = Math.max(8, rect.top - 284);
+  }
+  left = Math.min(Math.max(8, left), Math.max(8, window.innerWidth - width - 8));
+  popup.style.left = `${left}px`;
+  popup.style.top = `${top}px`;
+  popup.style.width = `${width}px`;
+}
+
+function renderReferenceAutocomplete(textarea) {
+  if (!isReferenceAutocompleteTextarea(textarea)) {
+    hideReferenceAutocomplete();
+    return;
+  }
+  const fragment = activeReferenceFragment(textarea);
+  if (!fragment) {
+    hideReferenceAutocomplete();
+    return;
+  }
+  const context = referenceAutocompleteContextForTextarea(textarea);
+  const allItems = referenceAutocompleteItems(context || {});
+  const items = filterReferenceAutocompleteItems(allItems, fragment.query);
+  const popup = referenceAutocompletePopup();
+  const selectedIndex = Math.min(
+    state.referenceAutocomplete?.selectedIndex || 0,
+    Math.max(0, items.length - 1),
+  );
+  state.referenceAutocomplete = {
+    textarea,
+    start: fragment.start,
+    selectedIndex,
+    items,
+  };
+  if (!items.length) {
+    popup.innerHTML = '<div class="reference-autocomplete-empty">Нет совпадений</div>';
+  } else {
+    let previousGroup = '';
+    popup.innerHTML = `
+      <div class="reference-autocomplete-list" role="listbox">
+        ${items.map((item, index) => {
+          const groupHeader = item.group !== previousGroup
+            ? `<div class="reference-autocomplete-group">${escapeHtml(item.group || 'Ссылки')}</div>`
+            : '';
+          previousGroup = item.group;
+          return `
+            ${groupHeader}
+            <button type="button" class="reference-autocomplete-item ${index === selectedIndex ? 'selected' : ''}" data-action="reference-autocomplete-select" data-reference-autocomplete-index="${index}" role="option" aria-selected="${index === selectedIndex ? 'true' : 'false'}">
+              <code>${escapeHtml(item.token)}</code>
+              <span>${escapeHtml(item.label || item.token)}</span>
+            </button>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+  popup.hidden = false;
+  positionReferenceAutocomplete(textarea, popup);
+}
+
+function hideReferenceAutocomplete() {
+  const popup = document.querySelector('[data-reference-autocomplete]');
+  if (popup) {
+    popup.hidden = true;
+  }
+  state.referenceAutocomplete = {
+    textarea: null,
+    start: -1,
+    selectedIndex: 0,
+    items: [],
+  };
+}
+
+function setReferenceAutocompleteIndex(index) {
+  const popup = referenceAutocompletePopup();
+  const autocomplete = state.referenceAutocomplete || {};
+  const items = autocomplete.items || [];
+  if (!items.length || popup.hidden) return;
+  const nextIndex = ((index % items.length) + items.length) % items.length;
+  state.referenceAutocomplete.selectedIndex = nextIndex;
+  popup.querySelectorAll('[data-reference-autocomplete-index]').forEach((button) => {
+    const selected = Number(button.dataset.referenceAutocompleteIndex) === nextIndex;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (selected) {
+      button.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function insertReferenceAutocompleteItem(index = state.referenceAutocomplete?.selectedIndex || 0) {
+  const autocomplete = state.referenceAutocomplete || {};
+  const textarea = autocomplete.textarea;
+  const item = (autocomplete.items || [])[index];
+  if (!textarea || !item) return;
+  const end = textarea.selectionStart ?? textarea.value.length;
+  const prefix = textarea.value.slice(0, autocomplete.start);
+  const suffix = textarea.value.slice(end);
+  textarea.value = `${prefix}${item.token}${suffix}`;
+  const cursor = prefix.length + item.token.length;
+  textarea.focus();
+  textarea.setSelectionRange(cursor, cursor);
+  hideReferenceAutocomplete();
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function handleReferenceAutocompleteKeydown(event) {
+  const textarea = event.target;
+  if (!isReferenceAutocompleteTextarea(textarea)) return false;
+  const popup = document.querySelector('[data-reference-autocomplete]');
+  const active = state.referenceAutocomplete?.textarea === textarea && popup && !popup.hidden;
+  if (!active) return false;
+  const items = state.referenceAutocomplete?.items || [];
+  if (!items.length) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      hideReferenceAutocomplete();
+      return true;
+    }
+    return false;
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    setReferenceAutocompleteIndex((state.referenceAutocomplete.selectedIndex || 0) + 1);
+    return true;
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    setReferenceAutocompleteIndex((state.referenceAutocomplete.selectedIndex || 0) - 1);
+    return true;
+  }
+  if (event.key === 'Enter' || event.key === 'Tab') {
+    event.preventDefault();
+    insertReferenceAutocompleteItem();
+    return true;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    hideReferenceAutocomplete();
+    return true;
+  }
+  return false;
+}
+
+function refreshSlotAutofillEditorAfterReactCallChange(target) {
+  const form = target.closest('form');
+  if (!form) return;
+  const draft = slotAutofillDraftFromForm(form);
+  draft.react_call = target.value;
+  draft.input_mapping = {};
+  draft.output_mapping = [];
+  const slotSchemas = state.lastData.slotSchemas || [];
+  const scenarios = state.lastData.serviceScenarios || [];
+  const tools = (state.lastData.toolCatalog || []).filter((tool) => tool.action_type === 'read_only');
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderSlotAutofillEditor({
+    profile: draft,
+    profiles: state.lastData.slotAutofillProfiles || [],
+    slotSchemas,
+    scenarios,
+    tools,
+  }).trim();
+  const nextForm = wrapper.firstElementChild;
+  form.replaceWith(nextForm);
+  nextForm.querySelector('details.launch-editor')?.setAttribute('open', 'open');
+  syncAllSlotAutofillOutputRows();
+  syncAllSlotAutofillSourceRows();
+}
+
 function addResolutionResultFieldRow(target) {
   const container = target?.closest('[data-enrichment-step-card]')?.querySelector('[data-resolution-result-field-list]')
     || document.querySelector('[data-resolution-result-field-list]');
@@ -9406,7 +9839,7 @@ function removeResolutionResultFieldRow(target) {
   if (!row) return;
   const container = row.parentElement;
   if (container && container.querySelectorAll('[data-resolution-result-field-row]').length <= 1) {
-    throw new Error('Оставьте хотя бы одно поле результата сущности.');
+    throw new Error('Оставьте хотя бы одно поле результата.');
   }
   row.remove();
 }
@@ -9439,6 +9872,7 @@ function currentResolutionSlotContextFromForm(form) {
   return buildResolutionSlotContext(
     {
       profile_id: profileId,
+      slot_schema_id: form?.querySelector('[name="slot_schema_id"]')?.value?.trim() || '',
       target_slot_id: targetSlotId,
     },
     state.lastData.slotSchemas || [],
@@ -9446,20 +9880,30 @@ function currentResolutionSlotContextFromForm(form) {
   );
 }
 
+function currentResolutionToolsFromForm(form, steps = []) {
+  const slotContext = currentResolutionSlotContextFromForm(form);
+  return toolsForScenario(
+    state.lastData.toolCatalog || [],
+    state.lastData.serviceScenarios || [],
+    state.lastData.toolMatrices || [],
+    slotContext.selectedScenario,
+    (steps || []).map((step) => step.react_call),
+  );
+}
+
 function addEnrichmentStep(target) {
   const form = target.closest('form');
   const container = form?.querySelector('[data-enrichment-step-list]');
   if (!container) return;
-  const tools = state.lastData.toolCatalog || [];
   const steps = currentEnrichmentStepsFromDom(form);
+  const tools = currentResolutionToolsFromForm(form, steps);
   const index = steps.length;
   const tool = tools[0] || null;
   steps.push({
+    step_id: normalizeEnrichmentStepId('', index),
     step_name: '',
     react_call: tool?.tool_name || '',
     parameter_mapping: {},
-    result_entity_name: `entity_${index + 1}`,
-    result_entity_description: '',
     result_fields: resultFieldsFromTool(tool),
     on_error: 'continue_to_llm',
   });
@@ -9493,11 +9937,8 @@ function refreshEnrichmentStepCard(target) {
   const index = cards.indexOf(card);
   if (index < 0) return;
   const steps = currentEnrichmentStepsFromDom(form);
-  const step = { ...steps[index], react_call: target.value };
+  const step = { ...steps[index], step_id: normalizeEnrichmentStepId(steps[index]?.step_id, index), react_call: target.value };
   const tool = findToolInCatalog(state.lastData.toolCatalog || [], step.react_call);
-  if (!step.result_entity_name || /^entity_\d+$/.test(step.result_entity_name)) {
-    step.result_entity_name = inferEntityNameFromTool(tool, index);
-  }
   step.result_fields = resultFieldsFromTool(tool);
   steps[index] = step;
   state.resolutionEnrichmentEditIndex = index;
@@ -9507,11 +9948,12 @@ function refreshEnrichmentStepCard(target) {
 function rerenderEnrichmentSteps(form, steps) {
   const container = form?.querySelector('[data-enrichment-step-list]');
   if (!container) return;
+  const slotContext = currentResolutionSlotContextFromForm(form);
   container.innerHTML = renderEnrichmentStepCards(
     steps,
-    currentResolutionSlotContextFromForm(form),
+    slotContext,
     currentResolutionOutputRulesFromDom(form),
-    state.lastData.toolCatalog || [],
+    currentResolutionToolsFromForm(form, steps),
   );
 }
 
@@ -9528,6 +9970,7 @@ function readEnrichmentStepsForCompile(form, activeIndex) {
         metadata = {};
       }
       steps.push({
+        step_id: item.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
         step_name: item.querySelector('[data-enrichment-step-name]')?.value?.trim() || '',
         react_call: item.querySelector('[data-enrichment-react-call]')?.value?.trim() || '',
         configuration_instruction: item.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
@@ -9792,8 +10235,6 @@ function addLaunchCard() {
       endpoint_id: binding.endpoint_id || '',
       operation_id: binding.operation_id || '',
       risk_level: 'low',
-      audit_required: true,
-      log_required: true,
       stop_on_error: true,
     },
     index,
@@ -10384,6 +10825,8 @@ function initEvents() {
         addModelProviderCard();
       } else if (action === 'model-provider-remove') {
         removeModelProviderCard(target);
+      } else if (action === 'reference-autocomplete-select') {
+        insertReferenceAutocompleteItem(Number(target.dataset.referenceAutocompleteIndex || 0));
       } else if (action === 'slot-add') {
         addSlotCard();
       } else if (action === 'slot-remove') {
@@ -10444,6 +10887,33 @@ function initEvents() {
     }
   });
 
+  document.addEventListener('mousedown', (event) => {
+    const popup = document.querySelector('[data-reference-autocomplete]');
+    if (popup?.contains(event.target) || isReferenceAutocompleteTextarea(event.target)) {
+      return;
+    }
+    hideReferenceAutocomplete();
+  });
+
+  document.addEventListener('click', (event) => {
+    if (isReferenceAutocompleteTextarea(event.target)) {
+      renderReferenceAutocomplete(event.target);
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    handleReferenceAutocompleteKeydown(event);
+  });
+
+  document.addEventListener('keyup', (event) => {
+    if (
+      isReferenceAutocompleteTextarea(event.target)
+      && ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)
+    ) {
+      renderReferenceAutocomplete(event.target);
+    }
+  });
+
   document.addEventListener('change', async (event) => {
     const target = event.target;
     if (target?.matches?.('[data-confidence-override-enabled]')) {
@@ -10501,6 +10971,10 @@ function initEvents() {
       syncSlotCardFillMethod(target.closest('[data-slot-card]'));
       return;
     }
+    if (target?.matches?.('[data-slot-autofill-react-call]')) {
+      refreshSlotAutofillEditorAfterReactCallChange(target);
+      return;
+    }
     if (target?.matches?.('[data-slot-autofill-output-action]')) {
       syncSlotAutofillOutputRow(target.closest('[data-slot-autofill-output-row]'));
       return;
@@ -10538,6 +11012,10 @@ function initEvents() {
 
   document.addEventListener('input', (event) => {
     const target = event.target;
+    if (isReferenceAutocompleteTextarea(target)) {
+      renderReferenceAutocomplete(target);
+      return;
+    }
     if (target?.matches?.('[data-operation-contract-control], [data-operation-mock-control]')) {
       updateEndpointOperationJsonPreview(target.closest('[data-endpoint-operation-card]'));
     }

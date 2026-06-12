@@ -82,9 +82,8 @@ for expected in [
     "Обогащение контекста",
     "Добавить шаг обогащения",
     "enrichment-step-table",
-    "Имя сущности результата",
-    "entity:&lt;сущность&gt;.&lt;поле&gt;",
-    "Контракт результата",
+    "Параметры шагов",
+    "Доступные ссылки на результаты",
     "Выходные слоты и порядок заполнения",
     "LLM-правила выбора, заполнения и уточнения",
     "Пакет эскалации оператору",
@@ -96,6 +95,12 @@ for expected in [
     "Имя параметра ReAct",
 ]:
     assert expected in admin_js, expected
+for removed in [
+    "Имя сущности результата",
+    "entity:&lt;сущность&gt;.&lt;поле&gt;",
+    "Контракт результата",
+]:
+    assert removed not in admin_js, removed
 for expected in [
     "resolution_state",
     "Обогащение контекста",
@@ -109,8 +114,8 @@ profiles_active = request("/admin/config/active/attribute_resolution_profiles")
 payload = profiles_active["payload"]
 login_profile = next(profile for profile in payload["profiles"] if profile["profile_id"] == "profile.password_reset.login_from_ad")
 assert login_profile["enrichment_steps"][0]["react_call"] == "search_ad_users", login_profile
-assert login_profile["enrichment_steps"][0]["result_entity_name"] == "users", login_profile
-assert any(field["field_id"] == "user_id" for field in login_profile["enrichment_steps"][0]["result_fields"]), login_profile
+assert login_profile["enrichment_steps"][0]["step_id"] == "step1", login_profile
+assert "result_entity_name" not in login_profile["enrichment_steps"][0], login_profile
 assert any(rule["slot_id"] == "user_id" and rule["source_hint"] == "user_id" for rule in login_profile["output_slots_order"]), login_profile
 assert "user_login" in login_profile["human_resolution_policy"]["clarification_slots"], login_profile
 assert login_profile["confidence_thresholds"]["auto_fill"] >= login_profile["confidence_thresholds"]["clarification"], login_profile

@@ -154,6 +154,20 @@ label {
   font-weight: var(--font-weight-semibold);
 }
 
+.checkbox-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-height);
+  color: var(--text);
+}
+
+.checkbox-line input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
 .admin-shell {
   display: grid;
   grid-template-columns: 252px minmax(0, 1fr);
@@ -479,6 +493,74 @@ label {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.35;
+}
+
+.reference-autocomplete {
+  position: fixed;
+  z-index: 90;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-section);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 6px;
+}
+
+.reference-autocomplete-list {
+  display: grid;
+  gap: 2px;
+}
+
+.reference-autocomplete-group {
+  padding: 6px 8px 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.reference-autocomplete-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  justify-items: start;
+  min-height: 38px;
+  padding: 6px 8px;
+  border-color: transparent;
+  text-align: left;
+  background: transparent;
+}
+
+.reference-autocomplete-item:hover,
+.reference-autocomplete-item.selected {
+  border-color: var(--line-strong);
+  background: var(--panel-soft);
+}
+
+.reference-autocomplete-item code,
+.reference-autocomplete-item span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reference-autocomplete-item code {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.reference-autocomplete-item span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.reference-autocomplete-empty {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
 }
 
 .boolean-flag {
@@ -886,7 +968,7 @@ label {
 .enrichment-step-header,
 .enrichment-step-row {
   display: grid;
-  grid-template-columns: 42px minmax(170px, 1.2fr) minmax(180px, 1.2fr) minmax(120px, 0.8fr) minmax(150px, 0.9fr) minmax(150px, auto);
+  grid-template-columns: 42px minmax(190px, 1.3fr) minmax(220px, 1.4fr) minmax(160px, 0.9fr) minmax(150px, auto);
   gap: 8px;
   align-items: center;
 }

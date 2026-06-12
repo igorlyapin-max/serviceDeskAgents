@@ -28,7 +28,6 @@
           "incomplete_discussion_action",
           "escalation_action",
           "action_profiles",
-          "audit_required",
           "enabled"
         ],
         "properties": {
@@ -149,9 +148,6 @@
                 }
               }
             }
-          },
-          "audit_required": {
-            "type": "boolean"
           },
           "enabled": {
             "type": "boolean"

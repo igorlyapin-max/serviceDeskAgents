@@ -74,6 +74,10 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
     "min_extraction_confidence": 0.70,
 }
 
+STEP_SOURCE_REF_RE = re.compile(
+    r"^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$"
+)
+
 DEFAULT_CLIENT_WAITING_POLICY = {
     "auto_close_requires_client_confirmation": True,
     "pause_sla_on_client_wait": True,
@@ -207,6 +211,8 @@ def schema_at_path(schema: dict[str, Any] | None, path: str | None) -> dict[str,
         if current_type == "array":
             item_schema = current.get("items", {}) if isinstance(current, dict) else {}
             current = item_schema if isinstance(item_schema, dict) else None
+            if raw_part.isdigit():
+                continue
         if not current:
             return None
         properties = schema_properties(current)
@@ -214,6 +220,43 @@ def schema_at_path(schema: dict[str, Any] | None, path: str | None) -> dict[str,
         if current is None:
             return None
     return current
+
+
+def schema_declares_path(
+    schema: dict[str, Any] | None,
+    path: str | None,
+    *,
+    allow_nested_additional: bool = False,
+) -> bool:
+    if not isinstance(schema, dict) or not path:
+        return False
+    current: dict[str, Any] | None = schema
+    traversed_explicit = schema_type(current) == "array"
+    for raw_part in str(path).replace("[]", "").split("."):
+        if not raw_part:
+            continue
+        current_type = schema_type(current)
+        if current_type == "array":
+            item_schema = current.get("items", {}) if isinstance(current, dict) else {}
+            current = item_schema if isinstance(item_schema, dict) else None
+            traversed_explicit = True
+            if raw_part.isdigit():
+                continue
+        if not current:
+            return False
+        properties = schema_properties(current)
+        if raw_part in properties:
+            current = properties[raw_part]
+            traversed_explicit = True
+            continue
+        additional = current.get("additionalProperties") if isinstance(current, dict) else None
+        if allow_nested_additional and traversed_explicit and additional is True:
+            return True
+        if allow_nested_additional and traversed_explicit and isinstance(additional, dict):
+            current = additional
+            continue
+        return False
+    return True
 
 
 def schemas_are_type_compatible(source_schema: dict[str, Any] | None, target_schema: dict[str, Any] | None) -> bool:
@@ -504,6 +547,8 @@ CANONICAL_OPERATION_RESPONSE_SCHEMAS = {
         ["object_found", "message"],
         {
             "object_found": {"type": "boolean"},
+            "device_model": string_property("Модель устройства"),
+            "subnet": string_property("Подсеть"),
             "message": string_property(),
         },
     ),
@@ -525,7 +570,23 @@ CANONICAL_OPERATION_RESPONSE_SCHEMAS = {
         ["candidate_count", "users", "message"],
         {
             "candidate_count": {"type": "integer", "minimum": 0},
-            "users": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "users": {
+                "type": "array",
+                "items": object_schema(
+                    [],
+                    {
+                        "login": string_property("Логин пользователя"),
+                        "user_id": string_property("ID пользователя"),
+                        "display_name": string_property("Отображаемое имя"),
+                        "department": string_property("Подразделение"),
+                        "device_name": string_property("Основное устройство"),
+                        "email": string_property("Email"),
+                        "title": string_property("Должность"),
+                        "employee_number": string_property("Табельный номер"),
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                ),
+            },
             "message": string_property(),
         },
     ),
@@ -921,12 +982,12 @@ def resolved_dry_run_parameters(
     *,
     provided: dict[str, Any],
     slot_values: dict[str, Any] | None = None,
-    enrichment_entities: dict[str, Any] | None = None,
+    enrichment_step_results: dict[str, Any] | None = None,
     output_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     parameters: dict[str, Any] = {}
     slots = slot_values or {}
-    entities = enrichment_entities or {}
+    step_results = enrichment_step_results or {}
     outputs = output_values or {}
     for parameter, source_ref in (mapping or {}).items():
         source, separator, source_value = str(source_ref).partition(":")
@@ -941,15 +1002,25 @@ def resolved_dry_run_parameters(
                 value = slot_value.get("value") if isinstance(slot_value, dict) else slot_value
         elif source == "output":
             value = outputs.get(source_value)
-        elif source == "entity":
-            entity_name, _, field_path = source_value.partition(".")
-            entity_result = (entities.get(entity_name) or {}).get("result")
-            value = value_at_path(entity_result, field_path) if field_path else entity_result
+        elif source == "step":
+            match = STEP_SOURCE_REF_RE.match(source_value)
+            if match:
+                step_id, react_call, kind, field_path = match.groups()
+                step_record = step_results.get(step_id)
+                if step_record and step_record.get("react_call") != react_call:
+                    step_record = None
+                if step_record and kind == "input":
+                    value = step_record.get("parameters", {}).get(field_path)
+                elif step_record:
+                    value = value_at_path(step_record.get("result"), field_path)
         elif source == "constant":
             value = source_value
         elif source == "secret":
             value = "секрет скрыт"
-        parameters[parameter] = value if value not in (None, "") else source_ref
+        if source == "step" and value in (None, ""):
+            parameters[parameter] = None
+        else:
+            parameters[parameter] = value if value not in (None, "") else source_ref
     return parameters
 
 
@@ -1328,6 +1399,92 @@ def normalize_resolution_decision_policy(policy: dict[str, Any] | None) -> dict[
     return result
 
 
+def step_source_ref(step: dict[str, Any], field_path: str, *, kind: str = "output") -> str:
+    step_id = step.get("step_id") or "step1"
+    react_call = step.get("react_call") or "react_call"
+    return f"step:{step_id}.react.{react_call}.{kind}.{field_path}"
+
+
+def step_template_ref(step: dict[str, Any], field_path: str, *, kind: str = "output") -> str:
+    step_id = step.get("step_id") or "step1"
+    react_call = step.get("react_call") or "react_call"
+    return f"${{step.{step_id}.react.{react_call}.{kind}.{field_path}}}"
+
+
+def migrate_entity_source_ref(source_ref: Any, entity_step_by_name: dict[str, dict[str, Any]]) -> Any:
+    if not isinstance(source_ref, str) or not source_ref.startswith("entity:"):
+        return source_ref
+    entity_path = source_ref[len("entity:") :]
+    for entity_name in sorted(entity_step_by_name, key=len, reverse=True):
+        prefix = f"{entity_name}."
+        if not entity_path.startswith(prefix):
+            continue
+        field_path = entity_path[len(prefix) :]
+        if not field_path:
+            return source_ref
+        return step_source_ref(entity_step_by_name[entity_name], f"{entity_name}.{field_path}")
+    return source_ref
+
+
+def migrate_entity_parameter_mapping(
+    mapping: dict[str, Any] | None,
+    entity_step_by_name: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        parameter: migrate_entity_source_ref(source_ref, entity_step_by_name)
+        for parameter, source_ref in (mapping or {}).items()
+    }
+
+
+def migrate_entity_template_refs(text: str | None, entity_step_by_name: dict[str, dict[str, Any]]) -> str:
+    if not text or not entity_step_by_name:
+        return text or ""
+    names_pattern = "|".join(re.escape(name) for name in sorted(entity_step_by_name, key=len, reverse=True))
+
+    def replace_template(match: re.Match[str]) -> str:
+        entity_name = match.group("entity")
+        field_path = match.group("field")
+        step = entity_step_by_name.get(entity_name)
+        if not step:
+            return match.group(0)
+        return step_template_ref(step, f"{entity_name}.{field_path}")
+
+    def replace_inline(match: re.Match[str]) -> str:
+        entity_name = match.group("entity")
+        field_path = match.group("field")
+        step = entity_step_by_name.get(entity_name)
+        if not step:
+            return match.group(0)
+        return step_source_ref(step, f"{entity_name}.{field_path}")
+
+    result = re.sub(
+        rf"\$\{{entity\.(?P<entity>{names_pattern})\.(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}}",
+        replace_template,
+        text,
+    )
+    result = re.sub(
+        rf"\$\{{entity\.(?P<entity>{names_pattern})\}}",
+        lambda match: step_template_ref(
+            entity_step_by_name[match.group("entity")],
+            f"{match.group('entity')}.<field>",
+        ),
+        result,
+    )
+    result = re.sub(
+        rf"\bentity:(?P<entity>{names_pattern})\.(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\b",
+        replace_inline,
+        result,
+    )
+    return re.sub(
+        rf"\bentity:(?P<entity>{names_pattern})\b",
+        lambda match: step_source_ref(
+            entity_step_by_name[match.group("entity")],
+            f"{match.group('entity')}.<field>",
+        ),
+        result,
+    )
+
+
 def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(profile)
     result["status"] = "active"
@@ -1340,42 +1497,21 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
     legacy_ambiguity = result.pop("ambiguity_policy", {})
     legacy_handoff_package = result.pop("operator_handoff_package", None)
     legacy_candidate_mapping = result.pop("candidate_mapping", None)
+    legacy_input_slot_ids: list[str] = []
+    for legacy_input_slot in result.pop("input_slots", []):
+        if isinstance(legacy_input_slot, dict):
+            slot_id = legacy_input_slot.get("slot_id")
+        else:
+            slot_id = legacy_input_slot
+        if slot_id and slot_id not in legacy_input_slot_ids:
+            legacy_input_slot_ids.append(slot_id)
 
-    if "input_slots" not in result:
-        input_slots: list[dict[str, Any]] = []
-        seen_slots: set[str] = set()
-        legacy_input_slots = result.pop("input_slots", [])
-        for slot_id in legacy_input_slots:
-            if slot_id in seen_slots:
-                continue
-            seen_slots.add(slot_id)
-            input_slots.append({
-                "slot_id": slot_id,
-                "required_for_operation": True,
-                "can_ask_user": True,
-                "description": f"Входной слот {humanize_config_id(slot_id)}.",
-            })
-        for attribute in result.get("input_attributes", []):
-            if attribute.get("source") != "slot":
-                continue
-            slot_id = attribute.get("source_ref") or attribute.get("attribute_id")
-            if not slot_id or slot_id in seen_slots:
-                continue
-            seen_slots.add(slot_id)
-            input_slots.append({
-                "slot_id": slot_id,
-                "required_for_operation": bool(attribute.get("required", True)),
-                "can_ask_user": True,
-                "description": attribute.get("display_name") or humanize_config_id(slot_id),
-            })
-        if not input_slots:
-            input_slots.append({
-                "slot_id": target_slot_id,
-                "required_for_operation": False,
-                "can_ask_user": True,
-                "description": f"Основной слот {humanize_config_id(target_slot_id)}.",
-            })
-        result["input_slots"] = input_slots
+    for attribute in result.get("input_attributes", []):
+        if attribute.get("source") != "slot":
+            continue
+        slot_id = attribute.get("source_ref") or attribute.get("attribute_id")
+        if slot_id and slot_id not in legacy_input_slot_ids:
+            legacy_input_slot_ids.append(slot_id)
 
     if "resolver_operation" not in result:
         tool_step = next((step for step in legacy_steps if step.get("type") == "tool_call"), None)
@@ -1435,6 +1571,32 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
             result.get("resolver_operation", {}),
             result.get("operation_result_entity", {}),
         )
+    entity_step_by_name: dict[str, dict[str, Any]] = {}
+    normalized_enrichment_steps = []
+    for index, enrichment_step in enumerate(result.get("enrichment_steps", []), start=1):
+        enrichment_step = copy.deepcopy(enrichment_step)
+        step_id = str(enrichment_step.get("step_id") or "")
+        if not re.match(r"^step[1-9][0-9]*$", step_id):
+            enrichment_step["step_id"] = f"step{index}"
+        legacy_entity_name = enrichment_step.pop("result_entity_name", None)
+        enrichment_step.pop("result_entity_description", None)
+        enrichment_step.pop("result_fields", None)
+        enrichment_step["parameter_mapping"] = migrate_entity_parameter_mapping(
+            enrichment_step.get("parameter_mapping", {}),
+            entity_step_by_name,
+        )
+        if enrichment_step.get("configuration_instruction"):
+            enrichment_step["configuration_instruction"] = migrate_entity_template_refs(
+                enrichment_step.get("configuration_instruction"),
+                entity_step_by_name,
+            )
+        normalized_enrichment_steps.append(enrichment_step)
+        if legacy_entity_name and enrichment_step.get("react_call"):
+            entity_step_by_name[str(legacy_entity_name)] = {
+                "step_id": enrichment_step["step_id"],
+                "react_call": enrichment_step["react_call"],
+            }
+    result["enrichment_steps"] = normalized_enrichment_steps
     if "output_slots_order" not in result:
         output_slots = result.get("output_slots") or [target_slot_id]
         result["output_slots_order"] = output_slots_order_from_policy(
@@ -1470,24 +1632,24 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
             or "Уточните данные для заполнения атрибута."
         )
         output_slot_ids = [item["slot_id"] for item in result["output_slots_order"]]
-        input_slot_ids = [item["slot_id"] for item in result["input_slots"]]
+        known_profile_slot_ids = list(dict.fromkeys([*legacy_input_slot_ids, *output_slot_ids, target_slot_id]))
         clarification_slots = [
             slot_id
             for slot_id in (
                 result.get("clarification_policy", {}).get("ask_for_attributes")
                 or legacy_ambiguity.get("ask_for_attributes")
-                or input_slot_ids
+                or legacy_input_slot_ids
             )
-            if slot_id in input_slot_ids or slot_id in output_slot_ids
-        ] or input_slot_ids[:1] or output_slot_ids[:1]
+            if slot_id in known_profile_slot_ids
+        ] or known_profile_slot_ids[:1] or output_slot_ids[:1]
         handoff_package = [
             slot_id
             for slot_id in (
                 result.get("handoff_policy", {}).get("package")
                 or legacy_handoff_package
-                or [*input_slot_ids, *output_slot_ids]
+                or known_profile_slot_ids
             )
-            if slot_id in input_slot_ids or slot_id in output_slot_ids
+            if slot_id in known_profile_slot_ids
         ] or output_slot_ids[:1]
         result["human_resolution_policy"] = {
             "clarification_question": clarification_question,
@@ -1501,6 +1663,11 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
             "script_text": default_resolution_script_text(result),
             "response_contract": default_resolution_response_contract(),
         }
+    else:
+        result["llm_resolution_script"]["script_text"] = migrate_entity_template_refs(
+            result["llm_resolution_script"].get("script_text"),
+            entity_step_by_name,
+        )
 
     for legacy_key in (
         "input_attributes",
@@ -1515,8 +1682,8 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
     ):
         result.pop(legacy_key, None)
     result.setdefault("max_attempts", 1)
-    result.setdefault("audit_required", True)
-    result.setdefault("log_required", True)
+    result.pop("audit_required", None)
+    result.pop("log_required", None)
     return result
 
 
@@ -1590,28 +1757,16 @@ def enrichment_steps_from_legacy(
 ) -> list[dict[str, Any]]:
     if resolver_operation.get("source_type") != "react_call" or not resolver_operation.get("tool_name"):
         return []
-    entity_name = result_entity.get("entity_name") or resolver_operation.get("operation_id") or "result"
+    operation_name = result_entity.get("entity_name") or resolver_operation.get("operation_id") or resolver_operation["tool_name"]
     return [
         {
-            "step_name": f"Получить {humanize_config_id(entity_name)}",
+            "step_id": "step1",
+            "step_name": f"Получить {humanize_config_id(operation_name)}",
             "react_call": resolver_operation["tool_name"],
             "parameter_mapping": resolver_operation.get("parameter_mapping", {}),
-            "result_entity_name": entity_name,
-            "result_entity_description": result_entity.get("entity_description")
-            or f"Результат ReAct-вызова {humanize_config_id(resolver_operation['tool_name'])}.",
-            "result_fields": result_entity.get("available_fields", []),
             "on_error": "continue_to_llm",
         }
     ]
-
-
-def result_entity_from_enrichment_step(step: dict[str, Any] | None) -> dict[str, Any]:
-    step = step or {}
-    return {
-        "entity_name": step.get("result_entity_name") or "result",
-        "entity_description": step.get("result_entity_description") or "Результат ReAct-вызова.",
-        "available_fields": step.get("result_fields", []),
-    }
 
 
 def output_slots_order_from_policy(
@@ -1699,13 +1854,13 @@ def default_resolution_response_contract() -> dict[str, Any]:
 
 def default_resolution_script_text(profile: dict[str, Any]) -> str:
     output_slots = ", ".join(item["slot_id"] for item in profile.get("output_slots_order", []))
-    entity_names = ", ".join(
-        step.get("result_entity_name", "result")
-        for step in profile.get("enrichment_steps", [])
+    step_refs = ", ".join(
+        f"{step.get('step_id', f'step{index}')}.react.{step.get('react_call', 'react_call')}.output.<field>"
+        for index, step in enumerate(profile.get("enrichment_steps", []), start=1)
     ) or "нет результатов ReAct-вызовов"
     return (
-        "Проанализируй входные слоты и именованные результаты ReAct-вызовов. "
-        f"Доступные сущности результата: {entity_names}. "
+        "Проанализируй входные слоты и результаты шагов обогащения. "
+        f"Доступные ссылки на результаты: {step_refs}. "
         f"Заполняй только разрешенные выходные слоты: {output_slots or profile.get('target_slot_id')}. "
         "Если результат однозначный, верни decision=fill и filled_slots. "
         "Если данных недостаточно или кандидатов несколько, верни decision=ask_clarification и один уточняющий вопрос. "
@@ -1713,57 +1868,169 @@ def default_resolution_script_text(profile: dict[str, Any]) -> str:
     )
 
 
+def result_container_paths_from_schema(schema: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not isinstance(schema, dict):
+        return []
+    root_type = schema_type(schema)
+    if root_type in {"array", "object"} and root_type == "array":
+        return [{"path": "", "kind": "array"}]
+    containers = []
+    for name, property_schema in schema_properties(schema).items():
+        property_type = schema_type(property_schema)
+        if property_type in {"array", "object"}:
+            containers.append({"path": name, "kind": property_type})
+    return containers
+
+
+def operation_result_selector_path(
+    response_schema: dict[str, Any] | None,
+    output_slots_order: list[dict[str, Any]],
+    operation_result: Any = None,
+) -> tuple[str | None, str | None]:
+    containers = result_container_paths_from_schema(response_schema)
+    if isinstance(operation_result, dict) and operation_result:
+        containers = [
+            container
+            for container in containers
+            if not container["path"] or container["path"] in operation_result
+        ]
+    if not containers:
+        return "", None
+
+    source_roots = {
+        root
+        for root in (root_attribute(rule.get("source_hint")) for rule in output_slots_order or [])
+        if root
+    }
+    explicit_matches = [container for container in containers if container["path"] in source_roots]
+    if len(explicit_matches) == 1:
+        return explicit_matches[0]["path"], None
+    if len(explicit_matches) > 1:
+        paths = ", ".join(container["path"] or "<root>" for container in explicit_matches)
+        return None, f"source_hint указывает на несколько контейнеров результата: {paths}."
+
+    list_containers = [container for container in containers if container["kind"] == "array"]
+    if len(list_containers) == 1:
+        return list_containers[0]["path"], None
+    object_containers = [container for container in containers if container["kind"] == "object"]
+    if not list_containers and len(object_containers) == 1:
+        return object_containers[0]["path"], None
+    paths = ", ".join(container["path"] or "<root>" for container in containers)
+    return None, (
+        "Контракт результата содержит несколько возможных контейнеров. "
+        f"Укажите поле контейнера в source_hint выходного слота: {paths}."
+    )
+
+
+def operation_result_local_hint(source_hint: str, result_summary: dict[str, Any] | None = None) -> str:
+    hint = str(source_hint or "").replace("[]", "").strip(".")
+    result_path = str((result_summary or {}).get("result_path") or "").strip(".")
+    if result_path:
+        if hint == result_path:
+            return ""
+        if hint.startswith(f"{result_path}."):
+            hint = hint[len(result_path) + 1 :]
+    parts = [part for part in hint.split(".") if part]
+    if parts and parts[0].isdigit():
+        parts = parts[1:]
+    return ".".join(parts)
+
+
+def selected_operation_result_schema(
+    response_schema: dict[str, Any] | None,
+    result_path: str | None,
+) -> dict[str, Any] | None:
+    selected_schema = schema_at_path(response_schema, result_path) if result_path else response_schema
+    if schema_type(selected_schema) == "array":
+        items = selected_schema.get("items", {}) if isinstance(selected_schema, dict) else {}
+        return items if isinstance(items, dict) else None
+    return selected_schema
+
+
 def operation_response_items(
     operation_result: dict[str, Any],
-    result_entity: dict[str, Any],
+    response_schema: dict[str, Any] | None = None,
+    output_slots_order: list[dict[str, Any]] | None = None,
 ) -> tuple[int, dict[str, Any] | None, dict[str, Any]]:
-    entity_name = result_entity.get("entity_name")
-    if entity_name:
-        raw = value_at_path(operation_result, entity_name)
-        if isinstance(raw, list):
-            return len(raw), (raw[0] if raw else None), {
-                "result_type": "list",
-                "entity_name": entity_name,
-                "item_count": len(raw),
-                "source_status": "mock_output",
-            }
-        if isinstance(raw, dict):
-            return 1, raw, {
-                "result_type": "object",
-                "entity_name": entity_name,
-                "object_found": True,
-                "source_status": "mock_output",
-            }
-    for key, value in operation_result.items():
-        if isinstance(value, list):
-            return len(value), (value[0] if value else None), {
-                "result_type": "list",
-                "entity_name": key,
-                "item_count": len(value),
-                "source_status": "mock_output",
-            }
+    result_path, selector_error = operation_result_selector_path(
+        response_schema,
+        output_slots_order or [],
+        operation_result,
+    )
+    if selector_error:
+        return -1, None, {
+            "result_type": "ambiguous",
+            "source_status": "configuration_error",
+            "reason": selector_error,
+        }
+    selected_result: Any = value_at_path(operation_result, result_path) if result_path else operation_result
+    if selected_result is None:
+        return 0, None, {
+            "result_type": "missing",
+            "result_path": result_path,
+            "source_status": "mock_output",
+        }
+    operation_result = selected_result
+    if isinstance(operation_result, list):
+        return len(operation_result), (operation_result[0] if operation_result else None), {
+            "result_type": "list",
+            "result_path": result_path,
+            "item_count": len(operation_result),
+            "source_status": "mock_output",
+        }
+    if not isinstance(operation_result, dict):
+        return 1, {"value": operation_result}, {
+            "result_type": "scalar",
+            "result_path": result_path,
+            "object_found": True,
+            "source_status": "mock_output",
+        }
     object_found = operation_result.get("object_found")
     if object_found is False:
         return 0, None, {
             "result_type": "object",
-            "entity_name": entity_name or "result",
+            "result_path": result_path,
             "object_found": False,
             "source_status": "mock_output",
         }
+    if result_path is not None:
+        return 1, operation_result, {
+            "result_type": "object",
+            "result_path": result_path,
+            "object_found": True,
+            "source_status": "mock_output",
+        }
+    for key, value in operation_result.items():
+        if isinstance(value, list):
+            return len(value), (value[0] if value else None), {
+                "result_type": "list",
+                "result_path": key,
+                "item_count": len(value),
+                "source_status": "mock_output",
+            }
+        if isinstance(value, dict):
+            return 1, value, {
+                "result_type": "object",
+                "result_path": key,
+                "object_found": True,
+                "source_status": "mock_output",
+            }
     return 1, operation_result, {
         "result_type": "object",
-        "entity_name": entity_name or "result",
+        "result_path": result_path,
         "object_found": True,
         "source_status": "mock_output",
     }
 
 
-def operation_result_value(result_item: dict[str, Any] | None, source_hint: str, entity_name: str | None = None) -> Any:
+def operation_result_value(
+    result_item: dict[str, Any] | None,
+    source_hint: str,
+    result_summary: dict[str, Any] | None = None,
+) -> Any:
     if not result_item or not source_hint:
         return None
-    hint = str(source_hint).replace("[]", "")
-    if entity_name and hint.startswith(f"{entity_name}."):
-        hint = hint[len(entity_name) + 1 :]
+    hint = operation_result_local_hint(source_hint, result_summary)
     return value_at_path(result_item, hint)
 
 
@@ -1775,17 +2042,16 @@ def simulated_llm_resolution_decision(
     *,
     profile: dict[str, Any],
     result_item: dict[str, Any] | None,
+    result_summary: dict[str, Any] | None = None,
     count: int,
     confidence: float,
     effective_thresholds: dict[str, float],
 ) -> dict[str, Any]:
     human_policy = profile["human_resolution_policy"]
-    enrichment_steps = profile.get("enrichment_steps", [])
-    entity_name = enrichment_steps[-1].get("result_entity_name") if enrichment_steps else None
     output_values = {}
     if count == 1 and result_item:
         for rule in profile["output_slots_order"]:
-            value = operation_result_value(result_item, rule.get("source_hint", ""), entity_name)
+            value = operation_result_value(result_item, rule.get("source_hint", ""), result_summary)
             if value is not None:
                 output_values[rule["slot_id"]] = value
     required_slots = [
@@ -2443,6 +2709,8 @@ class ConfigStore:
                 scenario.setdefault("tool_launch_matrix_id", f"matrix.{scenario['scenario_id']}")
                 scenario.setdefault("default_channel_id", "debug")
                 scenario.setdefault("allowed_channel_ids", ["messenger_bot", "service_desk", "debug"])
+                scenario.setdefault("audit_required", True)
+                scenario.setdefault("log_required", True)
         elif domain == "tools":
             endpoint_by_id = {
                 endpoint["endpoint_id"]: endpoint
@@ -2480,6 +2748,7 @@ class ConfigStore:
                 normalize_attribute_resolution_profile(profile)
                 for profile in normalized.get("profiles", [])
             ]
+            self._assign_attribute_resolution_slot_schema_ids(normalized["profiles"])
         elif domain == "slot_autofill_profiles":
             normalized["profiles"] = [
                 normalize_slot_autofill_profile(profile)
@@ -2519,6 +2788,8 @@ class ConfigStore:
             for launch in normalized.get("launches", []):
                 launch_copy = copy.deepcopy(launch)
                 scenario_id = launch_copy.pop("scenario_id", "custom")
+                launch_copy.pop("audit_required", None)
+                launch_copy.pop("log_required", None)
                 normalize_endpoint_reference(launch_copy)
                 normalize_tool_launch_parameter_bindings(launch_copy)
                 grouped_launches.setdefault(scenario_id, []).append(launch_copy)
@@ -2538,6 +2809,8 @@ class ConfigStore:
                 matrix.setdefault("display_name", f"Матрица ReAct-вызовов: {matrix['matrix_id']}")
                 for launch in matrix.get("launches", []):
                     launch.pop("scenario_id", None)
+                    launch.pop("audit_required", None)
+                    launch.pop("log_required", None)
                     normalize_endpoint_reference(launch)
                     normalize_tool_launch_parameter_bindings(launch)
         elif domain == "escalation_policies":
@@ -2553,6 +2826,7 @@ class ConfigStore:
         elif domain == "interaction_channels":
             legacy_waiting_defaults = self._legacy_client_waiting_defaults()
             for channel in normalized.get("channels", []):
+                channel.pop("audit_required", None)
                 channel["waiting_policy"] = normalize_channel_waiting_policy(
                     channel.get("waiting_policy"),
                     legacy_waiting_defaults,
@@ -2608,6 +2882,47 @@ class ConfigStore:
             runtime["openai_api_key_configured"] = secret_env_configured(openai_key_env)
             runtime["provider_key_configured"] = provider_key_configured
         return normalized
+
+    def _assign_attribute_resolution_slot_schema_ids(self, profiles: list[dict[str, Any]]) -> None:
+        try:
+            slot_schemas = self.active_payload("slot_schemas")["slot_schemas"]
+        except Exception:
+            slot_schemas = self.default_config("slot_schemas")["slot_schemas"]
+        refs_by_profile: dict[str, list[str]] = {}
+        slots_by_schema = {
+            schema["slot_schema_id"]: {slot["slot_id"] for slot in schema.get("slots", [])}
+            for schema in slot_schemas
+        }
+        for schema in slot_schemas:
+            schema_id = schema["slot_schema_id"]
+            for slot in schema.get("slots", []):
+                profile_id = slot.get("resolution_profile_id")
+                if profile_id:
+                    refs_by_profile.setdefault(profile_id, []).append(schema_id)
+        for profile in profiles:
+            if profile.get("slot_schema_id"):
+                continue
+            profile_id = profile.get("profile_id", "")
+            referenced_schema_ids = refs_by_profile.get(profile_id, [])
+            if referenced_schema_ids:
+                profile["slot_schema_id"] = referenced_schema_ids[0]
+                continue
+            related_slots = {
+                profile.get("target_slot_id"),
+                *[item.get("slot_id") for item in profile.get("output_slots_order", [])],
+                *profile.get("human_resolution_policy", {}).get("clarification_slots", []),
+                *profile.get("human_resolution_policy", {}).get("handoff_package", []),
+            }
+            related_slots = {slot_id for slot_id in related_slots if slot_id}
+            best_schema_id = ""
+            best_score = 0
+            for schema_id, slot_ids in slots_by_schema.items():
+                score = len(related_slots & slot_ids)
+                if score > best_score:
+                    best_schema_id = schema_id
+                    best_score = score
+            if best_schema_id:
+                profile["slot_schema_id"] = best_schema_id
 
     def scenario_overview(self) -> dict[str, Any]:
         scenarios = []
@@ -3585,9 +3900,8 @@ class ConfigStore:
             "attempt": 1,
             "max_attempts": profile["max_attempts"],
             "pending_question": question,
-            "input_slots": profile.get("input_slots", []),
             "enrichment_steps": enrichment_steps,
-            "enrichment_entities": {},
+            "enrichment_step_results": {},
             "output_slots_order": profile.get("output_slots_order", []),
             "llm_resolution_script": profile.get("llm_resolution_script", {}),
             "human_resolution_policy": human_policy,
@@ -3616,7 +3930,7 @@ class ConfigStore:
             "endpoint_id",
         )
         tool_by_name = self._by_id(self.active_payload("tools")["tools"], "tool_name")
-        enrichment_entities: dict[str, Any] = {}
+        enrichment_step_results: dict[str, Any] = {}
         last_step: dict[str, Any] | None = None
         last_mock_output: dict[str, Any] | None = None
         last_endpoint_id = ""
@@ -3642,7 +3956,7 @@ class ConfigStore:
                 )
                 return {
                     **default_result,
-                    "enrichment_entities": enrichment_entities,
+                    "enrichment_step_results": enrichment_step_results,
                     "status": "blocked_by_configuration",
                     "decision": "handoff",
                     "reason": "ReAct-вызов обогащения контекста или его привязка не найдены.",
@@ -3652,8 +3966,38 @@ class ConfigStore:
                 parameter_sources,
                 provided=provided,
                 slot_values=slot_values,
-                enrichment_entities=enrichment_entities,
+                enrichment_step_results=enrichment_step_results,
             )
+            unresolved_step_parameters = [
+                parameter
+                for parameter, source_ref in parameter_sources.items()
+                if str(source_ref).startswith("step:") and parameters.get(parameter) is None
+            ]
+            if unresolved_step_parameters:
+                append_trace(
+                    execution_trace,
+                    step="1",
+                    status="blocked",
+                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                    message="Не удалось разрешить ссылку на результат предыдущего шага.",
+                    details={
+                        "react_call": tool_name,
+                        "endpoint_id": endpoint_id,
+                        "operation_id": operation_id,
+                        "parameter_sources": parameter_sources,
+                        "unresolved_parameters": unresolved_step_parameters,
+                    },
+                )
+                return {
+                    **default_result,
+                    "enrichment_step_results": enrichment_step_results,
+                    "status": "blocked_by_configuration",
+                    "decision": "handoff",
+                    "reason": (
+                        "Не удалось разрешить параметры из предыдущих шагов: "
+                        f"{', '.join(unresolved_step_parameters)}."
+                    ),
+                }
             if adapter_type == "mock" and not simulation_options["allow_mock_integrations"]:
                 append_trace(
                     execution_trace,
@@ -3672,7 +4016,7 @@ class ConfigStore:
                 )
                 return {
                     **default_result,
-                    "enrichment_entities": enrichment_entities,
+                    "enrichment_step_results": enrichment_step_results,
                     "reason": "Mock-интеграции выключены в выбранном режиме тестового прогона.",
                 }
             if adapter_type != "mock" and not simulation_options["allow_readonly_integrations"]:
@@ -3693,7 +4037,7 @@ class ConfigStore:
                 )
                 return {
                     **default_result,
-                    "enrichment_entities": enrichment_entities,
+                    "enrichment_step_results": enrichment_step_results,
                     "reason": "Внешние read-only интеграции выключены в выбранном режиме тестового прогона.",
                 }
 
@@ -3716,35 +4060,37 @@ class ConfigStore:
                 )
                 return {
                     **default_result,
-                    "enrichment_entities": enrichment_entities,
+                    "enrichment_step_results": enrichment_step_results,
                     "status": "blocked_by_configuration",
                     "decision": "handoff",
                     "reason": "В dry-run нет mock_output для ReAct-вызова обогащения контекста.",
                 }
 
-            entity_name = enrichment_step["result_entity_name"]
-            enrichment_entities[entity_name] = {
+            step_id = enrichment_step.get("step_id") or f"step{step_index}"
+            enrichment_step_results[step_id] = {
+                "step_id": step_id,
                 "step_name": enrichment_step.get("step_name"),
                 "react_call": tool_name,
                 "endpoint_id": endpoint_id,
                 "operation_id": operation_id,
+                "parameters": parameters,
                 "result": mock_output,
             }
             append_trace(
                 execution_trace,
                 step="1",
                 status="completed",
-                title=f"Обогащение контекста: {enrichment_step.get('step_name') or entity_name}",
-                message=f"ReAct-вызов {tool_name} сохранил результат как {entity_name}.",
+                title=f"Обогащение контекста: {enrichment_step.get('step_name') or step_id}",
+                message=f"ReAct-вызов {tool_name} выполнил шаг {step_id}.",
                 details={
                     "step_index": step_index,
+                    "step_id": step_id,
                     "react_call": tool_name,
                     "endpoint_id": endpoint_id,
                     "operation_id": operation_id,
                     "parameter_sources": parameter_sources,
                     "parameters": parameters,
                     "result": mock_output,
-                    "result_entity_name": entity_name,
                 },
             )
             last_step = enrichment_step
@@ -3763,14 +4109,39 @@ class ConfigStore:
             )
             return {
                 **default_result,
-                "enrichment_entities": enrichment_entities,
+                "enrichment_step_results": enrichment_step_results,
                 "status": "blocked_by_configuration",
                 "decision": "handoff",
                 "reason": "Обогащение контекста не вернуло результата.",
             }
 
-        result_entity = result_entity_from_enrichment_step(last_step)
-        count, result_item, result_summary = operation_response_items(last_mock_output, result_entity)
+        last_tool = tool_by_name.get(last_step.get("react_call") or "")
+        count, result_item, result_summary = operation_response_items(
+            last_mock_output,
+            (last_tool or {}).get("result_schema"),
+            profile.get("output_slots_order", []),
+        )
+        if result_summary.get("source_status") == "configuration_error":
+            append_trace(
+                execution_trace,
+                step="1",
+                status="blocked",
+                title=f"Разрешение атрибута: {profile['display_name']}",
+                message=result_summary.get("reason") or "Контракт результата операции неоднозначен.",
+                details={
+                    "enrichment_steps": len(enrichment_steps),
+                    "last_step_id": last_step.get("step_id"),
+                    "result_summary": result_summary,
+                },
+            )
+            return {
+                **default_result,
+                "enrichment_step_results": enrichment_step_results,
+                "status": "blocked_by_configuration",
+                "decision": "handoff",
+                "result_summary": result_summary,
+                "reason": result_summary.get("reason") or "Контракт результата операции неоднозначен.",
+            }
         confidence = result_confidence(result_item, {"confidence_path": "confidence"})
         if not simulation_options["allow_llm"]:
             llm_decision = {
@@ -3785,6 +4156,7 @@ class ConfigStore:
             llm_decision = simulated_llm_resolution_decision(
                 profile=profile,
                 result_item=result_item,
+                result_summary=result_summary,
                 count=count,
                 confidence=confidence,
                 effective_thresholds=effective_thresholds,
@@ -3802,7 +4174,7 @@ class ConfigStore:
             message=f"Результатов обогащения: {count}; решение LLM-правила: {decision}.",
             details={
                 "enrichment_steps": len(enrichment_steps),
-                "entity_name": result_entity.get("entity_name"),
+                "last_step_id": last_step.get("step_id"),
                 "confidence": confidence,
                 "result": llm_decision,
                 "output_slots": sorted(output_values),
@@ -3814,7 +4186,7 @@ class ConfigStore:
             "decision": decision,
             "candidate_count": count,
             "candidate_confidence": confidence,
-            "enrichment_entities": enrichment_entities,
+            "enrichment_step_results": enrichment_step_results,
             "output_values": output_values,
             "llm_decision": llm_decision,
             "pending_question": llm_decision.get("next_question") or question,
@@ -4540,11 +4912,12 @@ class ConfigStore:
 
         previous_version_id = self.active_version_id(draft["domain"])
         activated_at = utc_now()
+        normalized_payload = self._normalize_payload(draft["domain"], draft["payload"])
         version = {
             "schema_version": "1.0",
             "version_id": new_version_id(),
             "domain": draft["domain"],
-            "payload": copy.deepcopy(draft["payload"]),
+            "payload": normalized_payload,
             "source_draft_id": draft["draft_id"],
             "activated_by": activated_by,
             "activated_at": activated_at,
@@ -4627,9 +5000,10 @@ class ConfigStore:
         self._require_domain(domain)
         errors: list[str] = []
         contract_name = CONFIG_DOMAINS[domain].contract_name
-        errors.extend(self.contracts.validate(contract_name, payload))
+        normalized_payload = self._normalize_payload(domain, payload)
+        errors.extend(self.contracts.validate(contract_name, normalized_payload))
         if not errors:
-            errors.extend(self._cross_validate(domain, payload))
+            errors.extend(self._cross_validate(domain, normalized_payload))
         return {
             "schema_version": "1.0",
             "domain": domain,
@@ -5409,16 +5783,32 @@ class ConfigStore:
             self.active_payload("integration_endpoints")["endpoints"],
             "endpoint_id",
         )
+        slot_schema_by_id = self._by_id(
+            self.active_payload("slot_schemas")["slot_schemas"],
+            "slot_schema_id",
+        )
+        known_slot_ids = {
+            slot["slot_id"]
+            for schema in self.active_payload("slot_schemas")["slot_schemas"]
+            for slot in schema.get("slots", [])
+        }
 
         for profile in profiles:
             profile_id = profile["profile_id"]
-            input_slot_ids = [slot["slot_id"] for slot in profile.get("input_slots", [])]
+            slot_schema = slot_schema_by_id.get(profile.get("slot_schema_id", ""))
+            profile_slot_ids = {
+                slot["slot_id"]
+                for slot in (slot_schema or {}).get("slots", [])
+            }
+            if not slot_schema:
+                errors.append(f"{profile_id} ссылается на неизвестную slot_schema_id: {profile.get('slot_schema_id')}")
             output_slot_ids = [slot["slot_id"] for slot in profile.get("output_slots_order", [])]
-            declared_slot_ids = set(input_slot_ids) | set(output_slot_ids)
+            declared_slot_ids = set(output_slot_ids) | {profile["target_slot_id"]}
+            for slot_id in declared_slot_ids:
+                if slot_id in known_slot_ids and slot_id not in profile_slot_ids:
+                    errors.append(f"{profile_id} ссылается на слот вне выбранной схемы {profile.get('slot_schema_id')}: {slot_id}")
             if profile["target_slot_id"] not in output_slot_ids:
                 errors.append(f"{profile_id} target_slot_id должен входить в output_slots_order.")
-            for slot_id in self._duplicates(input_slot_ids):
-                errors.append(f"{profile_id} содержит дублирующийся входной слот: {slot_id}")
             for slot_id in self._duplicates(output_slot_ids):
                 errors.append(f"{profile_id} содержит дублирующийся выходной слот: {slot_id}")
             orders = [slot["order"] for slot in profile.get("output_slots_order", [])]
@@ -5450,50 +5840,112 @@ class ConfigStore:
             if not human_policy.get("clarification_slots"):
                 errors.append(f"{profile_id} human_resolution_policy должен содержать clarification_slots.")
             for slot_id in human_policy.get("clarification_slots", []):
-                if slot_id not in declared_slot_ids:
-                    errors.append(f"{profile_id} human_resolution_policy.clarification_slots содержит необъявленный слот: {slot_id}")
+                if slot_id not in declared_slot_ids and slot_id not in profile_slot_ids:
+                    errors.append(f"{profile_id} human_resolution_policy.clarification_slots содержит неизвестный слот: {slot_id}")
             for slot_id in human_policy.get("handoff_package", []):
-                if slot_id not in declared_slot_ids:
-                    errors.append(f"{profile_id} human_resolution_policy.handoff_package содержит необъявленный слот: {slot_id}")
+                if slot_id not in declared_slot_ids and slot_id not in profile_slot_ids:
+                    errors.append(f"{profile_id} human_resolution_policy.handoff_package содержит неизвестный слот: {slot_id}")
 
-            seen_entities: set[str] = set()
-            entity_names = [step["result_entity_name"] for step in profile.get("enrichment_steps", [])]
-            for entity_name in self._duplicates(entity_names):
-                errors.append(f"{profile_id} содержит дублирующуюся сущность результата: {entity_name}")
+            seen_steps: dict[str, dict[str, Any]] = {}
+            last_step_tool: dict[str, Any] | None = None
             for index, enrichment_step in enumerate(profile.get("enrichment_steps", []), start=1):
                 step_label = f"{profile_id}.enrichment_steps[{index}]"
+                step_id = enrichment_step.get("step_id") or f"step{index}"
+                if step_id in seen_steps:
+                    errors.append(f"{profile_id} содержит дублирующийся step_id: {step_id}")
                 tool = tool_by_name.get(enrichment_step.get("react_call"))
                 if not tool:
                     errors.append(f"{step_label} ссылается на неизвестный ReAct-вызов: {enrichment_step.get('react_call')}")
                 elif not tool.get("endpoint_bindings"):
                     errors.append(f"{step_label} ReAct-вызов {enrichment_step.get('react_call')} не имеет привязки операции.")
+                else:
+                    last_step_tool = tool
                 for parameter, source_ref in enrichment_step.get("parameter_mapping", {}).items():
+                    if tool:
+                        parameter_schema = tool.get("parameters_schema", {})
+                        parameter_names = set(schema_properties(parameter_schema))
+                        parameter_names.update(schema_required(parameter_schema))
+                        if parameter_names and parameter not in parameter_names:
+                            errors.append(
+                                f"{step_label}.parameter_mapping.{parameter} заполняет параметр вне "
+                                f"parameters_schema ReAct-вызова {tool.get('tool_name')}."
+                            )
                     source, separator, value = str(source_ref).partition(":")
-                    if separator != ":" or source not in {"slot", "output", "entity", "constant", "secret"} or not value:
+                    if separator != ":" or source not in {"slot", "output", "step", "constant", "secret"} or not value:
                         errors.append(
                             f"{step_label}.parameter_mapping.{parameter} должен иметь формат "
-                            "slot:<slot_id>, output:<slot_id>, entity:<entity[.field]>, constant:<value> или secret:<ref>."
+                            "slot:<slot_id>, output:<slot_id>, "
+                            "step:<step_id>.react.<react_call>.input|output.<field>, constant:<value> или secret:<ref>."
                         )
                         continue
-                    if source == "slot" and value not in input_slot_ids:
+                    if source == "slot" and value not in profile_slot_ids:
                         errors.append(
-                            f"{step_label}.parameter_mapping.{parameter} ссылается на слот вне входных слотов профиля: {value}"
+                            f"{step_label}.parameter_mapping.{parameter} ссылается на слот вне выбранной схемы: {value}"
                         )
                     elif source == "output" and value not in output_slot_ids:
                         errors.append(
                             f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестный выходной слот: {value}"
                         )
-                    elif source == "entity":
-                        entity_name = value.split(".", 1)[0]
-                        if entity_name not in seen_entities:
+                    elif source == "step":
+                        step_match = STEP_SOURCE_REF_RE.match(value)
+                        if not step_match:
                             errors.append(
-                                f"{step_label}.parameter_mapping.{parameter} ссылается на сущность, "
-                                f"которая еще не объявлена предыдущими шагами: {entity_name}"
+                                f"{step_label}.parameter_mapping.{parameter} должен ссылаться на step как "
+                                "step:<step_id>.react.<react_call>.input|output.<field>."
                             )
-                field_ids = [field["field_id"] for field in enrichment_step.get("result_fields", [])]
-                for field_id in self._duplicates(field_ids):
-                    errors.append(f"{step_label} содержит дублирующееся поле результата: {field_id}")
-                seen_entities.add(enrichment_step["result_entity_name"])
+                        else:
+                            ref_step_id, ref_react_call, _, _ = step_match.groups()
+                            ref_step = seen_steps.get(ref_step_id)
+                            if not ref_step:
+                                errors.append(
+                                    f"{step_label}.parameter_mapping.{parameter} ссылается на шаг, "
+                                    f"который еще не выполнен: {ref_step_id}"
+                                )
+                            elif ref_step.get("react_call") != ref_react_call:
+                                errors.append(
+                                    f"{step_label}.parameter_mapping.{parameter} ожидает ReAct-вызов "
+                                    f"{ref_react_call} в {ref_step_id}, но там настроен {ref_step.get('react_call')}."
+                                )
+                            else:
+                                ref_tool = tool_by_name.get(ref_react_call)
+                                _, _, ref_kind, field_path = step_match.groups()
+                                if ref_tool and ref_kind == "input" and not schema_declares_path(
+                                    ref_tool.get("parameters_schema", {}),
+                                    field_path,
+                                ):
+                                    errors.append(
+                                        f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестный "
+                                        f"входной параметр {ref_react_call}: {field_path}"
+                                    )
+                                if ref_tool and ref_kind == "output" and not schema_declares_path(
+                                    ref_tool.get("result_schema", {}),
+                                    field_path,
+                                ):
+                                    errors.append(
+                                        f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестное "
+                                        f"поле результата {ref_react_call}: {field_path}"
+                                    )
+                seen_steps[step_id] = enrichment_step
+
+            if last_step_tool:
+                result_path, selector_error = operation_result_selector_path(
+                    last_step_tool.get("result_schema", {}),
+                    profile.get("output_slots_order", []),
+                )
+                if selector_error:
+                    errors.append(f"{profile_id} результат последнего ReAct-вызова неоднозначен: {selector_error}")
+                selected_schema = selected_operation_result_schema(last_step_tool.get("result_schema", {}), result_path)
+                for rule in profile.get("output_slots_order", []):
+                    source_hint = rule.get("source_hint")
+                    local_hint = operation_result_local_hint(source_hint, {"result_path": result_path})
+                    if local_hint and selected_schema and not schema_declares_path(
+                        selected_schema,
+                        local_hint,
+                    ):
+                        errors.append(
+                            f"{profile_id} output_slots_order.{rule['slot_id']} ссылается на поле вне "
+                            f"контракта результата ReAct-вызова {last_step_tool.get('tool_name')}: {source_hint}"
+                        )
 
             llm_script = profile["llm_resolution_script"]
             if not llm_script.get("script_text"):
@@ -5653,6 +6105,11 @@ class ConfigStore:
                 self.active_payload("attribute_resolution_profiles")["profiles"],
                 "profile_id",
             )
+            active_profiles_for_schema = [
+                profile
+                for profile in profile_by_id.values()
+                if profile.get("slot_schema_id") == schema["slot_schema_id"]
+            ]
             active_autofill_profiles = [
                 profile
                 for profile in self.active_payload("slot_autofill_profiles").get("profiles", [])
@@ -5695,17 +6152,6 @@ class ConfigStore:
                             errors.append(f"{schema['slot_schema_id']} slot {slot['slot_id']} ссылается на неизвестный profile_id: {profile_id}")
                         elif slot["slot_id"] not in [item["slot_id"] for item in profile.get("output_slots_order", [])]:
                             errors.append(f"{schema['slot_schema_id']} slot {slot['slot_id']} не входит в output_slots_order профиля {profile_id}.")
-                        else:
-                            profile_input_slot_ids = [
-                                input_slot["slot_id"]
-                                for input_slot in profile.get("input_slots", [])
-                            ]
-                            for profile_slot_id in profile_input_slot_ids:
-                                if profile_slot_id not in slot_by_id:
-                                    errors.append(
-                                        f"{schema['slot_schema_id']} профиль {profile_id} требует отсутствующий input slot: "
-                                        f"{profile_slot_id}"
-                                    )
             for profile in active_autofill_profiles:
                 for mapping in profile.get("output_mapping", []):
                     target_slot = mapping.get("target_slot")
@@ -5725,6 +6171,22 @@ class ConfigStore:
                     errors.append(f"{schema['slot_schema_id']} содержит неизвестный auto-fill slot: {slot_id}")
                 elif slot_fill_method(slot) in {"user_question", "operator_manual"}:
                     errors.append(f"{schema['slot_schema_id']} auto-fill slot {slot_id} не может заполняться вопросом или вручную.")
+            for profile in active_profiles_for_schema:
+                for output in profile.get("output_slots_order", []):
+                    output_slot = output.get("slot_id")
+                    if output_slot and output_slot not in slot_by_id:
+                        errors.append(
+                            f"{schema['slot_schema_id']} slot {output_slot} используется профилем "
+                            f"{profile['profile_id']} и не может отсутствовать в схеме."
+                        )
+                human_policy = profile.get("human_resolution_policy") or {}
+                for field_name in ("clarification_slots", "handoff_package"):
+                    for human_slot in human_policy.get(field_name, []):
+                        if human_slot and human_slot not in slot_by_id:
+                            errors.append(
+                                f"{schema['slot_schema_id']} slot {human_slot} используется профилем "
+                                f"{profile['profile_id']}.{field_name} и не может отсутствовать в схеме."
+                            )
             previous_priority = -1
             for slot_id in schema["question_order"]:
                 slot = slot_by_id.get(slot_id)
@@ -6110,6 +6572,8 @@ def default_service_scenarios() -> dict[str, Any]:
                 "escalation_policy_id": f"escalation.{item['scenario_id']}",
                 "default_channel_id": "debug",
                 "allowed_channel_ids": ["messenger_bot", "service_desk", "debug"],
+                "audit_required": True,
+                "log_required": True,
                 "tags": ["mvp"],
             }
             for item in DEFAULT_SCENARIOS
@@ -6154,7 +6618,6 @@ def default_interaction_channels() -> dict[str, Any]:
                         "message_template": "Позвать специалиста в диалог с полным контекстом сценария.",
                     },
                 }),
-                "audit_required": True,
                 "enabled": True,
             },
             {
@@ -6190,7 +6653,6 @@ def default_interaction_channels() -> dict[str, Any]:
                         "message_template": "Создать наряд ответственному специалисту с пакетом эскалации.",
                     },
                 }),
-                "audit_required": True,
                 "enabled": True,
             },
             {
@@ -6226,7 +6688,6 @@ def default_interaction_channels() -> dict[str, Any]:
                         "message_template": "Остановить сценарий и показать причину эскалации оператору.",
                     },
                 }),
-                "audit_required": True,
                 "enabled": True,
             },
         ],
@@ -6482,6 +6943,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
         profile_id: str,
         display_name: str,
         description: str,
+        slot_schema_id: str,
         target_slot_id: str,
         output_slots: list[str],
         input_attributes: list[dict[str, Any]],
@@ -6552,8 +7014,8 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
             "display_name": display_name,
             "status": status,
             "description": description,
+            "slot_schema_id": slot_schema_id,
             "target_slot_id": target_slot_id,
-            "input_slots": input_slots,
             "enrichment_steps": enrichment_steps,
             "output_slots_order": normalize_output_slot_order(output_order, target_slot_id),
             "llm_resolution_script": {
@@ -6575,8 +7037,6 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "operator_handoff": 0.5,
             },
             "max_attempts": max_attempts,
-            "audit_required": True,
-            "log_required": True,
         }
         profile["llm_resolution_script"]["script_text"] = default_resolution_script_text(profile)
         return profile
@@ -6588,6 +7048,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.password_reset.login_from_ad",
                 "Поиск логина в AD по ФИО",
                 "Заполняет логин и идентификатор пользователя для сброса пароля: извлекает признаки личности, ищет результаты в AD и задает уточнение при неоднозначности.",
+                "slot.password_reset",
                 "user_login",
                 ["user_login", "user_id"],
                 [
@@ -6637,6 +7098,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.software_issue.device_from_ad",
                 "Устройство пользователя из AD",
                 "Определяет основное устройство пользователя по логину через профиль AD.",
+                "slot.software_issue",
                 "device_name",
                 ["device_name"],
                 [resolution_attribute("user_login", display_name="Логин пользователя", source="slot", source_ref="user_login", required=True)],
@@ -6660,6 +7122,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.hardware_issue.device_from_cmdb",
                 "Устройство из CMDB",
                 "Заполняет модель устройства по имени или инвентарному номеру через CMDB.",
+                "slot.hardware_issue",
                 "device_model",
                 ["device_model"],
                 [resolution_attribute("device_id", display_name="ID устройства", source="slot", source_ref="device_id", required=True)],
@@ -6678,6 +7141,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.network_issue.subnet_from_cmdb",
                 "Подсеть по локации из CMDB",
                 "Определяет подсеть по локации для сетевого инцидента.",
+                "slot.network_issue",
                 "subnet",
                 ["subnet"],
                 [resolution_attribute("location", display_name="Локация", source="slot", source_ref="location", required=True)],
@@ -6697,6 +7161,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.access_request.user_from_ad",
                 "Пользователь запроса доступа из AD",
                 "Заполняет идентификатор пользователя для запроса доступа по логину.",
+                "slot.access_request",
                 "user_id",
                 ["user_id"],
                 [resolution_attribute("user_login", display_name="Логин пользователя", source="slot", source_ref="user_login", required=True)],
@@ -6719,6 +7184,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 "profile.history.password_reset.resolved",
                 "История успешных сбросов пароля",
                 "Ищет похожие закрытые заявки сброса пароля только в разрешенном сценарии и только с подтвержденным качеством.",
+                "slot.password_reset",
                 "account_type",
                 ["account_type"],
                 [resolution_attribute("user_login", display_name="Логин пользователя", source="slot", source_ref="user_login", required=True)],
@@ -7042,8 +7508,6 @@ def _launch(
         "endpoint_id": endpoint_id,
         "operation_id": operation_id,
         "risk_level": risk_level,
-        "audit_required": True,
-        "log_required": True,
         "stop_on_error": True,
         "completion_policy": {
             "mode": "sync",

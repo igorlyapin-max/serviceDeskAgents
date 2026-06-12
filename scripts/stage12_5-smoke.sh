@@ -80,7 +80,6 @@ assert "Сценарии" in html, html[:300]
 assert "Сценарии обработки" in html, html[:300]
 for expected_view in [
     'data-view="resolution"',
-    'data-view="orchestrationGraph"',
     'data-view="scenarioSlots"',
     'data-view="scenarioClassification"',
     'data-view="scenarioReact"',
@@ -139,24 +138,22 @@ for expected_slot_text in [
     "Запасной вопрос",
     "Подсказка оператору",
     "Системные пороги уверенности",
-    "Переопределение порогов уверенности",
-    "Переопределение порогов для слота",
+    "Пороги внутри профиля",
     "Автопринятие от",
     "Минимум извлечения",
     "Значение уже есть в текущем обращении",
     "Профиль разрешения атрибута",
     "Сценарий для выбора слотов",
     "data-resolution-slot-scenario",
+    "name=\"slot_schema_id\"",
     "name=\"target_slot_id\"",
-    "name=\"input_slots\" multiple",
     "name=\"clarification_slots\" multiple",
     "name=\"handoff_package\" multiple",
     "enrichment_steps",
     "output_slots_order",
     "llm_resolution_script",
-    "Входные слоты",
     "Обогащение контекста",
-    "Контракт результата",
+    "Параметр ReAct-вызова",
     "Выходные слоты и порядок заполнения",
     "LLM-правила выбора, заполнения и уточнения",
     "Уточнение у клиента и эскалация оператору",
@@ -165,7 +162,6 @@ for expected_slot_text in [
     "Уточнения у клиента",
     "Эскалация оператору",
     "Технический ключ поля",
-    "Служебные списки",
     "Где используется",
     "slot-schema-operation",
     "route-operation",
@@ -389,13 +385,10 @@ temporary["scenario_id"] = "ui_temp_scenario"
 temporary["display_name"] = "Временный UI сценарий"
 temporary["description"] = "Smoke-проверка создания сценария из меню администратора."
 temporary["status"] = "draft"
-temporary["confidence_overrides"] = {"auto_accept_confidence": 0.9}
 scenario_payload["scenarios"].append(temporary)
 activate_service_scenarios(scenario_payload, "create")
 created = request("/admin/scenarios")
 assert any(item["scenario_id"] == "ui_temp_scenario" for item in created["scenarios"]), created
-created_detail = request("/admin/scenarios/ui_temp_scenario")
-assert created_detail["scenario"]["confidence_overrides"]["auto_accept_confidence"] == 0.9, created_detail
 
 active_scenarios = request("/admin/config/active/service_scenarios")
 scenario_payload = copy.deepcopy(active_scenarios["payload"])
@@ -472,20 +465,33 @@ for schema in slot_payload["slot_schemas"]:
         schema["slots"] = [slot for slot in schema["slots"] if slot["slot_id"] != "account_type"]
         schema["required_slots"] = [slot_id for slot_id in schema["required_slots"] if slot_id != "account_type"]
         schema["question_order"] = [slot_id for slot_id in schema["question_order"] if slot_id != "account_type"]
-activate_config_payload("slot_schemas", slot_payload, "slot-delete-account-type")
-slot_detail = request("/admin/scenarios/password_reset")
-assert not any(slot["slot_id"] == "account_type" for slot in slot_detail["slot_schema"]["slots"]), slot_detail
-assert "account_type" not in slot_detail["slot_schema"]["required_slots"], slot_detail
-password_launch = slot_detail["tool_launches"][0]
-assert password_launch["required_slots"] == ["user_login"], slot_detail
-assert "account_type" not in password_launch["parameter_bindings"], slot_detail
-print("удаление slot без устаревших ссылок проверено")
+account_type_delete_draft = request(
+    "/admin/config/drafts",
+    {
+        "domain": "slot_schemas",
+        "payload": slot_payload,
+        "operator_id": "admin-stage12_5-slot-delete-account-type",
+        "base_version_id": slot_active["active_version_id"],
+    },
+)
+account_type_delete_validated = request(
+    f"/admin/config/drafts/{account_type_delete_draft['draft_id']}/validate",
+    {"operator_id": "admin-stage12_5-slot-delete-account-type"},
+)
+assert account_type_delete_validated["validation"]["status"] == "invalid", account_type_delete_validated
+assert any("account_type" in error for error in account_type_delete_validated["validation"]["errors"]), account_type_delete_validated
+print("удаление slot, используемого профилем, блокируется")
 
 slot_active = request("/admin/config/active/slot_schemas")
 llm_slot_payload = copy.deepcopy(slot_active["payload"])
-for schema in llm_slot_payload["slot_schemas"]:
-    if schema["slot_schema_id"] == "slot.password_reset":
-        schema["slots"] = [
+llm_slot_payload["slot_schemas"].append(
+    {
+        "slot_schema_id": "slot.ui_temp_llm",
+        "display_name": "Временная схема LLM",
+        "required_slots": ["user_fio"],
+        "auto_fill_slots": ["user_fio"],
+        "question_order": [],
+        "slots": [
             {
                 "slot_id": "user_fio",
                 "display_name": "Фамилия Имя Отчество",
@@ -494,10 +500,9 @@ for schema in llm_slot_payload["slot_schemas"]:
                 "fill_method": "llm_extraction",
                 "extraction_instruction": "Извлеки ФИО сотрудника.",
             }
-        ]
-        schema["required_slots"] = ["user_fio"]
-        schema["auto_fill_slots"] = ["user_fio"]
-        schema["question_order"] = []
+        ],
+    }
+)
 llm_slot_draft = request(
     "/admin/config/drafts",
     {
@@ -515,7 +520,7 @@ assert llm_slot_validated["validation"]["status"] == "valid", llm_slot_validated
 
 stale_profile_payload = copy.deepcopy(llm_slot_payload)
 for schema in stale_profile_payload["slot_schemas"]:
-    if schema["slot_schema_id"] == "slot.password_reset":
+    if schema["slot_schema_id"] == "slot.ui_temp_llm":
         schema["slots"][0]["resolution_profile_id"] = "profile.password_reset.login_from_ad"
 stale_profile_draft = request(
     "/admin/config/drafts",
@@ -530,9 +535,8 @@ stale_profile_validated = request(
     f"/admin/config/drafts/{stale_profile_draft['draft_id']}/validate",
     {"operator_id": "admin-stage12_5-stale-profile"},
 )
-assert stale_profile_validated["validation"]["status"] == "invalid", stale_profile_validated
-assert any("не должен иметь поле resolution_profile_id" in error for error in stale_profile_validated["validation"]["errors"]), stale_profile_validated
-print("строгие поля способа заполнения slot проверены")
+assert stale_profile_validated["validation"]["status"] == "valid", stale_profile_validated
+print("нормализация скрытых полей способа заполнения slot проверена")
 
 route_active = request("/admin/config/active/classification_routes")
 legacy_route_payload = copy.deepcopy(route_active["payload"])
@@ -664,14 +668,14 @@ activate_config_payload("prompt_packs", prompt_payload, "prompt-delete")
 deleted_prompts = request("/admin/config/active/prompt_packs")
 assert not any(pack["prompt_pack_id"] == "prompt.ui_temp" for pack in deleted_prompts["payload"]["packs"]), deleted_prompts
 
-escalation_active = request("/admin/config/active/escalation_policies")
-escalation_payload = copy.deepcopy(escalation_active["payload"])
-for policy in escalation_payload["policies"]:
-    if policy["policy_id"] == "escalation.password_reset":
-        policy["waiting"]["auto_close_after_hours"] = 48
-activate_config_payload("escalation_policies", escalation_payload, "escalation")
+channels_active = request("/admin/config/active/interaction_channels")
+channels_payload = copy.deepcopy(channels_active["payload"])
+for channel in channels_payload["channels"]:
+    if channel["channel_id"] == "debug":
+        channel["waiting_policy"]["client_wait_auto_close_after_hours"] = 48
+activate_config_payload("interaction_channels", channels_payload, "channel-waiting")
 escalation_detail = request("/admin/scenarios/password_reset")
-assert escalation_detail["escalation_policy"]["waiting"]["auto_close_after_hours"] == 48, escalation_detail
+assert escalation_detail["interaction_channel"]["waiting_policy"]["client_wait_auto_close_after_hours"] == 48, escalation_detail
 print("редактирование пяти шагов и CRUD prompt pack проверены")
 
 for domain in sorted(expected_domains):

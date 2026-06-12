@@ -94,20 +94,22 @@ for expected in [
     "Подсказка оператору",
     "Профиль разрешения атрибута",
     "Пороги внутри профиля",
-    "Входные слоты",
     "Обогащение контекста",
+    "Параметр ReAct-вызова",
     "Добавить шаг обогащения",
     "enrichment-step-table",
     "enrichment-step-edit",
-    "Имя сущности результата",
-    "entity:&lt;сущность&gt;.&lt;поле&gt;",
-    "Контракт результата",
+    "Параметры шагов",
+    "Доступные ссылки на результаты",
     "refreshEnrichmentStepCard",
     "Выходные слоты и порядок заполнения",
     "LLM-правила выбора, заполнения и уточнения",
 ]:
     assert expected in js, expected
 for removed in [
+    "Имя сущности результата",
+    "entity:&lt;сущность&gt;.&lt;поле&gt;",
+    "Контракт результата",
     "Упорядоченные шаги, JSON",
     "Сводка профилей",
     "renderResolutionStepCard",
@@ -126,8 +128,8 @@ profiles = profiles_active["payload"]["profiles"]
 assert any(profile["profile_id"] == "profile.password_reset.login_from_ad" for profile in profiles), profiles_active
 login_profile = next(profile for profile in profiles if profile["profile_id"] == "profile.password_reset.login_from_ad")
 assert login_profile["enrichment_steps"][0]["react_call"] == "search_ad_users", login_profile
-assert login_profile["enrichment_steps"][0]["result_entity_name"] == "users", login_profile
-assert any(field["field_id"] == "login" for field in login_profile["enrichment_steps"][0]["result_fields"]), login_profile
+assert login_profile["enrichment_steps"][0]["step_id"] == "step1", login_profile
+assert "result_entity_name" not in login_profile["enrichment_steps"][0], login_profile
 assert any(rule["slot_id"] == "user_id" for rule in login_profile["output_slots_order"]), login_profile
 assert login_profile["llm_resolution_script"]["script_text"], login_profile
 print("default-профили проверены")
@@ -181,6 +183,34 @@ def activate_config_payload(domain, payload, label):
     )
 
 
+two_step_payload = copy.deepcopy(request("/admin/config/active/attribute_resolution_profiles")["payload"])
+two_step_profile = next(profile for profile in two_step_payload["profiles"] if profile["profile_id"] == "profile.password_reset.login_from_ad")
+two_step_profile["enrichment_steps"] = [
+    two_step_profile["enrichment_steps"][0],
+    {
+        "step_id": "step2",
+        "step_name": "Проверить логин повторным поиском",
+        "react_call": "search_ad_users",
+        "parameter_mapping": {
+            "login": "step:step1.react.search_ad_users.output.users.0.login"
+        },
+        "on_error": "continue_to_llm",
+    },
+]
+activate_config_payload("attribute_resolution_profiles", two_step_payload, "two-step")
+two_step_simulation = request(
+    "/admin/scenarios/password_reset/simulate",
+    {
+        "operator_id": "admin-stage12_6",
+        "text": "Иванов Иван не может войти в доменную учетную запись",
+        "run_mode": "llm_readonly",
+    },
+)
+two_step_state = two_step_simulation["resolution_state"]["user_login"]
+assert two_step_state["enrichment_step_results"]["step2"]["parameters"]["login"] == "ivanov", two_step_state
+assert two_step_state["enrichment_step_results"]["step2"]["result"]["users"][0]["login"] == "ivanov", two_step_state
+print("step-ссылка между шагами разрешения атрибута проверена")
+
 slot_active = request("/admin/config/active/slot_schemas")
 slot_payload = copy.deepcopy(slot_active["payload"])
 for schema in slot_payload["slot_schemas"]:
@@ -193,12 +223,22 @@ for schema in slot_payload["slot_schemas"]:
             slot_id for slot_id in schema["auto_fill_slots"]
             if slot_id != "user_id"
         ]
-activate_config_payload("slot_schemas", slot_payload, "slot-profile-extra-output")
-slot_detail = request("/admin/scenarios/password_reset")
-assert not any(slot["slot_id"] == "user_id" for slot in slot_detail["slot_schema"]["slots"]), slot_detail
-assert any(slot["slot_id"] == "user_login" for slot in slot_detail["slot_schema"]["slots"]), slot_detail
-assert any(profile["profile_id"] == "profile.password_reset.login_from_ad" for profile in slot_detail["attribute_resolution_profiles"]), slot_detail
-print("дополнительные output профиля можно не включать в схему слотов")
+slot_remove_draft = request(
+    "/admin/config/drafts",
+    {
+        "domain": "slot_schemas",
+        "payload": slot_payload,
+        "operator_id": "admin-stage12_6-slot-profile-output",
+        "base_version_id": slot_active["active_version_id"],
+    },
+)
+slot_remove_validated = request(
+    f"/admin/config/drafts/{slot_remove_draft['draft_id']}/validate",
+    {"operator_id": "admin-stage12_6-slot-profile-output"},
+)
+assert slot_remove_validated["validation"]["status"] == "invalid", slot_remove_validated
+assert any("user_id" in error for error in slot_remove_validated["validation"]["errors"]), slot_remove_validated
+print("output профиля должен входить в выбранную схему слотов")
 
 payload = copy.deepcopy(profiles_active["payload"])
 temporary = copy.deepcopy(login_profile)
@@ -220,7 +260,7 @@ activate_config_payload("attribute_resolution_profiles", payload, "modify")
 modified = request("/admin/config/active/attribute_resolution_profiles")
 edited = next(profile for profile in modified["payload"]["profiles"] if profile["profile_id"] == "profile.ui_temp.resolution")
 assert edited["display_name"] == "Временный профиль UI изменен", modified
-assert edited["status"] == "planned", modified
+assert edited["status"] == "active", modified
 
 payload = copy.deepcopy(modified["payload"])
 payload["profiles"] = [

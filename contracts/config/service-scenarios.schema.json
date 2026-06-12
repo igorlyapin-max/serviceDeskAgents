@@ -82,6 +82,12 @@
             },
             "uniqueItems": true
           },
+          "audit_required": {
+            "type": "boolean"
+          },
+          "log_required": {
+            "type": "boolean"
+          },
           "tags": {
             "type": "array",
             "items": {

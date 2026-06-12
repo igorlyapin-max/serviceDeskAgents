@@ -888,7 +888,7 @@ function resolutionProgressText(item) {
 function resolutionEnrichmentLabel(steps = []) {
   if (!steps.length) return 'нет ReAct-вызовов';
   return steps
-    .map((step) => `${step.step_name || step.react_call} -> ${step.result_entity_name}`)
+    .map((step, index) => `${step.step_name || step.react_call || `Шаг ${index + 1}`} (${step.step_id || `step${index + 1}`})`)
     .join('; ');
 }
 
