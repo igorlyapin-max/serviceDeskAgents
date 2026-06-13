@@ -236,6 +236,8 @@ class TicketWorkflow:
             queued = self.processing_store.enqueue_async_tool_command(
                 invocation,
                 expected_event_type=completion_policy["expected_event_type"],
+                result_transport=completion_policy.get("result_transport", "http_callback"),
+                contract_snapshot=self._external_event_contract_snapshot(invocation, completion_policy),
                 deadline_seconds=completion_policy.get("max_wait_seconds"),
                 reason=f"Ожидание результата ReAct-вызова {invocation['tool_name']}.",
             )
@@ -963,6 +965,24 @@ class TicketWorkflow:
             and completion_policy.get("mode") == "external_event"
             and bool(completion_policy.get("expected_event_type"))
             and self.processing_store is not None
+        )
+
+    def _external_event_contract_snapshot(
+        self,
+        invocation: dict[str, Any],
+        completion_policy: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self.config_store:
+            return None
+        endpoint_id = invocation.get("endpoint_id")
+        operation_id = invocation.get("operation_id")
+        event_type = completion_policy.get("expected_event_type")
+        if not endpoint_id or not operation_id or not event_type:
+            return None
+        return self.config_store.external_event_contract_snapshot(
+            endpoint_id=endpoint_id,
+            operation_id=operation_id,
+            event_type=event_type,
         )
 
     def _async_tool_queued_result(

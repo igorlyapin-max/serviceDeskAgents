@@ -318,12 +318,28 @@ PYTHON=.venv/bin/python make stage13-check
 Долгие n8n runbook workflow запускаются без удержания HTTP request в orchestrator:
 
 ```text
-ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> POST /external-events/n8n
+ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> ExternalEvent
 ```
 
 Default topic исходящих команд: `tool.commands`. Локальный Kafka/Redpanda endpoint с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
 
-Worker передает n8n полный callback package в `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source` и `idempotency_key`.
+Worker передает n8n полный callback package в `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source`, `idempotency_key_base`, `result_transport` и `result_topic`.
+
+Бизнес-контракт результата один: `contracts/integrations/external-event.schema.json`. HTTP callback `POST /external-events/{source}` и Kafka topic `external.events` являются транспортами доставки одного и того же `ExternalEvent`.
+
+Default topic входящих внешних результатов: `external.events`. Для запуска consumer:
+
+```bash
+PYTHON=.venv/bin/python make async-external-event-worker
+```
+
+`completion_policy.result_transport` задает ожидаемый транспорт результата:
+
+- `http_callback` - n8n вызывает `callback_url`;
+- `kafka_event` - n8n публикует `ExternalEvent` в `result_topic`;
+- `both` - n8n может использовать оба транспорта, повторная доставка обрабатывается по per-event `idempotency_key`.
+
+`idempotency_key_base` является ключом команды. Каждый `progress`, `success`, `error`, `timeout` или `cancelled` результат должен отправляться как отдельный `ExternalEvent` со стабильным `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Kafka-доставка принимается только для ожиданий с `result_transport=kafka_event|both` и только из ожидаемого `result_topic`.
 
 Опубликовать pending outbox batch:
 

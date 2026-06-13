@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import copy
 import json
 import tempfile
 import unittest
@@ -9,8 +10,18 @@ from pathlib import Path
 from apps.orchestrator.app.cases import CaseStore
 from apps.orchestrator.app.config_registry import ConfigStore
 from apps.orchestrator.app.contracts import ContractRegistry
-from apps.orchestrator.app.kafka_runtime import KafkaCommandRecord, OutboxPublisher, ToolCommandWorker
-from apps.orchestrator.app.processing import DEFAULT_ASYNC_TOOL_COMMAND_TOPIC, ProcessingConflict, ProcessingStore
+from apps.orchestrator.app.kafka_runtime import (
+    ExternalEventWorker,
+    KafkaCommandRecord,
+    OutboxPublisher,
+    ToolCommandWorker,
+)
+from apps.orchestrator.app.processing import (
+    DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+    DEFAULT_EXTERNAL_EVENT_TOPIC,
+    ProcessingConflict,
+    ProcessingStore,
+)
 from apps.orchestrator.app.workflow import TicketWorkflow
 
 
@@ -154,13 +165,45 @@ class AsyncN8nKafkaTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def enqueue_command(self, *, invocation_id: str = "inv-async-runbook-1") -> dict:
+    def enqueue_command(
+        self,
+        *,
+        invocation_id: str = "inv-async-runbook-1",
+        result_transport: str = "http_callback",
+    ) -> dict:
         return self.processing_store.enqueue_async_tool_command(
             runbook_invocation(self.case, invocation_id=invocation_id),
             expected_event_type="start_systemcenter_runbook_completed",
+            result_transport=result_transport,
             deadline_seconds=3600,
             callback_base_url="http://127.0.0.1:18088",
         )
+
+    def external_event(self, queued: dict, *, status: str = "success", event_id: str = "evt-runbook-success") -> dict:
+        event = {
+            "schema_version": "1.0",
+            "event_id": event_id,
+            "case_id": queued["wait"]["case_id"],
+            "ticket_id": queued["wait"]["ticket_id"],
+            "wait_id": queued["wait"]["wait_id"],
+            "correlation_id": queued["wait"]["correlation_id"],
+            "source": queued["command"]["source"],
+            "event_type": queued["command"]["expected_event_type"],
+            "status": status,
+            "received_at": "2026-06-13T10:00:00+00:00",
+            "idempotency_key": f"{queued['command']['idempotency_key']}:{event_id}",
+        }
+        if status == "error":
+            event["error"] = {
+                "code": "runbook_failed",
+                "message": "Ранбук завершился ошибкой.",
+            }
+        else:
+            event["result"] = {
+                "runbook_status": status,
+                "message": "Ранбук вернул внешний результат.",
+            }
+        return event
 
     def test_enqueue_async_tool_command_opens_wait_and_outbox_command(self) -> None:
         result = self.enqueue_command()
@@ -175,7 +218,10 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         self.assertEqual(async_callback["correlation_id"], result["wait"]["correlation_id"])
         self.assertEqual(async_callback["event_type"], "start_systemcenter_runbook_completed")
         self.assertEqual(async_callback["callback_url"], "http://127.0.0.1:18088/external-events/n8n")
-        self.assertEqual(async_callback["idempotency_key"], result["command"]["idempotency_key"])
+        self.assertEqual(async_callback["idempotency_key_base"], result["command"]["idempotency_key"])
+        self.assertNotIn("idempotency_key", async_callback)
+        self.assertEqual(async_callback["result_transport"], "http_callback")
+        self.assertEqual(async_callback["result_topic"], DEFAULT_EXTERNAL_EVENT_TOPIC)
         outbox = self.processing_store.list_outbox(case_id=self.case["case_id"])["messages"]
         command_messages = [item for item in outbox if item["event_type"] == "async_tool_invocation_requested"]
         self.assertEqual(len(command_messages), 1)
@@ -359,6 +405,7 @@ class AsyncN8nKafkaTest(unittest.TestCase):
                     "max_wait_seconds": 3600,
                     "timeout_action": "escalate_operator",
                     "expected_event_type": "start_systemcenter_runbook_completed",
+                    "result_transport": "kafka_event",
                 },
             },
         }
@@ -387,8 +434,42 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         self.assertEqual(result["tool_result"]["status"], "success")
         self.assertEqual(result["tool_result"]["output"]["runbook_status"], "queued")
         self.assertIn("async_wait", result["tool_result"]["extensions"])
+        self.assertEqual(
+            result["invocation"]["extensions"]["async_callback"]["result_transport"],
+            "kafka_event",
+        )
+        self.assertEqual(
+            result["tool_result"]["extensions"]["async_wait"]["completion_policy"]["result_transport"],
+            "kafka_event",
+        )
+        wait = self.processing_store.require_wait(result["tool_result"]["extensions"]["async_wait"]["wait_id"])
+        self.assertEqual(wait["payload"]["result_transport"], "kafka_event")
+        self.assertEqual(wait["payload"]["result_topic"], DEFAULT_EXTERNAL_EVENT_TOPIC)
+        self.assertEqual(
+            wait["payload"]["contract_snapshot"]["event_type"],
+            "start_systemcenter_runbook_completed",
+        )
         outbox = self.processing_store.list_outbox(case_id=self.case["case_id"])["messages"]
         self.assertTrue(any(message["event_type"] == "async_tool_invocation_requested" for message in outbox))
+
+    def test_invalid_result_transport_fails_config_validation(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("tool_launch_matrix"))
+        launch = payload["matrices"][0]["launches"][0]
+        launch.setdefault("completion_policy", {})
+        launch["completion_policy"].update(
+            {
+                "mode": "external_event",
+                "max_wait_seconds": 3600,
+                "timeout_action": "escalate_operator",
+                "expected_event_type": "start_systemcenter_runbook_completed",
+                "result_transport": "kafka_events",
+            }
+        )
+
+        validation = self.config_store.validate_payload("tool_launch_matrix", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("result_transport" in error for error in validation["errors"]))
 
     def test_hr_find_manager_workflow_requires_servicedesk_token(self) -> None:
         workflow_path = Path("infra/n8n/workflows/hr-find-manager.json")
@@ -413,6 +494,210 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         self.assertEqual(result["external_event_result"]["wait"]["status"], "failed")
         self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "failed")
         self.assertEqual(self.processing_store.latest_run(self.case["case_id"])["status"], "queued")
+
+    def test_external_event_worker_records_kafka_result_and_commits(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-kafka", result_transport="kafka_event")
+        ack = AckSpy()
+        record = KafkaCommandRecord(
+            value=self.external_event(queued),
+            topic=DEFAULT_EXTERNAL_EVENT_TOPIC,
+            ack=ack,
+        )
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events([record], limit=1)
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["dead_lettered"], 0)
+        self.assertEqual(ack.count, 1)
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "completed")
+        outbox = self.processing_store.list_outbox(case_id=self.case["case_id"])["messages"]
+        self.assertTrue(any(message["topic"] == "integration.events" for message in outbox))
+        self.assertTrue(any(message["topic"] == "agent.tasks" for message in outbox))
+
+    def test_external_event_worker_dead_letters_kafka_event_for_http_only_wait(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-http-only", result_transport="http_callback")
+        ack = AckSpy()
+        record = KafkaCommandRecord(
+            value=self.external_event(queued, event_id="evt-http-only-over-kafka"),
+            topic=DEFAULT_EXTERNAL_EVENT_TOPIC,
+            ack=ack,
+        )
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events([record], limit=1)
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "open")
+
+    def test_external_event_worker_dead_letters_wrong_kafka_topic(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-wrong-topic", result_transport="kafka_event")
+        ack = AckSpy()
+        record = KafkaCommandRecord(
+            value=self.external_event(queued, event_id="evt-wrong-topic"),
+            topic="other.events",
+            ack=ack,
+        )
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events([record], limit=1)
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "open")
+
+    def test_external_event_worker_dead_letters_raw_invalid_json_and_respects_limit(self) -> None:
+        first_ack = AckSpy()
+        second_ack = AckSpy()
+        records = [
+            KafkaCommandRecord(
+                value=b"{not-json",
+                topic=DEFAULT_EXTERNAL_EVENT_TOPIC,
+                partition=0,
+                offset=10,
+                ack=first_ack,
+            ),
+            KafkaCommandRecord(
+                value=b"{also-not-json",
+                topic=DEFAULT_EXTERNAL_EVENT_TOPIC,
+                partition=0,
+                offset=11,
+                ack=second_ack,
+            ),
+        ]
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events(records, limit=1)
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(first_ack.count, 1)
+        self.assertEqual(second_ack.count, 0)
+
+    def test_external_event_worker_accepts_progress_then_success_with_distinct_event_keys(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-progress-success", result_transport="kafka_event")
+        progress = self.external_event(queued, status="progress", event_id="evt-progress")
+        success = self.external_event(queued, status="success", event_id="evt-success")
+        progress_ack = AckSpy()
+        success_ack = AckSpy()
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events(
+            [
+                KafkaCommandRecord(value=progress, topic=DEFAULT_EXTERNAL_EVENT_TOPIC, ack=progress_ack),
+                KafkaCommandRecord(value=success, topic=DEFAULT_EXTERNAL_EVENT_TOPIC, ack=success_ack),
+            ],
+            limit=2,
+        )
+
+        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["dead_lettered"], 0)
+        self.assertEqual(progress_ack.count, 1)
+        self.assertEqual(success_ack.count, 1)
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "completed")
+
+    def test_external_event_worker_accepts_outbox_envelope_shape(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-envelope", result_transport="kafka_event")
+        event = self.external_event(queued, event_id="evt-envelope")
+        envelope = {
+            "schema_version": "1.0",
+            "topic": DEFAULT_EXTERNAL_EVENT_TOPIC,
+            "key": queued["wait"]["case_id"],
+            "event_type": "external_event",
+            "payload": event,
+        }
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_event(envelope)
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "completed")
+
+    def test_external_event_worker_keeps_duplicate_idempotent(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-duplicate", result_transport="kafka_event")
+        event = self.external_event(queued, event_id="evt-duplicate")
+        worker = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        )
+
+        first = worker.process_event(event)
+        duplicate = worker.process_event(event)
+
+        self.assertTrue(first["accepted"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "completed")
+
+    def test_external_event_worker_dead_letters_poison_payload_and_commits(self) -> None:
+        ack = AckSpy()
+        record = KafkaCommandRecord(
+            value={"schema_version": "1.0"},
+            topic=DEFAULT_EXTERNAL_EVENT_TOPIC,
+            ack=ack,
+        )
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events([record], limit=1)
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        outbox = self.processing_store.list_outbox()["messages"]
+        self.assertTrue(any(message["topic"] == "dead-letter" for message in outbox))
+
+    def test_external_event_worker_dead_letters_wrong_event_type_without_case_change(self) -> None:
+        queued = self.enqueue_command(invocation_id="inv-result-wrong-type", result_transport="kafka_event")
+        event = self.external_event(queued, event_id="evt-wrong-type")
+        event["event_type"] = "wrong_completed"
+        ack = AckSpy()
+        record = KafkaCommandRecord(value=event, topic=DEFAULT_EXTERNAL_EVENT_TOPIC, ack=ack)
+
+        result = ExternalEventWorker(
+            self.processing_store,
+            self.config_store,
+            self.contracts,
+            worker_id="test-event-worker",
+        ).process_events([record], limit=1)
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        self.assertEqual(self.processing_store.require_wait(queued["wait"]["wait_id"])["status"], "open")
 
 
 if __name__ == "__main__":

@@ -44,9 +44,19 @@ Action tools требуют запись согласования до того,
 Для длительных ранбуков используется асинхронный контур:
 
 ```text
-processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> POST /external-events/n8n
+processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> ExternalEvent
 ```
 
 Default topic исходящих команд: `tool.commands`. Локальный Kafka/Redpanda endpoint с host: `127.0.0.1:19092`, внутри docker network: `redpanda:9092`.
 
-Worker передает в webhook `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source` и `idempotency_key`. Workflow должен вернуть `progress`, `success`, `error`, `timeout` или `cancelled` на `callback_url`; n8n не закрывает и не эскалирует заявку напрямую.
+Worker передает в webhook `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source`, `idempotency_key_base`, `result_transport` и `result_topic`.
+
+Workflow должен вернуть `progress`, `success`, `error`, `timeout` или `cancelled` как канонический `ExternalEvent`. Транспорт выбирается по `result_transport`:
+
+- `http_callback` - отправить `ExternalEvent` на `callback_url`;
+- `kafka_event` - опубликовать `ExternalEvent` в Kafka topic `result_topic`, локальный default `external.events`;
+- `both` - допускается оба транспорта, повторная доставка того же события должна использовать тот же per-event `idempotency_key`.
+
+`idempotency_key_base` нельзя копировать как ключ всех результатов. Для каждого результата workflow формирует стабильный `idempotency_key`, например `<idempotency_key_base>:<event_id>`, чтобы `progress` и финальный `success/error` не конфликтовали. Для Kafka-доставки producer должен быть аутентифицирован инфраструктурой Kafka, а событие принимается orchestrator только из ожидаемого `result_topic`.
+
+n8n не закрывает и не эскалирует заявку напрямую: он только возвращает внешний результат в orchestrator.

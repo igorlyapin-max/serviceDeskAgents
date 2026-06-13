@@ -234,12 +234,15 @@ Runtime использует Kafka-ready outbox и следующие topics:
 - `timer.commands`;
 - `timer.events`;
 - `integration.events`;
+- `external.events`;
 - `audit.events`;
 - `dead-letter`.
 
 Topics должны управляться инфраструктурой. Сервисы приложения не должны создавать topics на старте.
 
 `tool.commands` является default topic для исходящих async ReAct-вызовов и n8n runbook команд. Producer читает `processing_outbox`, публикует envelope-сообщение в этот topic и помечает outbox запись как `published` только после успешной отправки в Kafka. Worker подтверждает Kafka offset только после успешной обработки команды или после durable записи poison message в `dead-letter`.
+
+`external.events` является default topic для входящих результатов внешних асинхронных операций. `ExternalEvent` consumer подтверждает Kafka offset только после durable записи результата, duplicate receipt или `dead-letter`. Для него используются отдельные переменные `EXTERNAL_EVENT_TOPIC`, `EXTERNAL_EVENT_WORKER_GROUP_ID` и `EXTERNAL_EVENT_WORKER_OFFSET_RESET`.
 
 ## Длительные действия и external events
 
@@ -256,13 +259,15 @@ Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 
 В local/dev допустим общий `INTEGRATION_CALLBACK_TOKEN`. В shared/staging/production используйте source-specific переменные, например `INTEGRATION_CALLBACK_TOKEN__N8N` для `POST /external-events/n8n`.
 
-Для долгого n8n runbook worker передает в webhook `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key` и бизнес-параметры операции. n8n не закрывает и не эскалирует заявку напрямую: результат возвращается только через `POST /external-events/n8n`.
+Для долгого n8n runbook worker передает в webhook `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic` и бизнес-параметры операции. n8n не закрывает и не эскалирует заявку напрямую: результат возвращается через разрешенный транспорт результата.
 
 Тело события должно соответствовать envelope-контракту `contracts/integrations/external-event.schema.json`. Обязательные поля: `event_id`, `case_id`, `correlation_id`, `source`, `event_type`, `status`, `received_at`, `idempotency_key`. Допустимые статусы: `progress`, `success`, `error`, `timeout`, `cancelled`.
 
-Envelope проверяет общую форму события. Содержимое `result` или `error` дополнительно проверяется по `async_event_contracts` endpoint-операции, которая открыла ожидание. Если в `wait_state` сохранен snapshot контракта, используется он; иначе используется активная конфигурация по `wait_state.origin.endpoint_id`, `wait_state.origin.operation_id` и `event_type`.
+Envelope проверяет общую форму события. Содержимое `result` или `error` дополнительно проверяется по snapshot `async_event_contracts` endpoint-операции, которая открыла ожидание. Для старых ожиданий без snapshot допускается fallback на активную конфигурацию по `wait_state.origin.endpoint_id`, `wait_state.origin.operation_id` и `event_type`.
 
-Внешняя система не закрывает и не эскалирует заявку напрямую. Она возвращает только результат, ошибку или progress. Платформа дедуплицирует событие по `idempotency_key`; повтор с тем же ключом, но другим `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type` или `status`, отклоняется как `external_event_idempotency_conflict`. Payload события перед записью в timeline, outbox и receipt маскируется и компактируется.
+Внешняя система не закрывает и не эскалирует заявку напрямую. Она возвращает только результат, ошибку или progress. `idempotency_key_base` является ключом команды; каждый `ExternalEvent` должен иметь собственный стабильный `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Платформа дедуплицирует событие по `idempotency_key`; повтор с тем же ключом, но другим `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type`, `status` или payload hash, отклоняется как `external_event_idempotency_conflict`. Payload события перед записью в timeline, outbox и receipt маскируется и компактируется.
+
+`result_transport` является runtime-правилом, а не подсказкой. HTTP callback принимается только для ожиданий `http_callback` или `both`; Kafka event принимается только для `kafka_event` или `both` и только из ожидаемого `result_topic`. Для shared/staging/production Kafka producer identity должен ограничиваться ACL/SASL/mTLS или равноценным механизмом инфраструктуры.
 
 ## Production hardening backlog
 

@@ -234,12 +234,15 @@ The runtime uses a Kafka-ready outbox and the following topics:
 - `timer.commands`;
 - `timer.events`;
 - `integration.events`;
+- `external.events`;
 - `audit.events`;
 - `dead-letter`.
 
 Topics must be managed by infrastructure. Application services must not create topics at startup.
 
 `tool.commands` is the default topic for outbound async ReAct calls and n8n runbook commands. The producer reads `processing_outbox`, publishes the envelope message to this topic and marks the outbox row as `published` only after Kafka confirms delivery. The worker commits a Kafka offset only after successful command processing or after a poison message is durably written to `dead-letter`.
+
+`external.events` is the default topic for inbound results from external async operations. The `ExternalEvent` consumer commits a Kafka offset only after a durable result, duplicate receipt, or `dead-letter` record exists. It uses separate `EXTERNAL_EVENT_TOPIC`, `EXTERNAL_EVENT_WORKER_GROUP_ID`, and `EXTERNAL_EVENT_WORKER_OFFSET_RESET` variables.
 
 ## Long-Running Actions and External Events
 
@@ -256,13 +259,15 @@ Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 
 In local/dev, the shared `INTEGRATION_CALLBACK_TOKEN` is allowed. In shared/staging/production, use source-specific variables, for example `INTEGRATION_CALLBACK_TOKEN__N8N` for `POST /external-events/n8n`.
 
-For a long-running n8n runbook, the worker passes `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key` and operation business parameters to the webhook. n8n must not close or escalate the case directly: the result is returned only through `POST /external-events/n8n`.
+For a long-running n8n runbook, the worker passes `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic`, and operation business parameters to the webhook. n8n must not close or escalate the case directly: the result is returned through the allowed result transport.
 
 The event body must match the envelope contract in `contracts/integrations/external-event.schema.json`. Required fields are `event_id`, `case_id`, `correlation_id`, `source`, `event_type`, `status`, `received_at` and `idempotency_key`. Allowed statuses are `progress`, `success`, `error`, `timeout` and `cancelled`.
 
-The envelope validates the common event shape. The `result` or `error` payload is additionally validated with the `async_event_contracts` entry on the endpoint operation that opened the wait. If `wait_state` stores a contract snapshot, that snapshot is used; otherwise the link is resolved from the active configuration by `wait_state.origin.endpoint_id`, `wait_state.origin.operation_id` and `event_type`.
+The envelope validates the common event shape. The `result` or `error` payload is additionally validated with the `async_event_contracts` snapshot from the endpoint operation that opened the wait. For old waits without a snapshot, the runtime may fall back to the active configuration by `wait_state.origin.endpoint_id`, `wait_state.origin.operation_id` and `event_type`.
 
-External systems do not close or escalate cases directly. They only return a result, error or progress update. The platform deduplicates events by `idempotency_key`; a repeated key with a different `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type` or `status` is rejected as `external_event_idempotency_conflict`. Event payload is masked and compacted before it is written to timeline, outbox and receipt storage.
+External systems do not close or escalate cases directly. They only return a result, error or progress update. `idempotency_key_base` is the command key; each `ExternalEvent` must have its own stable `idempotency_key`, for example `<idempotency_key_base>:<event_id>`. The platform deduplicates events by `idempotency_key`; a repeated key with a different `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type`, `status`, or payload hash is rejected as `external_event_idempotency_conflict`. Event payload is masked and compacted before it is written to timeline, outbox and receipt storage.
+
+`result_transport` is a runtime rule, not a hint. HTTP callback is accepted only for `http_callback` or `both` waits; Kafka events are accepted only for `kafka_event` or `both` waits and only from the expected `result_topic`. In shared/staging/production, Kafka producer identity must be restricted with ACL/SASL/mTLS or an equivalent infrastructure control.
 
 ## Production Hardening Backlog
 

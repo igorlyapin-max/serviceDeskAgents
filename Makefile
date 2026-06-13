@@ -51,6 +51,10 @@ async-outbox-publish-once:
 async-tool-worker:
 	$(PYTHON) -m apps.orchestrator.app.kafka_runtime worker --topic $${TOOL_COMMAND_TOPIC:-tool.commands}
 
+.PHONY: async-external-event-worker
+async-external-event-worker:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime external-event-worker --topic $${EXTERNAL_EVENT_TOPIC:-external.events}
+
 .PHONY: stage3-smoke
 stage3-smoke:
 	./scripts/stage3-smoke.sh

@@ -300,6 +300,22 @@ class ExternalEventsTest(unittest.TestCase):
         with self.assertRaises(ProcessingConflict):
             self.processing_store.record_external_event(event)
 
+    def test_external_event_transport_must_match_wait_policy(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+            payload={
+                "result_transport": "kafka_event",
+                "result_topic": "external.events",
+            },
+        )
+        event = self.external_event(wait)
+
+        with self.assertRaises(ProcessingConflict):
+            self.processing_store.record_external_event(event, received_transport="http_callback")
+
     def test_external_event_idempotency_key_rejects_different_event(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
@@ -310,6 +326,22 @@ class ExternalEventsTest(unittest.TestCase):
         event = self.external_event(wait)
         self.processing_store.record_external_event(event)
         changed = self.external_event(wait, event_id="evt-provider-2")
+        changed["idempotency_key"] = event["idempotency_key"]
+
+        with self.assertRaises(ExternalEventIdempotencyConflict):
+            self.processing_store.record_external_event(changed)
+
+    def test_external_event_idempotency_key_rejects_same_metadata_with_different_payload(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait, result={"provider_status": "resolved"})
+        self.processing_store.record_external_event(event)
+        changed = self.external_event(wait, result={"provider_status": "failed"})
+        changed["event_id"] = event["event_id"]
         changed["idempotency_key"] = event["idempotency_key"]
 
         with self.assertRaises(ExternalEventIdempotencyConflict):

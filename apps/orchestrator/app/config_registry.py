@@ -689,6 +689,9 @@ def normalize_tool_launch_completion_policy(launch: dict[str, Any]) -> None:
         result["expected_event_type"] = expected_event_type
     elif mode == "external_event":
         result["expected_event_type"] = f"{launch.get('operation_id') or launch.get('tool_name') or 'operation'}_completed"
+    if mode == "external_event":
+        result_transport = str(policy.get("result_transport") or "http_callback")
+        result["result_transport"] = result_transport
     launch["completion_policy"] = result
 
 

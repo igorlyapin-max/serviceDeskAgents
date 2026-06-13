@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -61,6 +62,11 @@ KAFKA_TOPICS = [
         "key": "case_id",
     },
     {
+        "topic": "external.events",
+        "description": "Входящие результаты внешних асинхронных операций в каноническом ExternalEvent contract.",
+        "key": "case_id",
+    },
+    {
         "topic": "audit.events",
         "description": "События аудита административных и runtime-действий.",
         "key": "actor_id",
@@ -86,7 +92,14 @@ EXTERNAL_EVENT_WAIT_STATUS = {
 }
 WAIT_ORIGIN_KINDS = {"react_call", "client_question", "approval", "timer", "system_policy", "unknown"}
 DEFAULT_ASYNC_TOOL_COMMAND_TOPIC = "tool.commands"
+DEFAULT_EXTERNAL_EVENT_TOPIC = "external.events"
 DEFAULT_EXTERNAL_EVENT_SOURCE = "n8n"
+EXTERNAL_EVENT_RESULT_TRANSPORTS = {"http_callback", "kafka_event", "both"}
+EXTERNAL_EVENT_TRANSPORT_ALLOWLIST = {
+    "http_callback": {"http_callback"},
+    "kafka_event": {"kafka_event"},
+    "both": {"http_callback", "kafka_event"},
+}
 SENSITIVE_ORIGIN_KEYWORDS = (
     "token",
     "password",
@@ -430,6 +443,9 @@ class ProcessingStore:
         expected_event_type: str,
         source: str = DEFAULT_EXTERNAL_EVENT_SOURCE,
         topic: str | None = None,
+        result_transport: str = "http_callback",
+        result_topic: str | None = None,
+        contract_snapshot: dict[str, Any] | None = None,
         deadline_seconds: int | None = None,
         reason: str | None = None,
         callback_base_url: str | None = None,
@@ -441,6 +457,9 @@ class ProcessingStore:
             raise ProcessingConflict("Асинхронный worker сейчас поддерживает только adapter_type=n8n_webhook.")
 
         command_topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        if result_transport not in EXTERNAL_EVENT_RESULT_TRANSPORTS:
+            raise ProcessingConflict(f"Неподдерживаемый result_transport для ExternalEvent: {result_transport}.")
+        event_topic = result_topic or os.getenv("EXTERNAL_EVENT_TOPIC", DEFAULT_EXTERNAL_EVENT_TOPIC)
         command_idempotency_key = f"{case_id}:tool_command:{invocation['invocation_id']}"
         existing_message = self.outbox_message_by_idempotency_key(command_idempotency_key)
         if existing_message:
@@ -451,6 +470,24 @@ class ProcessingStore:
                 "command": existing_command,
                 "duplicate": True,
             }
+        wait_payload = {
+            "expected_event_type": expected_event_type,
+            "result_transport": result_transport,
+            "result_topic": event_topic,
+        }
+        if contract_snapshot:
+            wait_payload["contract_snapshot"] = copy.deepcopy(contract_snapshot)
+        wait_origin = {
+            "kind": "react_call",
+            "react_call": invocation.get("tool_name"),
+            "endpoint_id": invocation.get("endpoint_id"),
+            "operation_id": invocation.get("operation_id"),
+            "parameters": invocation.get("parameters", {}),
+            "result_transport": result_transport,
+            "result_topic": event_topic,
+        }
+        if contract_snapshot:
+            wait_origin["contract_snapshot"] = copy.deepcopy(contract_snapshot)
         wait = self.open_external_wait(
             case_id,
             source=source,
@@ -459,13 +496,8 @@ class ProcessingStore:
             wait_type="external_event_wait",
             deadline_seconds=deadline_seconds,
             correlation_id=command_idempotency_key,
-            origin={
-                "kind": "react_call",
-                "react_call": invocation.get("tool_name"),
-                "endpoint_id": invocation.get("endpoint_id"),
-                "operation_id": invocation.get("operation_id"),
-                "parameters": invocation.get("parameters", {}),
-            },
+            payload=wait_payload,
+            origin=wait_origin,
         )
         callback_url = self.external_event_callback_url(source, base_url=callback_base_url)
         command_id = new_command_id()
@@ -480,7 +512,9 @@ class ProcessingStore:
             "wait_id": wait["wait_id"],
             "correlation_id": wait["correlation_id"],
             "event_type": expected_event_type,
-            "idempotency_key": command_idempotency_key,
+            "idempotency_key_base": command_idempotency_key,
+            "result_transport": result_transport,
+            "result_topic": event_topic,
         }
         self._prepare_async_invocation_for_storage(command_invocation)
         command = {
@@ -496,6 +530,8 @@ class ProcessingStore:
             "source": source,
             "expected_event_type": expected_event_type,
             "callback_url": callback_url,
+            "result_transport": result_transport,
+            "result_topic": event_topic,
             "idempotency_key": command_idempotency_key,
             "invocation": command_invocation,
         }
@@ -537,12 +573,22 @@ class ProcessingStore:
             ).fetchone()
         return json.loads(row["receipt_json"]) if row else None
 
-    def record_external_event(self, event: dict[str, Any]) -> dict[str, Any]:
+    def record_external_event(
+        self,
+        event: dict[str, Any],
+        *,
+        received_transport: str = "internal",
+        source_topic: str | None = None,
+    ) -> dict[str, Any]:
         event = copy.deepcopy(event)
         event.setdefault("received_at", utc_now())
         receipt = self.external_event_receipt(event["idempotency_key"])
         if receipt:
             self._ensure_external_event_receipt_matches(receipt, event)
+            if receipt.get("receipt_status") == "processing":
+                raise ExternalEventIdempotencyConflict(
+                    "external_event_idempotency_conflict: idempotency_key уже обрабатывается другим worker."
+                )
             return self._external_event_duplicate_result(receipt)
 
         wait = self.active_wait_by_correlation(
@@ -552,6 +598,11 @@ class ProcessingStore:
         if not wait:
             raise ProcessingNotFound(event["correlation_id"])
         self._ensure_external_event_source_matches(wait, event)
+        self._ensure_external_event_transport_matches(
+            wait,
+            received_transport=received_transport,
+            source_topic=source_topic,
+        )
         if event.get("wait_id") and event["wait_id"] != wait["wait_id"]:
             raise ProcessingConflict(
                 f"wait_id {event['wait_id']} не совпадает с активным ожиданием {wait['wait_id']}."
@@ -561,6 +612,7 @@ class ProcessingStore:
             raise ProcessingConflict(
                 f"event_type {event['event_type']} не совпадает с ожидаемым {expected_event_type}."
             )
+        self._claim_external_event_receipt(event)
 
         now = utc_now()
         event["received_at"] = event.get("received_at") or now
@@ -644,7 +696,7 @@ class ProcessingStore:
         }
         if resume_task:
             result["resume_task"] = resume_task
-        self._record_external_event_receipt(event, result)
+        self._complete_external_event_receipt(event, result)
         return result
 
     def overview(self) -> dict[str, Any]:
@@ -1141,7 +1193,7 @@ class ProcessingStore:
             "command_id": command.get("command_id"),
             "idempotency_key": command.get("idempotency_key"),
             "worker_id": worker_id,
-            "error": error[:1000],
+            "error": self._sanitize_error_text(error),
             "command": self._sanitize_external_event_payload(command),
         }
         self._enqueue(
@@ -1150,6 +1202,39 @@ class ProcessingStore:
             "tool_command_failed",
             dead_letter,
             idempotency_key=f"{command.get('idempotency_key') or command.get('command_id')}:dead_letter",
+        )
+        return dead_letter
+
+    def record_external_event_dead_letter(
+        self,
+        event: dict[str, Any],
+        error: str,
+        *,
+        worker_id: str,
+        source_topic: str | None = None,
+    ) -> dict[str, Any]:
+        event_id = event.get("event_id") or f"invalid-{uuid.uuid4().hex[:12]}"
+        idempotency_key = event.get("idempotency_key") or event_id
+        dead_letter = {
+            "schema_version": "1.0",
+            "source_topic": source_topic or event.get("topic") or DEFAULT_EXTERNAL_EVENT_TOPIC,
+            "event_type": "external_event_failed",
+            "case_id": event.get("case_id", "unknown"),
+            "wait_id": event.get("wait_id"),
+            "correlation_id": event.get("correlation_id"),
+            "external_event_id": event.get("event_id"),
+            "external_event_type": event.get("event_type"),
+            "idempotency_key": event.get("idempotency_key"),
+            "worker_id": worker_id,
+            "error": self._sanitize_error_text(error),
+            "external_event": self._sanitize_external_event_payload(event),
+        }
+        self._enqueue(
+            "dead-letter",
+            str(event.get("case_id") or "unknown"),
+            "external_event_failed",
+            dead_letter,
+            idempotency_key=f"{idempotency_key}:external_event_dead_letter",
         )
         return dead_letter
 
@@ -1983,6 +2068,8 @@ class ProcessingStore:
             return result
         if isinstance(value, list):
             return [ProcessingStore._sanitize_external_event_payload(item) for item in value]
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode("utf-8", errors="replace")
         if isinstance(value, str):
             return redact_for_llm(value).text
         return copy.deepcopy(value)
@@ -1994,6 +2081,20 @@ class ProcessingStore:
             if key in safe_event:
                 safe_event[key] = ProcessingStore._compact_external_event_value(safe_event[key])
         return safe_event
+
+    @staticmethod
+    def _sanitize_error_text(error: str) -> str:
+        return redact_for_llm(str(error)).text[:1000]
+
+    @staticmethod
+    def _external_event_payload_hash(event: dict[str, Any]) -> str:
+        payload = {
+            key: ProcessingStore._sanitize_external_event_payload(event[key])
+            for key in ("result", "error", "raw_reference", "metadata", "attachments")
+            if key in event
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _external_event_duplicate_result(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -2056,6 +2157,12 @@ class ProcessingStore:
                 "external_event_idempotency_conflict: idempotency_key уже использован для другого события "
                 f"({', '.join(sorted(mismatched))})."
             )
+        expected_hash = receipt.get("payload_hash")
+        actual_hash = ProcessingStore._external_event_payload_hash(event)
+        if expected_hash and expected_hash != actual_hash:
+            raise ExternalEventIdempotencyConflict(
+                "external_event_idempotency_conflict: idempotency_key уже использован для события с другим payload."
+            )
 
     @staticmethod
     def _ensure_external_event_source_matches(wait: dict[str, Any], event: dict[str, Any]) -> None:
@@ -2075,14 +2182,52 @@ class ProcessingStore:
                 f"{', '.join(sorted(expected_sources))}."
             )
 
-    def _record_external_event_receipt(
+    @staticmethod
+    def _wait_result_transport(wait: dict[str, Any]) -> str | None:
+        payload = wait.get("payload") or {}
+        origin = wait.get("origin") or {}
+        value = payload.get("result_transport") or origin.get("result_transport")
+        return str(value) if value else None
+
+    @staticmethod
+    def _wait_result_topic(wait: dict[str, Any]) -> str | None:
+        payload = wait.get("payload") or {}
+        origin = wait.get("origin") or {}
+        value = payload.get("result_topic") or origin.get("result_topic")
+        return str(value) if value else None
+
+    @staticmethod
+    def _ensure_external_event_transport_matches(
+        wait: dict[str, Any],
+        *,
+        received_transport: str,
+        source_topic: str | None = None,
+    ) -> None:
+        if received_transport == "internal":
+            return
+        expected_transport = ProcessingStore._wait_result_transport(wait)
+        if not expected_transport:
+            return
+        allowed = EXTERNAL_EVENT_TRANSPORT_ALLOWLIST.get(expected_transport, set())
+        if received_transport not in allowed:
+            raise ProcessingConflict(
+                f"ExternalEvent получен через {received_transport}, но ожидание разрешает {expected_transport}."
+            )
+        if received_transport == "kafka_event":
+            expected_topic = ProcessingStore._wait_result_topic(wait)
+            if expected_topic and source_topic and source_topic != expected_topic:
+                raise ProcessingConflict(
+                    f"ExternalEvent получен из topic {source_topic}, но ожидание ожидает {expected_topic}."
+                )
+
+    def _claim_external_event_receipt(
         self,
         event: dict[str, Any],
-        result: dict[str, Any],
     ) -> dict[str, Any]:
         now = utc_now()
         receipt = {
             "schema_version": "1.0",
+            "receipt_status": "processing",
             "idempotency_key": event["idempotency_key"],
             "event_id": event["event_id"],
             "wait_id": event.get("wait_id"),
@@ -2091,12 +2236,18 @@ class ProcessingStore:
             "case_id": event["case_id"],
             "correlation_id": event["correlation_id"],
             "status": event["status"],
+            "payload_hash": self._external_event_payload_hash(event),
             "created_at": now,
             "updated_at": now,
-            "result": copy.deepcopy(result),
+            "result": {
+                "schema_version": "1.0",
+                "accepted": True,
+                "duplicate": True,
+                "idempotency_key": event["idempotency_key"],
+            },
         }
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 insert into external_event_receipts (
                     idempotency_key,
@@ -2122,6 +2273,56 @@ class ProcessingStore:
                     receipt["updated_at"],
                 ),
             )
+        if cursor.rowcount:
+            return receipt
+        existing = self.external_event_receipt(event["idempotency_key"])
+        if existing:
+            self._ensure_external_event_receipt_matches(existing, event)
+            raise ExternalEventIdempotencyConflict(
+                "external_event_idempotency_conflict: idempotency_key уже обрабатывается другим worker."
+            )
+        raise ProcessingConflict(f"Не удалось зафиксировать idempotency claim: {event['idempotency_key']}")
+
+    def _complete_external_event_receipt(
+        self,
+        event: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        receipt = {
+            "schema_version": "1.0",
+            "receipt_status": "completed",
+            "idempotency_key": event["idempotency_key"],
+            "event_id": event["event_id"],
+            "wait_id": event.get("wait_id"),
+            "event_type": event["event_type"],
+            "source": event["source"],
+            "case_id": event["case_id"],
+            "correlation_id": event["correlation_id"],
+            "status": event["status"],
+            "payload_hash": self._external_event_payload_hash(event),
+            "created_at": now,
+            "updated_at": now,
+            "result": copy.deepcopy(result),
+        }
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update external_event_receipts
+                set status = ?,
+                    receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                """,
+                (
+                    receipt["status"],
+                    self._to_json(receipt),
+                    receipt["updated_at"],
+                    receipt["idempotency_key"],
+                ),
+            )
+        if not cursor.rowcount:
+            raise ProcessingConflict(f"external event receipt не найден: {event['idempotency_key']}")
         return receipt
 
     def _ensure_schema(self) -> None:

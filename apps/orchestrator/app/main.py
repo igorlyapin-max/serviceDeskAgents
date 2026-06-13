@@ -1916,7 +1916,7 @@ def external_event(
             if not wait:
                 raise ProcessingNotFound(payload["correlation_id"])
             config_store.validate_external_event_result_contract(wait, payload)
-        result = processing_store.record_external_event(payload)
+        result = processing_store.record_external_event(payload, received_transport="http_callback")
         audit_success(
             context,
             http_request,
