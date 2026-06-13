@@ -20,6 +20,7 @@ class OpenApiContractError(ValueError):
 
 MAX_OPENAPI_CONTRACT_BYTES = 2 * 1024 * 1024
 SUPPORTED_METHODS = {"GET", "POST"}
+TRANSPORT_SECURITY_SELECTOR_KEYS = {"selected_transport", "result_transport"}
 
 
 def safe_url_for_log(url: str) -> str:
@@ -110,6 +111,73 @@ def fetch_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, 
     if not isinstance(document, dict):
         raise OpenApiContractError("OpenAPI endpoint вернул не объект JSON.")
     return document, url
+
+
+def _contains_delivery_selector(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            key in TRANSPORT_SECURITY_SELECTOR_KEYS or _contains_delivery_selector(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_delivery_selector(item) for item in value)
+    return False
+
+
+def _string_list(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or default
+    if isinstance(value, str) and value.strip():
+        return [item.strip() for item in value.split(",") if item.strip()] or default
+    return default
+
+
+def normalize_openapi_transport_security(document: dict[str, Any]) -> dict[str, Any] | None:
+    raw = document.get("x-transport-security")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise OpenApiContractError("x-transport-security должен быть объектом.")
+    if _contains_delivery_selector(raw):
+        raise OpenApiContractError(
+            "x-transport-security описывает защиту транспорта и не должен содержать "
+            "selected_transport или result_transport."
+        )
+
+    result: dict[str, Any] = {}
+    http = raw.get("http") or raw.get("http_callback")
+    if isinstance(http, dict):
+        http_result = {
+            "policy": str(http.get("policy") or "admin_configured"),
+            "production_recommended_scheme": str(
+                http.get("production_recommended_scheme")
+                or http.get("recommended_production_scheme")
+                or "https"
+            ),
+        }
+        for key in ("base_url_env", "callback_base_url_env", "token_header", "token_env"):
+            if http.get(key):
+                http_result[key] = str(http[key])
+        result["http"] = http_result
+
+    kafka = raw.get("kafka") or raw.get("kafka_event") or raw.get("queue")
+    if isinstance(kafka, dict):
+        kafka_result = {
+            "policy": str(kafka.get("policy") or "admin_configured"),
+            "bootstrap_servers_env": str(kafka.get("bootstrap_servers_env") or "KAFKA_BOOTSTRAP_SERVERS"),
+            "security_protocol_env": str(kafka.get("security_protocol_env") or "KAFKA_SECURITY_PROTOCOL"),
+            "supported_security_protocols": _string_list(
+                kafka.get("supported_security_protocols"),
+                ["SASL_SSL", "SSL"],
+            ),
+            "supported_auth": _string_list(kafka.get("supported_auth"), ["sasl", "mtls"]),
+        }
+        result["kafka"] = kafka_result
+
+    if not result:
+        raise OpenApiContractError("x-transport-security должен содержать http/http_callback или kafka/kafka_event.")
+    return result
 
 
 def normalize_operation_id(value: str | None, method: str, path: str) -> str:
@@ -442,13 +510,17 @@ def import_openapi_operations(document: dict[str, Any]) -> dict[str, Any]:
 
     if not operations:
         raise OpenApiContractError("В OpenAPI-документе не найдены операции GET/POST для импорта.")
-    return {
+    result = {
         "schema_version": "1.0",
         "openapi_version": openapi_version,
         "info_version": contract_version,
         "operations": operations,
         "warnings": warnings,
     }
+    transport_security = normalize_openapi_transport_security(document)
+    if transport_security:
+        result["transport_security"] = transport_security
+    return result
 
 
 def preview_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, Any]) -> dict[str, Any]:

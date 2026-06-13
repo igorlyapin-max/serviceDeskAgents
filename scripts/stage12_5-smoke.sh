@@ -82,13 +82,13 @@ for expected_view in [
     'data-view="resolution"',
     'data-view="scenarioSlots"',
     'data-view="scenarioClassification"',
-    'data-view="scenarioTools"',
     'data-view="systemPrompts"',
 ]:
     assert expected_view in html, expected_view
 for removed_view in [
     'data-view="scenarioReact"',
     'data-view="scenarioEscalation"',
+    'data-view="scenarioTools"',
 ]:
     assert removed_view not in html, removed_view
 assert "1. Разрешение слотов" in html, html[:300]
@@ -106,7 +106,6 @@ for expected_renderer in [
     "renderScenarioClassification",
     "renderScenarioReact",
     "renderScenarioTools",
-    "renderScenarioEscalation",
     "renderSystemPrompts",
 ]:
     assert expected_renderer in js, expected_renderer
@@ -121,19 +120,29 @@ for expected_form in [
     "route-delete",
     "policy-editor",
     "policy-delete",
-    "tool-launch-editor",
-    "tool-matrix-delete",
-    "escalation-editor",
-    "escalation-delete",
     "prompt-pack-editor",
     "prompt-pack-delete",
     "system-prompts-editor",
 ]:
     assert expected_form in js, expected_form
+assert "ensureScenarioEscalationPolicy" in js, js[:300]
+assert 'name="escalation_policy_id"' in js, js[:300]
+for removed_escalation_ui_text in [
+    "renderScenarioEscalation",
+    "escalation-editor",
+    "escalation-delete",
+    "escalation-operation",
+    "Политика эскалации",
+]:
+    assert removed_escalation_ui_text not in js, removed_escalation_ui_text
 for expected_slot_text in [
     "slot-add",
     "slot-remove",
+    "slot-stage-add",
+    "slot-stage-remove",
     "slot-card-summary",
+    "slot-card-order",
+    "data-slot-drag-handle",
     "slot-card-body",
     "Priority group",
     "Как получить значение слота",
@@ -142,7 +151,6 @@ for expected_slot_text in [
     "Вопрос клиенту",
     "Путь в данных обращения",
     "Инструкция для модели",
-    "Запасной вопрос",
     "Подсказка оператору",
     "Системные пороги уверенности",
     "Пороги внутри профиля",
@@ -154,8 +162,8 @@ for expected_slot_text in [
     "data-resolution-slot-scenario",
     "name=\"slot_schema_id\"",
     "name=\"target_slot_id\"",
-    "name=\"clarification_slots\" multiple",
-    "name=\"handoff_package\" multiple",
+    "name=\"human_resolution_action\"",
+    "name=\"human_resolution_message_template\"",
     "enrichment_steps",
     "output_slots_order",
     "llm_resolution_script",
@@ -164,10 +172,10 @@ for expected_slot_text in [
     "Выходные слоты и порядок заполнения",
     "LLM-правила выбора, заполнения и уточнения",
     "Уточнение у клиента и эскалация оператору",
-    "Слоты для уточнения у клиента",
-    "Пакет эскалации оператору",
-    "Уточнения у клиента",
-    "Эскалация оператору",
+    "Действие",
+    "Сообщение",
+    "уточнить у клиента",
+    "эскалировать оператору",
     "Технический ключ поля",
     "Где используется",
     "slot-schema-operation",
@@ -179,8 +187,6 @@ for expected_slot_text in [
     "Тип совпадения",
     "Позитивные признаки",
     "policy-operation",
-    "tool-matrix-operation",
-    "escalation-operation",
     "data-slot-fill-method",
     "data-endpoint-operations-section",
     "endpoint-operations-toggle",
@@ -188,6 +194,11 @@ for expected_slot_text in [
     "endpoint-openapi-apply",
     "Применить импорт",
     "Preview импорта",
+    "Безопасность транспорта n8n",
+    "x-transport-security",
+    "result_transport в async policy",
+    "transport_http_base_url_env",
+    "transport_kafka_supported_security_protocols",
     "Contract URL",
     "Execution URL",
     "Нельзя удалить: сначала уберите связи",
@@ -218,6 +229,13 @@ for expected_slot_text in [
     "readonly",
 ]:
     assert expected_slot_text in js, expected_slot_text
+for removed_slot_text in [
+    "Запасной вопрос",
+    "Порядок вопроса",
+    "name=\"fallback_question\"",
+    "name=\"question_order\"",
+]:
+    assert removed_slot_text not in js, removed_slot_text
 assert "slots_json" not in js, js[:300]
 assert "Слоты, JSON" not in js, js[:300]
 assert "Ключевые слова" not in js, js[:300]
@@ -282,7 +300,6 @@ expected_domains = {
     "slot_schemas",
     "classification_routes",
     "orchestrator_policy",
-    "tool_launch_matrix",
     "tools",
     "integration_endpoints",
     "prompt_packs",
@@ -300,8 +317,13 @@ assert password_summary["readiness"]["status"] == "ready", password_summary
 detail = request("/admin/scenarios/password_reset")
 assert detail["readiness"]["status"] == "ready", detail
 assert detail["slot_schema"]["required_slots"] == ["user_login", "account_type"], detail
-assert detail["scenario"]["tool_launch_matrix_id"] == "matrix.password_reset", detail
-assert detail["tool_launch_matrix"]["display_name"], detail
+assert detail["slot_schema"]["stages"], detail
+assert len(detail["tool_launches"]) == 1, detail
+launch = detail["tool_launches"][0]
+assert launch["profile_id"] == "profile.password_reset.login_from_ad", detail
+assert launch["step_id"] == "step1", detail
+assert launch["endpoint_id"] == "mock", detail
+assert launch["operation_id"] == "search_ad_users", detail
 assert len(detail["prompt_pack"]["blocks"]) == 7, detail
 assert "1. Роль и контекст" in detail["prompt_preview"], detail["prompt_preview"]
 assert detail["system_confidence_defaults"]["auto_accept_confidence"] == 0.85, detail
@@ -321,7 +343,6 @@ for expected_title in [
     "1. Разрешение слотов",
     "2. Классификация и маршрут",
     "3. ReAct-планирование",
-    "4. ReAct-вызовы и матрица запуска",
     "5. Решение и эскалация",
     "Ожидание ответа клиента",
     "Эскалация оператору",
@@ -329,7 +350,9 @@ for expected_title in [
     assert expected_title in titles, expected_title
 slot_node = next(node for node in graph["nodes"] if node["id"] == "slot_filling")
 assert any(ref["view"] == "scenarioSlots" for ref in slot_node["config_refs"]), slot_node
-assert any(edge["from"] == "tool_use" and edge["to"] == "react_planning" for edge in graph["edges"]), graph
+decision_node = next(node for node in graph["nodes"] if node["id"] == "decision")
+assert not any(ref["domain"] == "escalation_policies" for ref in decision_node["config_refs"]), decision_node
+assert any(edge["from"] == "endpoint_contracts" and edge["to"] == "attribute_resolution" for edge in graph["edges"]), graph
 assert any(edge["from"] == "waiting" and edge["to"] == "slot_filling" for edge in graph["edges"]), graph
 base_graph = request("/admin/orchestration-graph?view=base")
 assert base_graph["readonly"] is True, base_graph
@@ -430,7 +453,7 @@ slot_payload = copy.deepcopy(slot_active["payload"])
 for schema in slot_payload["slot_schemas"]:
     if schema["slot_schema_id"] == "slot.password_reset":
         schema["display_name"] = "Слоты сброса пароля UI"
-        schema["slots"].append(
+        schema["stages"][0]["slots"].append(
             {
                 "slot_id": "ui_temp_slot",
                 "display_name": "Временный слот UI",
@@ -452,9 +475,10 @@ slot_active = request("/admin/config/active/slot_schemas")
 slot_payload = copy.deepcopy(slot_active["payload"])
 for schema in slot_payload["slot_schemas"]:
     if schema["slot_schema_id"] == "slot.password_reset":
-        for slot in schema["slots"]:
-            if slot["slot_id"] == "ui_temp_slot":
-                slot["display_name"] = "Временный слот UI изменен"
+        for stage in schema["stages"]:
+            for slot in stage["slots"]:
+                if slot["slot_id"] == "ui_temp_slot":
+                    slot["display_name"] = "Временный слот UI изменен"
 activate_config_payload("slot_schemas", slot_payload, "slot-modify")
 slot_detail = request("/admin/scenarios/password_reset")
 edited_slot = next(slot for slot in slot_detail["slot_schema"]["slots"] if slot["slot_id"] == "ui_temp_slot")
@@ -465,7 +489,8 @@ slot_active = request("/admin/config/active/slot_schemas")
 slot_payload = copy.deepcopy(slot_active["payload"])
 for schema in slot_payload["slot_schemas"]:
     if schema["slot_schema_id"] == "slot.password_reset":
-        schema["slots"] = [slot for slot in schema["slots"] if slot["slot_id"] != "ui_temp_slot"]
+        for stage in schema["stages"]:
+            stage["slots"] = [slot for slot in stage["slots"] if slot["slot_id"] != "ui_temp_slot"]
         schema["auto_fill_slots"] = [slot_id for slot_id in schema["auto_fill_slots"] if slot_id != "ui_temp_slot"]
 activate_config_payload("slot_schemas", slot_payload, "slot-delete")
 slot_detail = request("/admin/scenarios/password_reset")
@@ -475,7 +500,8 @@ slot_active = request("/admin/config/active/slot_schemas")
 slot_payload = copy.deepcopy(slot_active["payload"])
 for schema in slot_payload["slot_schemas"]:
     if schema["slot_schema_id"] == "slot.password_reset":
-        schema["slots"] = [slot for slot in schema["slots"] if slot["slot_id"] != "account_type"]
+        for stage in schema["stages"]:
+            stage["slots"] = [slot for slot in stage["slots"] if slot["slot_id"] != "account_type"]
         schema["required_slots"] = [slot_id for slot_id in schema["required_slots"] if slot_id != "account_type"]
         schema["question_order"] = [slot_id for slot_id in schema["question_order"] if slot_id != "account_type"]
 account_type_delete_draft = request(
@@ -504,14 +530,21 @@ llm_slot_payload["slot_schemas"].append(
         "required_slots": ["user_fio"],
         "auto_fill_slots": ["user_fio"],
         "question_order": [],
-        "slots": [
+        "stages": [
             {
-                "slot_id": "user_fio",
-                "display_name": "Фамилия Имя Отчество",
-                "priority_group": "who",
-                "required": True,
-                "fill_method": "llm_extraction",
-                "extraction_instruction": "Извлеки ФИО сотрудника.",
+                "stage_id": "stage.collect_context",
+                "display_name": "Сбор контекста",
+                "order": 1,
+                "slots": [
+                    {
+                        "slot_id": "user_fio",
+                        "display_name": "Фамилия Имя Отчество",
+                        "priority_group": "who",
+                        "required": True,
+                        "fill_method": "llm_extraction",
+                        "extraction_instruction": "Извлеки ФИО сотрудника.",
+                    }
+                ],
             }
         ],
     }
@@ -534,7 +567,7 @@ assert llm_slot_validated["validation"]["status"] == "valid", llm_slot_validated
 stale_profile_payload = copy.deepcopy(llm_slot_payload)
 for schema in stale_profile_payload["slot_schemas"]:
     if schema["slot_schema_id"] == "slot.ui_temp_llm":
-        schema["slots"][0]["resolution_profile_id"] = "profile.password_reset.login_from_ad"
+        schema["stages"][0]["slots"][0]["resolution_profile_id"] = "profile.password_reset.login_from_ad"
 stale_profile_draft = request(
     "/admin/config/drafts",
     {
@@ -628,17 +661,13 @@ bad_validated = request(
 assert bad_validated["validation"]["status"] == "invalid", bad_validated
 assert any("operator_handoff_confidence" in error for error in bad_validated["validation"]["errors"]), bad_validated
 
-matrix_active_for_edit = request("/admin/config/active/tool_launch_matrix")
-matrix_payload_for_edit = copy.deepcopy(matrix_active_for_edit["payload"])
-password_matrix = next(matrix for matrix in matrix_payload_for_edit["matrices"] if matrix["matrix_id"] == "matrix.password_reset")
-password_matrix["display_name"] = "Матрица сброса пароля UI"
-for launch in password_matrix["launches"]:
-    if launch["launch_id"] == "launch.password_reset.runbook":
-        launch["stop_on_error"] = False
-activate_config_payload("tool_launch_matrix", matrix_payload_for_edit, "matrix")
-matrix_detail = request("/admin/scenarios/password_reset")
-assert matrix_detail["tool_launch_matrix"]["display_name"] == "Матрица сброса пароля UI", matrix_detail
-assert matrix_detail["tool_launches"][0]["stop_on_error"] is False, matrix_detail
+slot_active_for_edit = request("/admin/config/active/slot_schemas")
+slot_payload_for_edit = copy.deepcopy(slot_active_for_edit["payload"])
+password_slots = next(schema for schema in slot_payload_for_edit["slot_schemas"] if schema["slot_schema_id"] == "slot.password_reset")
+password_slots["stages"][0]["display_name"] = "Smoke: сбор слотов"
+activate_config_payload("slot_schemas", slot_payload_for_edit, "slots")
+slot_detail = request("/admin/scenarios/password_reset")
+assert slot_detail["slot_schema"]["stages"][0]["display_name"] == "Smoke: сбор слотов", slot_detail
 
 prompt_active = request("/admin/config/active/prompt_packs")
 prompt_payload = copy.deepcopy(prompt_active["payload"])
@@ -773,7 +802,7 @@ assert bad_tools_validated["validation"]["status"] == "invalid", bad_tools_valid
 assert any("обязательное поле результата" in error and "message" in error for error in bad_tools_validated["validation"]["errors"]), bad_tools_validated
 
 bad_broken_tool_payload = copy.deepcopy(tools_active["payload"])
-broken_tool = next(tool for tool in bad_broken_tool_payload["tools"] if tool["tool_name"] == "check_zabbix_status")
+broken_tool = next(tool for tool in bad_broken_tool_payload["tools"] if tool["tool_name"] == "search_ad_users")
 broken_tool["contract_status"] = "broken"
 bad_broken_tool_draft = request(
     "/admin/config/drafts",
@@ -828,14 +857,21 @@ assert bad_broken_endpoint_validated["validation"]["status"] == "invalid", bad_b
 assert any("contract_status=broken" in error for error in bad_broken_endpoint_validated["validation"]["errors"]), bad_broken_endpoint_validated
 print("валидация контрактов ReAct-вызовов и endpoint-операций проверена")
 
-matrix_active = request("/admin/config/active/tool_launch_matrix")
-bad_matrix = copy.deepcopy(matrix_active["payload"])
-bad_matrix["matrices"][0]["launches"][0]["execution_level"] = "auto"
+slot_active = request("/admin/config/active/slot_schemas")
+bad_slots = copy.deepcopy(slot_active["payload"])
+bad_slots["slot_schemas"][0]["stages"].append(
+    {
+        "stage_id": "stage.empty",
+        "display_name": "Пустой этап",
+        "order": 99,
+        "slots": [],
+    }
+)
 bad_draft = request(
     "/admin/config/drafts",
     {
-        "domain": "tool_launch_matrix",
-        "payload": bad_matrix,
+        "domain": "slot_schemas",
+        "payload": bad_slots,
         "operator_id": "admin-stage12_5",
     },
 )
@@ -844,8 +880,8 @@ bad_validated = request(
     {"operator_id": "admin-stage12_5"},
 )
 assert bad_validated["validation"]["status"] == "invalid", bad_validated
-assert any("не может быть auto" in error for error in bad_validated["validation"]["errors"]), bad_validated
-print("guard матрицы запуска инструментов проверен")
+assert any("stage.empty" in error for error in bad_validated["validation"]["errors"]), bad_validated
+print("guard этапов схемы слотов проверен")
 
 audit = request("/admin/security/audit?limit=300")
 actions = {event["action"] for event in audit["events"]}

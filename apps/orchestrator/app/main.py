@@ -34,6 +34,7 @@ from .runtime_guardrails import (
     RuntimeConfigurationError,
     configure_logging,
     is_production_environment,
+    log_debug_event,
     log_json,
     log_local_security_warnings,
     metrics_client_allowed,
@@ -58,6 +59,15 @@ configure_logging()
 logger = logging.getLogger("servicedesk.orchestrator")
 validate_startup_environment()
 log_local_security_warnings(logger)
+log_debug_event(
+    logger,
+    "startup",
+    environment="configured",
+    verbose_fields={
+        "admin_ui_root": str(Path(__file__).resolve().parents[2] / "admin-ui" / "static"),
+        "operator_ui_root": str(Path(__file__).resolve().parents[2] / "operator-ui" / "static"),
+    },
+)
 
 
 class TicketAnalyzeRequest(BaseModel):
@@ -132,6 +142,14 @@ class AdminConfigDraftCreateRequest(BaseModel):
 class AdminConfigDraftActionRequest(BaseModel):
     operator_id: str = Field()
     limit: int | None = Field(default=None)
+
+
+class AdminLegacySlotResolutionCleanupRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    slot_schema_id: str = Field(min_length=1, max_length=160)
+    slot_ids: list[str] | None = Field(default=None)
+    profile_ids: list[str] | None = Field(default=None)
+    dry_run: bool = Field(default=True)
 
 
 class AdminConfigRollbackRequest(BaseModel):
@@ -997,7 +1015,7 @@ def operator_scenario_detail(
 ) -> dict[str, Any]:
     _ = context
     try:
-        return config_store.scenario_detail(scenario_id)
+        return config_store.operator_scenario_detail(scenario_id)
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
 
@@ -2697,7 +2715,6 @@ def openapi_import_impact_warnings(
     proposed_tools = (result.get("proposed_react_calls") or {}).get("tools") or {}
     active_tools = config_store.active_payload("tools")
     active_workflows = config_store.active_payload("n8n_workflows")
-    active_matrix = config_store.active_payload("tool_launch_matrix")
     active_resolution = config_store.active_payload("attribute_resolution_profiles")
     active_channels = config_store.active_payload("interaction_channels")
     active_tool_by_name = {
@@ -2726,11 +2743,11 @@ def openapi_import_impact_warnings(
     for tool_name, proposed_tool in proposed_tools.items():
         current_tool = active_tool_by_name.get(tool_name)
         if current_tool and current_tool != proposed_tool:
-            refs = tool_usage_refs(tool_name, active_matrix, active_resolution, active_channels)
+            refs = tool_usage_refs(tool_name, active_resolution, active_channels)
             if refs:
                 warnings.append(
                     f"ReAct-вызов {tool_name} уже используется ({', '.join(refs)}) "
-                    "и будет обновлен из OpenAPI; это может потребовать проверки матриц запуска и профилей разрешения."
+                    "и будет обновлен из OpenAPI; это может потребовать проверки профилей разрешения."
                 )
             else:
                 warnings.append(f"ReAct-вызов {tool_name} уже существует и будет обновлен из OpenAPI.")
@@ -3198,6 +3215,77 @@ def admin_create_config_draft(
             action="admin.config.draft.create",
             resource_type="config",
             resource_id=request.domain,
+            permission=permission,
+            status_code=400,
+            message=str(error),
+        )
+        raise config_error_response(error) from error
+
+
+@app.post("/admin/config/legacy-slot-resolution-cleanup")
+def admin_legacy_slot_resolution_cleanup(
+    request: AdminLegacySlotResolutionCleanupRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="slot_schemas",
+        mode="manage",
+        action="admin.config.legacy_slot_resolution_cleanup",
+    )
+    require_config_permission(
+        context,
+        http_request,
+        domain="attribute_resolution_profiles",
+        mode="manage",
+        action="admin.config.legacy_slot_resolution_cleanup",
+    )
+    try:
+        result = config_store.cleanup_legacy_slot_resolution(
+            slot_schema_id=request.slot_schema_id,
+            slot_ids=request.slot_ids,
+            profile_ids=request.profile_ids,
+            operator_id=request.operator_id,
+            dry_run=request.dry_run,
+        )
+        if not request.dry_run and result.get("status") == "applied":
+            for version in result.get("versions", []):
+                workflow.apply_config_payload(version["domain"], version["payload"])
+        public_result = {key: value for key, value in result.items() if key != "payloads"}
+        if "versions" in public_result:
+            public_result["versions"] = [
+                {key: value for key, value in version.items() if key != "payload"}
+                for version in public_result["versions"]
+            ]
+        audit_success(
+            context,
+            http_request,
+            action=(
+                "admin.config.legacy_slot_resolution_cleanup.preview"
+                if request.dry_run
+                else "admin.config.legacy_slot_resolution_cleanup.apply"
+            ),
+            resource_type="config",
+            resource_id=request.slot_schema_id,
+            permission=permission,
+            details={
+                "operator_id": request.operator_id,
+                "slot_schema_id": request.slot_schema_id,
+                "slot_count": len(request.slot_ids or []),
+                "profile_count": len(request.profile_ids or []),
+                "status": result.get("status"),
+            },
+        )
+        return public_result
+    except ConfigRegistryError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.config.legacy_slot_resolution_cleanup",
+            resource_type="config",
+            resource_id=request.slot_schema_id,
             permission=permission,
             status_code=400,
             message=str(error),

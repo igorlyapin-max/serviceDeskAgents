@@ -58,6 +58,19 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
         for slot_schema in default_slot_schemas()["slot_schemas"]:
             self.assertNotIn("timeouts", slot_schema)
 
+    def test_default_slot_schemas_define_planning_stages(self) -> None:
+        for slot_schema in default_slot_schemas()["slot_schemas"]:
+            self.assertIn("stages", slot_schema)
+            self.assertGreaterEqual(len(slot_schema["stages"]), 1)
+            self.assertEqual(
+                slot_schema["slots"],
+                [
+                    slot
+                    for stage in sorted(slot_schema["stages"], key=lambda item: item["order"])
+                    for slot in stage["slots"]
+                ],
+            )
+
     def test_legacy_slot_schema_timeouts_are_normalized_out(self) -> None:
         legacy_payload = default_slot_schemas()
         legacy_payload["slot_schemas"][0]["timeouts"] = {
@@ -70,6 +83,44 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
             normalized = store._normalize_payload("slot_schemas", legacy_payload)
 
         self.assertNotIn("timeouts", normalized["slot_schemas"][0])
+
+    def test_empty_stage_requires_resolution_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            payload = store.active_payload("slot_schemas")
+            schema = payload["slot_schemas"][0]
+            schema["stages"].append(
+                {
+                    "stage_id": "stage.empty",
+                    "display_name": "Пустой этап",
+                    "order": 99,
+                    "slots": [],
+                }
+            )
+
+            validation = store.validate_payload("slot_schemas", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("stage.empty" in error for error in validation["errors"]))
+
+    def test_empty_stage_with_resolution_profile_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            payload = store.active_payload("slot_schemas")
+            schema = payload["slot_schemas"][0]
+            schema["stages"].append(
+                {
+                    "stage_id": "stage.profile_only",
+                    "display_name": "Профиль без локальных слотов",
+                    "order": 99,
+                    "resolution_profile_id": "profile.password_reset.login_from_ad",
+                    "slots": [],
+                }
+            )
+
+            validation = store.validate_payload("slot_schemas", payload)
+
+        self.assertEqual(validation["status"], "valid", validation["errors"])
 
 
 if __name__ == "__main__":

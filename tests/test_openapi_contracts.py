@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from apps.orchestrator.app.openapi_contracts import (
     OpenApiContractError,
@@ -11,6 +13,82 @@ from apps.orchestrator.app.openapi_contracts import (
 
 
 class OpenApiContractsTest(unittest.TestCase):
+    def test_n8n_endpoint_catalog_declares_transport_security_policy(self) -> None:
+        catalog = json.loads(Path("contracts/integrations/integration-endpoint-catalog.json").read_text())
+        endpoint = next(item for item in catalog["endpoints"] if item["endpoint_id"] == "n8n")
+        transport = endpoint["extensions"]["transport_security"]
+
+        self.assertEqual(transport["http"]["policy"], "admin_configured")
+        self.assertEqual(transport["http"]["base_url_env"], "N8N_WEBHOOK_BASE_URL")
+        self.assertEqual(transport["http"]["callback_base_url_env"], "ORCHESTRATOR_PUBLIC_URL")
+        self.assertEqual(transport["http"]["production_recommended_scheme"], "https")
+        self.assertNotIn("selected_transport", transport)
+        self.assertNotIn("result_transport", transport)
+        self.assertEqual(transport["kafka"]["policy"], "admin_configured")
+        self.assertEqual(transport["kafka"]["security_protocol_env"], "KAFKA_SECURITY_PROTOCOL")
+        self.assertEqual(transport["kafka"]["supported_security_protocols"], ["SASL_SSL", "SSL"])
+        self.assertEqual(transport["kafka"]["supported_auth"], ["sasl", "mtls"])
+
+    def test_imports_openapi_transport_security_without_delivery_choice(self) -> None:
+        document = {
+            "openapi": "3.1.0",
+            "info": {"version": "2026.06"},
+            "x-transport-security": {
+                "http": {
+                    "policy": "admin_configured",
+                    "base_url_env": "N8N_WEBHOOK_BASE_URL",
+                    "callback_base_url_env": "ORCHESTRATOR_PUBLIC_URL",
+                    "production_recommended_scheme": "https",
+                    "token_header": "X-ServiceDesk-Callback-Token",
+                },
+                "kafka": {
+                    "policy": "admin_configured",
+                    "bootstrap_servers_env": "KAFKA_BOOTSTRAP_SERVERS",
+                    "security_protocol_env": "KAFKA_SECURITY_PROTOCOL",
+                    "supported_security_protocols": ["SASL_SSL", "SSL"],
+                    "supported_auth": ["sasl", "mtls"],
+                },
+            },
+            "paths": {
+                "/webhook/ping": {
+                    "get": {
+                        "operationId": "ping",
+                        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                    }
+                }
+            },
+        }
+
+        result = import_openapi_operations(document)
+        transport = result["transport_security"]
+
+        self.assertEqual(transport["http"]["policy"], "admin_configured")
+        self.assertEqual(transport["http"]["production_recommended_scheme"], "https")
+        self.assertEqual(transport["kafka"]["supported_security_protocols"], ["SASL_SSL", "SSL"])
+        self.assertNotIn("result_transport", transport)
+        self.assertNotIn("selected_transport", transport)
+
+    def test_openapi_transport_security_rejects_delivery_choice(self) -> None:
+        document = {
+            "openapi": "3.1.0",
+            "info": {"version": "2026.06"},
+            "x-transport-security": {
+                "selected_transport": "kafka_event",
+                "http": {"policy": "admin_configured"},
+            },
+            "paths": {
+                "/webhook/ping": {
+                    "get": {
+                        "operationId": "ping",
+                        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                    }
+                }
+            },
+        }
+
+        with self.assertRaises(OpenApiContractError):
+            import_openapi_operations(document)
+
     def test_resolves_relative_n8n_contract_url_under_webhook_base_path(self) -> None:
         endpoint = {
             "endpoint_id": "n8n",

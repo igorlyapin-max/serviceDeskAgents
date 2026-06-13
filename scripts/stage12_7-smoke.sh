@@ -78,7 +78,7 @@ else:
 admin_js = request("/admin/static/app.js", parse_json=False)
 operator_js = request("/operator/static/app.js", parse_json=False)
 for expected in [
-    "Входные слоты",
+    "Сценарий для выбора слотов",
     "Обогащение контекста",
     "Добавить шаг обогащения",
     "enrichment-step-table",
@@ -86,7 +86,8 @@ for expected in [
     "Доступные ссылки на результаты",
     "Выходные слоты и порядок заполнения",
     "LLM-правила выбора, заполнения и уточнения",
-    "Пакет эскалации оператору",
+    "Уточнение у клиента и эскалация оператору",
+    "human_resolution_message_template",
     "Пороги внутри профиля",
     "function formatList",
     "operationBindingLastToolName",
@@ -104,7 +105,7 @@ for removed in [
 for expected in [
     "resolution_state",
     "Обогащение контекста",
-    "Пакет эскалации",
+    "Сообщение",
     "resolutionProgressText",
 ]:
     assert expected in operator_js, expected
@@ -117,7 +118,8 @@ assert login_profile["enrichment_steps"][0]["react_call"] == "search_ad_users", 
 assert login_profile["enrichment_steps"][0]["step_id"] == "step1", login_profile
 assert "result_entity_name" not in login_profile["enrichment_steps"][0], login_profile
 assert any(rule["slot_id"] == "user_id" and rule["source_hint"] == "user_id" for rule in login_profile["output_slots_order"]), login_profile
-assert "user_login" in login_profile["human_resolution_policy"]["clarification_slots"], login_profile
+assert login_profile["human_resolution_policy"]["action"] == "ask_client", login_profile
+assert "должность" in login_profile["human_resolution_policy"]["message_template"].lower(), login_profile
 assert login_profile["confidence_thresholds"]["auto_fill"] >= login_profile["confidence_thresholds"]["clarification"], login_profile
 print("default профиль разрешения проверен")
 
@@ -164,7 +166,7 @@ bad_output = copy.deepcopy(payload)
 bad_output["profiles"][0]["target_slot_id"] = "undeclared_identity_marker"
 validated = validate_payload(bad_output, "bad-output")
 assert validated["validation"]["status"] == "invalid", validated
-assert any("target_slot_id" in error for error in validated["validation"]["errors"]), validated
+assert any("undeclared_identity_marker" in error for error in validated["validation"]["errors"]), validated
 print("валидация профиля разрешения проверена")
 
 print("Smoke-проверка этапа 12.7 завершена.")

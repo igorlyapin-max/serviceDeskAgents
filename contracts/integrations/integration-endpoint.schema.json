@@ -63,7 +63,14 @@
     },
     "extensions": {
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "properties": {
+        "transport_security": {
+          "$ref": "#/$defs/transport_security"
+        },
+        "selected_transport": false,
+        "result_transport": false
+      }
     }
   },
   "$defs": {
@@ -124,6 +131,118 @@
           "minLength": 1,
           "maxLength": 1000
         }
+      }
+    },
+    "transport_security": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "http": {
+          "$ref": "#/$defs/http_transport_security"
+        },
+        "kafka": {
+          "$ref": "#/$defs/kafka_transport_security"
+        },
+        "selected_transport": false,
+        "result_transport": false
+      },
+      "anyOf": [
+        {
+          "required": [
+            "http"
+          ]
+        },
+        {
+          "required": [
+            "kafka"
+          ]
+        }
+      ]
+    },
+    "http_transport_security": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": [
+            "admin_configured"
+          ]
+        },
+        "base_url_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "callback_base_url_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "production_recommended_scheme": {
+          "type": "string",
+          "enum": [
+            "https"
+          ]
+        },
+        "token_header": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "token_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "selected_transport": false,
+        "result_transport": false
+      }
+    },
+    "kafka_transport_security": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": [
+            "admin_configured"
+          ]
+        },
+        "bootstrap_servers_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "security_protocol_env": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "supported_security_protocols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "SASL_SSL",
+              "SSL"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "supported_auth": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "sasl",
+              "mtls"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "selected_transport": false,
+        "result_transport": false
       }
     },
     "operation": {

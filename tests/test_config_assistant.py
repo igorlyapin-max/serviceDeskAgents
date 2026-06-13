@@ -180,11 +180,8 @@ class ConfigAssistantTest(unittest.TestCase):
                 },
             },
             "human_resolution_policy": {
-                "clarification_question": "Уточните пользователя.",
-                "clarification_slots": ["user_fio"],
-                "handoff_package": ["user_fio", "manager_email"],
-                "handoff_action": "operator_handoff",
-                "fallback_action": "operator_handoff",
+                "action": "ask_client",
+                "message_template": "Уточните пользователя.",
             },
             "max_attempts": 1,
         }
@@ -429,6 +426,63 @@ class ConfigAssistantTest(unittest.TestCase):
             self.assertEqual(result["decision"], "leave_empty")
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["output_values"], {})
+
+    def test_attribute_resolution_can_escalate_operator_without_value(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            profile = copy.deepcopy(
+                next(
+                    item
+                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
+                    if item["profile_id"] == "profile.password_reset.login_from_ad"
+                )
+            )
+            profile["use_llm_after_steps"] = False
+            profile["human_resolution_policy"] = {
+                "action": "escalate_operator",
+                "message_template": "Передайте обращение оператору: ${slot.user_fio}.",
+            }
+            profile["output_slots_order"] = [
+                {
+                    "slot_id": "user_login",
+                    "order": 1,
+                    "required_for_success": True,
+                    "source_hint": "missing_field",
+                    "fallback": "ask_clarification",
+                }
+            ]
+            slot_schema = next(
+                item
+                for item in store.active_payload("slot_schemas")["slot_schemas"]
+                if item["slot_schema_id"] == "slot.password_reset"
+            )
+
+            result = store.simulate_attribute_resolution_profile(
+                profile=profile,
+                slot_schema=slot_schema,
+                provided={},
+                simulation_options={
+                    "allow_llm": False,
+                    "allow_readonly_integrations": True,
+                    "allow_mock_integrations": True,
+                },
+                effective_thresholds={
+                    "auto_accept_confidence": 0.85,
+                    "clarification_confidence": 0.70,
+                    "operator_handoff_confidence": 0.50,
+                    "min_extraction_confidence": 0.70,
+                },
+                execution_trace=[],
+                slot_values={},
+            )
+
+            self.assertEqual(result["decision"], "handoff")
+            self.assertEqual(result["status"], "operator_handoff")
+            self.assertEqual(result["pending_question"], None)
+            self.assertEqual(
+                result["resolution_decision"]["handoff_message"],
+                "Передайте обращение оператору: ${slot.user_fio}.",
+            )
 
     def test_operation_response_items_requires_selector_for_ambiguous_containers(self) -> None:
         response_schema = {

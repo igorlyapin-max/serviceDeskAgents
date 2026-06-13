@@ -452,24 +452,137 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         outbox = self.processing_store.list_outbox(case_id=self.case["case_id"])["messages"]
         self.assertTrue(any(message["event_type"] == "async_tool_invocation_requested" for message in outbox))
 
-    def test_invalid_result_transport_fails_config_validation(self) -> None:
-        payload = copy.deepcopy(self.config_store.active_payload("tool_launch_matrix"))
-        launch = payload["matrices"][0]["launches"][0]
-        launch.setdefault("completion_policy", {})
-        launch["completion_policy"].update(
-            {
-                "mode": "external_event",
-                "max_wait_seconds": 3600,
-                "timeout_action": "escalate_operator",
-                "expected_event_type": "start_systemcenter_runbook_completed",
-                "result_transport": "kafka_events",
-            }
+    def test_generated_runbook_action_has_contractual_n8n_launch(self) -> None:
+        workflow = TicketWorkflow(
+            contracts=self.contracts,
+            case_store=self.case_store,
+            config_store=self.config_store,
+            processing_store=self.processing_store,
+        )
+        decision = workflow._runbook_decision({"service": "billing-worker"})
+        action = decision["proposed_actions"][0]
+        policy_result = {
+            "schema_version": "1.0",
+            "action_id": action["action_id"],
+            "tool_name": action["tool_name"],
+            "execution_mode": "operator_approval",
+            "allowed": True,
+            "approval_required": True,
+            "policy_rule_id": "runbooks.mvp.require_operator_approval",
+            "risk_level": "medium",
+            "reason": "Тестовая политика требует согласования оператора.",
+        }
+
+        result = workflow.dispatch_tool(
+            action,
+            policy_result,
+            case_id=self.case["case_id"],
+            ticket_id=self.case["ticket_id"],
+            approved_by_operator=True,
+            operator_id="operator-1",
         )
 
-        validation = self.config_store.validate_payload("tool_launch_matrix", payload)
+        self.assertEqual(result["invocation"]["endpoint_id"], "n8n")
+        self.assertEqual(result["invocation"]["adapter_type"], "n8n_webhook")
+        self.assertEqual(
+            result["invocation"]["extensions"]["async_callback"]["result_transport"],
+            "kafka_event",
+        )
+        self.assertEqual(
+            result["invocation"]["extensions"]["async_callback"]["result_topic"],
+            DEFAULT_EXTERNAL_EVENT_TOPIC,
+        )
+
+    def test_profile_launch_defaults_to_n8n_workflow_kafka_result_topic(self) -> None:
+        profile = {
+            "profile_id": "profile.runbook",
+            "display_name": "Runbook profile",
+            "enrichment_steps": [
+                {
+                    "step_id": "step1",
+                    "step_name": "Runbook",
+                    "react_call": "start_systemcenter_runbook",
+                    "endpoint_id": "n8n",
+                    "operation_id": "start_systemcenter_runbook",
+                    "completion_policy": {
+                        "mode": "external_event",
+                        "max_wait_seconds": 3600,
+                        "timeout_action": "escalate_operator",
+                        "expected_event_type": "start_systemcenter_runbook_completed",
+                    },
+                    "parameter_mapping": {"runbook_code": "constant:restart_service"},
+                    "on_error": "escalate_operator",
+                }
+            ],
+        }
+
+        launches = self.config_store._profile_tool_launches([profile])
+
+        self.assertEqual(launches[0]["endpoint_id"], "n8n")
+        self.assertEqual(launches[0]["completion_policy"]["result_transport"], "kafka_event")
+        self.assertEqual(launches[0]["completion_policy"]["result_topic"], DEFAULT_EXTERNAL_EVENT_TOPIC)
+
+    def test_broken_async_event_contract_is_rejected_when_profile_uses_it(self) -> None:
+        endpoints = copy.deepcopy(self.config_store.active_payload("integration_endpoints"))
+        n8n = next(item for item in endpoints["endpoints"] if item["endpoint_id"] == "n8n")
+        contract = n8n["operations"]["start_systemcenter_runbook"]["async_event_contracts"][
+            "start_systemcenter_runbook_completed"
+        ]
+        contract["contract_status"] = "broken"
+        profile_override = {
+            "schema_version": "1.0",
+            "profiles": [
+                {
+                    "profile_id": "profile.runbook",
+                    "enrichment_steps": [
+                        {
+                            "step_id": "step1",
+                            "react_call": "start_systemcenter_runbook",
+                            "endpoint_id": "n8n",
+                            "operation_id": "start_systemcenter_runbook",
+                            "completion_policy": {
+                                "mode": "external_event",
+                                "max_wait_seconds": 3600,
+                                "timeout_action": "escalate_operator",
+                                "expected_event_type": "start_systemcenter_runbook_completed",
+                                "result_transport": "kafka_event",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        validation = self.config_store.validate_payload(
+            "integration_endpoints",
+            endpoints,
+            active_overrides={"attribute_resolution_profiles": profile_override},
+        )
 
         self.assertEqual(validation["status"], "invalid")
-        self.assertTrue(any("result_transport" in error for error in validation["errors"]))
+        self.assertTrue(any("profile.runbook.step1" in error for error in validation["errors"]))
+
+    def test_endpoint_transport_security_rejects_delivery_selector(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("integration_endpoints"))
+        endpoint = next(item for item in payload["endpoints"] if item["endpoint_id"] == "n8n")
+        endpoint.setdefault("extensions", {}).setdefault("transport_security", {})["selected_transport"] = "kafka_event"
+
+        validation = self.config_store.validate_payload("integration_endpoints", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(
+            any("selected_transport" in error or "False schema" in error for error in validation["errors"])
+        )
+
+    def test_n8n_endpoint_requires_kafka_security_metadata(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("integration_endpoints"))
+        endpoint = next(item for item in payload["endpoints"] if item["endpoint_id"] == "n8n")
+        endpoint["extensions"]["transport_security"].pop("kafka", None)
+
+        validation = self.config_store.validate_payload("integration_endpoints", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("transport_security.kafka" in error for error in validation["errors"]))
 
     def test_hr_find_manager_workflow_requires_servicedesk_token(self) -> None:
         workflow_path = Path("infra/n8n/workflows/hr-find-manager.json")

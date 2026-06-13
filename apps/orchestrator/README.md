@@ -341,6 +341,8 @@ Kafka consumer workers (`async-tool-worker` и `async-external-event-worker`) р
 - `kafka_event` - n8n публикует `ExternalEvent` в `result_topic`;
 - `both` - n8n может использовать оба транспорта, повторная доставка обрабатывается по per-event `idempotency_key`.
 
+`result_transport` не является настройкой безопасности. Защита доступных транспортов описывается отдельно в `transport_security` endpoint/OpenAPI/workflow metadata: HTTP callback в production должен идти через administrator-selected HTTPS URL и token auth, Kafka защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем.
+
 `idempotency_key_base` является ключом команды. Каждый `progress`, `success`, `error`, `timeout` или `cancelled` результат должен отправляться как отдельный `ExternalEvent` со стабильным `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Kafka-доставка принимается только для ожиданий с `result_transport=kafka_event|both` и только из ожидаемого `result_topic`.
 
 Опубликовать pending outbox batch:

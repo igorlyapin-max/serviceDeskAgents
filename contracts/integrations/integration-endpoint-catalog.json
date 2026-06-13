@@ -477,6 +477,31 @@
         "method": "GET",
         "url": "contracts/openapi.json"
       },
+      "extensions": {
+        "transport_security": {
+          "http": {
+            "policy": "admin_configured",
+            "base_url_env": "N8N_WEBHOOK_BASE_URL",
+            "callback_base_url_env": "ORCHESTRATOR_PUBLIC_URL",
+            "production_recommended_scheme": "https",
+            "token_header": "X-ServiceDesk-Callback-Token",
+            "token_env": "INTEGRATION_CALLBACK_TOKEN__N8N"
+          },
+          "kafka": {
+            "policy": "admin_configured",
+            "bootstrap_servers_env": "KAFKA_BOOTSTRAP_SERVERS",
+            "security_protocol_env": "KAFKA_SECURITY_PROTOCOL",
+            "supported_security_protocols": [
+              "SASL_SSL",
+              "SSL"
+            ],
+            "supported_auth": [
+              "sasl",
+              "mtls"
+            ]
+          }
+        }
+      },
       "operations": {
         "start_systemcenter_runbook": {
           "display_name": "Запустить ранбук System Center",

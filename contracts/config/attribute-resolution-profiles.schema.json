@@ -23,9 +23,7 @@
           "status",
           "description",
           "slot_schema_id",
-          "target_slot_id",
           "enrichment_steps",
-          "output_slots_order",
           "llm_resolution_script",
           "human_resolution_policy",
           "max_attempts"
@@ -71,7 +69,6 @@
           },
           "output_slots_order": {
             "type": "array",
-            "minItems": 1,
             "items": {
               "$ref": "#/$defs/output_slot_rule"
             }
@@ -192,6 +189,15 @@
         "react_call": {
           "$ref": "#/$defs/id"
         },
+        "endpoint_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "completion_policy": {
+          "$ref": "#/$defs/completion_policy"
+        },
         "configuration_instruction": {
           "type": "string",
           "maxLength": 4000
@@ -213,6 +219,61 @@
             "stop_and_ask_client",
             "escalate_operator"
           ]
+        }
+      }
+    },
+    "completion_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "max_wait_seconds",
+        "timeout_action"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "sync",
+            "external_event",
+            "timer_wait"
+          ]
+        },
+        "max_wait_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "timeout_action": {
+          "type": "string",
+          "enum": [
+            "resume_agent",
+            "escalate_operator",
+            "mark_failed"
+          ]
+        },
+        "check_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "expected_event_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "result_transport": {
+          "type": "string",
+          "enum": [
+            "http_callback",
+            "kafka_event",
+            "both"
+          ]
+        },
+        "result_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
         }
       }
     },
@@ -310,41 +371,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "clarification_question",
-        "clarification_slots",
-        "handoff_package",
-        "handoff_action",
-        "fallback_action"
+        "action",
+        "message_template"
       ],
       "properties": {
-        "clarification_question": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "ask_client",
+            "escalate_operator"
+          ]
+        },
+        "message_template": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 600
-        },
-        "clarification_slots": {
-          "$ref": "#/$defs/id_list"
-        },
-        "handoff_package": {
-          "$ref": "#/$defs/id_list"
-        },
-        "handoff_action": {
-          "type": "string",
-          "enum": [
-            "operator_handoff",
-            "escalate",
-            "debug_stop",
-            "leave_empty"
-          ]
-        },
-        "fallback_action": {
-          "type": "string",
-          "enum": [
-            "ask_user",
-            "operator_handoff",
-            "escalate",
-            "leave_empty"
-          ]
+          "maxLength": 1200
         }
       }
     },

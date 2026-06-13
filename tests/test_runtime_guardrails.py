@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 from apps.orchestrator.app.runtime_guardrails import (
     RuntimeConfigurationError,
     local_security_warnings,
+    log_debug_event,
     metrics_client_allowed,
     readiness_http_status,
     security_headers,
@@ -103,6 +105,27 @@ class RuntimeGuardrailsTest(unittest.TestCase):
         self.assertEqual(sanitized["api_token"], "параметр скрыт")
         self.assertEqual(sanitized["пароль"], "параметр скрыт")
         self.assertEqual(sanitized["safe"], "visible")
+
+    def test_debug_logging_event_respects_basic_and_verbose_levels(self) -> None:
+        logger = Mock()
+        with patch.dict(os.environ, {"DEBUG_LOGGING_ENABLED": "false"}, clear=True):
+            self.assertFalse(log_debug_event(logger, "startup", safe="visible"))
+            logger.log.assert_not_called()
+
+        with patch.dict(os.environ, {"DEBUG_LOGGING_ENABLED": "true", "DEBUG_LOGGING_LEVEL": "Basic"}, clear=True):
+            self.assertTrue(log_debug_event(logger, "startup", safe="visible", verbose_fields={"api_token": "secret"}))
+            basic_message = logger.log.call_args.args[1]
+            self.assertIn("diagnostic_startup", basic_message)
+            self.assertIn("visible", basic_message)
+            self.assertNotIn("secret", basic_message)
+
+        logger.reset_mock()
+        with patch.dict(os.environ, {"DEBUG_LOGGING_ENABLED": "true", "DEBUG_LOGGING_LEVEL": "Verbose"}, clear=True):
+            self.assertTrue(log_debug_event(logger, "startup", safe="visible", verbose_fields={"api_token": "secret"}))
+            verbose_message = logger.log.call_args.args[1]
+            self.assertIn("diagnostic_startup", verbose_message)
+            self.assertIn("параметр скрыт", verbose_message)
+            self.assertNotIn("secret", verbose_message)
 
 
 if __name__ == "__main__":

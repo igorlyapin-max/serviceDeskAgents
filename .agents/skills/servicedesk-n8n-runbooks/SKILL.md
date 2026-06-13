@@ -23,6 +23,7 @@ Use this project-local skill after the global `n8n-runbook-conventions` rules. T
 - Outbound flow: `ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook`.
 - Inbound flow: `n8n -> POST /external-events/n8n` or `n8n -> Kafka external.events` -> `wait_state update -> agent.tasks continuation`.
 - n8n payload must carry `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic`, and runbook business parameters such as `runbook_code`.
+- Keep result delivery and transport security separate: `result_transport` in `invocation.extensions.async_callback` selects `http_callback`, `kafka_event`, or `both` for one run; `transport_security` in endpoint/OpenAPI/workflow metadata only describes how HTTP or Kafka is protected.
 - Each returned ExternalEvent must use a stable per-event `idempotency_key`, for example `<idempotency_key_base>:<event_id>`.
 - Kafka result delivery is accepted only for waits with `result_transport=kafka_event|both` and only from the expected `result_topic`.
 - n8n must return external events only; it must not close or escalate cases directly.

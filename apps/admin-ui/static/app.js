@@ -9,10 +9,6 @@ const state = {
   routeOperation: 'modify',
   policyId: 'policy.password_reset',
   policyOperation: 'modify',
-  toolMatrixId: 'matrix.password_reset',
-  toolMatrixOperation: 'modify',
-  escalationPolicyId: 'escalation.password_reset',
-  escalationOperation: 'modify',
   promptPackId: 'prompt.password_reset',
   promptPackOperation: 'modify',
   interactionChannelId: 'debug',
@@ -22,6 +18,8 @@ const state = {
   resolutionSlotScenarioId: 'password_reset',
   resolutionSlotProfileId: '',
   resolutionEnrichmentEditIndex: 0,
+  legacyCleanupPreview: null,
+  legacyCleanupRequest: null,
   integrationEndpointId: 'mock',
   integrationEndpointOperation: 'modify',
   toolCatalogName: 'start_systemcenter_runbook',
@@ -45,6 +43,7 @@ const state = {
     selectedIndex: 0,
     items: [],
   },
+  draggedSlotCard: null,
   lastData: {
     toolCatalog: [],
     integrationEndpoints: [],
@@ -61,8 +60,6 @@ const viewTitles = {
   scenarioSlots: '0. Слоты',
   scenarioClassification: '2. Классификация и маршрут',
   scenarioReact: '3. ReAct-планирование',
-  scenarioTools: '4. ReAct-вызовы и матрица запуска',
-  scenarioEscalation: '5. Решение и эскалация',
   scenarioPrompts: '6. Промпты',
   interactionChannels: 'Каналы взаимодействия',
   resolution: '1. Разрешение слотов',
@@ -121,6 +118,7 @@ const visibleLabels = {
   incomplete: 'неполно',
   auto: 'авто',
   ask_user: 'спросить клиента',
+  ask_client: 'уточнить у клиента',
   operator_approval: 'согласование оператора',
   operator_handoff: 'эскалировать оператору',
   approver_approval: 'согласование руководителя',
@@ -239,9 +237,6 @@ const visibleLabels = {
 
 const activeResolverSourceTypes = ['react_call', 'disabled'];
 const activeEndpointAdapterTypes = ['mock', 'n8n_webhook'];
-const activeLaunchExecutionModes = ['auto', 'operator_approval', 'blocked'];
-const completionModes = ['sync', 'external_event', 'timer_wait'];
-const completionTimeoutActions = ['resume_agent', 'escalate_operator', 'debug_stop', 'mark_failed', 'cancel'];
 const operationContractTypes = ['string', 'integer', 'number', 'boolean', 'array', 'object'];
 const operationArrayItemTypes = ['string', 'integer', 'number', 'boolean', 'object'];
 const operationContractTypeLabels = {
@@ -252,69 +247,6 @@ const operationContractTypeLabels = {
   array: 'массив',
   object: 'объект',
 };
-
-const handoffConditionChoices = [
-  {
-    value: 'two_tool_errors',
-    label: '2 ошибки ReAct-вызовов подряд',
-    help: 'Срабатывает, когда ReAct получил два неуспешных результата вызовов подряд.',
-  },
-  {
-    value: 'iteration_limit',
-    label: 'Достигнут лимит ReAct-итераций',
-    help: 'Лимит задается в блоке "3. ReAct-планирование".',
-  },
-  {
-    value: 'confidence_below_050',
-    label: 'Confidence ниже порога',
-    help: 'Эскалация оператору включается, когда уверенность решения ниже 0.50.',
-  },
-  {
-    value: 'affected_users_threshold',
-    label: 'Превышен порог Major Incident',
-    help: 'Порог количества затронутых пользователей задается в этом блоке.',
-  },
-  {
-    value: 'policy_blocked',
-    label: 'Политика заблокировала автоисполнение',
-    help: 'Срабатывает, когда Execution Policy или матрица запуска запрещает действие.',
-  },
-];
-
-const handoffPackageChoices = [
-  {
-    value: 'slots',
-    label: 'Собранные слоты',
-    help: 'Кто, что, где, когда и другие заполненные атрибуты обращения.',
-    required: true,
-  },
-  {
-    value: 'react_history',
-    label: 'История ReAct',
-    help: 'Последовательность "думай -> действуй -> наблюдай" с промежуточными решениями.',
-  },
-  {
-    value: 'tool_results',
-    label: 'Результаты ReAct-вызовов',
-    help: 'Ответы вызванных ReAct-вызовов, статусы и ошибки.',
-  },
-  {
-    value: 'agent_hypothesis',
-    label: 'Гипотеза агента',
-    help: 'Предположение агента о причине и следующем действии.',
-  },
-  {
-    value: 'sla_remaining',
-    label: 'Остаток SLA',
-    help: 'Сколько времени осталось до нарушения SLA на момент эскалации оператору.',
-  },
-  {
-    value: 'user_notification',
-    label: 'Текст уведомления клиента',
-    help: 'Сообщение, которое увидит клиент или оператор канала.',
-    required: true,
-  },
-];
 
 const reactActionGroupChoices = [
   {
@@ -609,10 +541,6 @@ async function renderView(view) {
     await renderScenarioClassification();
   } else if (view === 'scenarioReact') {
     await renderScenarioReact();
-  } else if (view === 'scenarioTools') {
-    await renderScenarioTools();
-  } else if (view === 'scenarioEscalation') {
-    await renderScenarioEscalation();
   } else if (view === 'scenarioPrompts') {
     await renderScenarioPrompts();
   } else if (view === 'interactionChannels') {
@@ -650,9 +578,7 @@ async function renderScenarios() {
     slotSchemas: context.slotSchemas,
     routes: context.routes,
     policies: context.policies,
-    toolMatrices: context.toolMatrices,
     promptPacks: context.promptPacks,
-    escalationPolicies: context.escalationPolicies,
     interactionChannels: context.interactionChannels,
   });
   elements.viewContent.innerHTML = [
@@ -986,15 +912,9 @@ function applyGraphConfigRefSelection(domain, refId) {
   } else if (domain === 'orchestrator_policy') {
     state.policyId = refId;
     state.policyOperation = 'modify';
-  } else if (domain === 'tool_launch_matrix') {
-    state.toolMatrixId = refId;
-    state.toolMatrixOperation = 'modify';
   } else if (domain === 'prompt_packs') {
     state.promptPackId = refId;
     state.promptPackOperation = 'modify';
-  } else if (domain === 'escalation_policies') {
-    state.escalationPolicyId = refId;
-    state.escalationOperation = 'modify';
   } else if (domain === 'interaction_channels') {
     state.interactionChannelId = refId;
     state.interactionChannelOperation = 'modify';
@@ -1058,9 +978,7 @@ async function loadScenarioContext() {
     slotSchemasConfig,
     routesConfig,
     policiesConfig,
-    toolMatricesConfig,
     promptPacksConfig,
-    escalationPoliciesConfig,
     interactionChannelsConfig,
     resolutionProfilesConfig,
   ] = await Promise.all([
@@ -1069,9 +987,7 @@ async function loadScenarioContext() {
     api('/admin/config/active/slot_schemas'),
     api('/admin/config/active/classification_routes'),
     api('/admin/config/active/orchestrator_policy'),
-    api('/admin/config/active/tool_launch_matrix'),
     api('/admin/config/active/prompt_packs'),
-    api('/admin/config/active/escalation_policies'),
     api('/admin/config/active/interaction_channels'),
     api('/admin/config/active/attribute_resolution_profiles'),
   ]);
@@ -1091,9 +1007,7 @@ async function loadScenarioContext() {
     slotSchemas: slotSchemasConfig.payload?.slot_schemas || [],
     routes: routesConfig.payload?.routes || [],
     policies: policiesConfig.payload?.policies || [],
-    toolMatrices: toolMatricesConfig.payload?.matrices || [],
     promptPacks: promptPacksConfig.payload?.packs || [],
-    escalationPolicies: escalationPoliciesConfig.payload?.policies || [],
     interactionChannels: interactionChannelsConfig.payload?.channels || [],
     resolutionProfiles: resolutionProfilesConfig.payload?.profiles || [],
   };
@@ -1303,73 +1217,12 @@ function systemConfidenceSummary(thresholds = {}) {
 }
 
 async function renderScenarioTools() {
-  const [active, scenariosConfig, slotSchemasConfig, toolsConfig, endpointsConfig] = await Promise.all([
-    api('/admin/config/active/tool_launch_matrix'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/slot_schemas'),
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/integration_endpoints'),
-  ]);
-  const matrices = active.payload?.matrices || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
-  const slotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
-  const tools = toolsConfig.payload?.tools || [];
-  const integrationEndpoints = endpointsConfig.payload?.endpoints || [];
-  state.lastData.toolCatalog = tools;
-  state.lastData.integrationEndpoints = integrationEndpoints;
-  if (!matrices.some((matrix) => matrix.matrix_id === state.toolMatrixId)) {
-    state.toolMatrixId = matrices[0]?.matrix_id || '';
-  }
-  const selected = matrices.find((matrix) => matrix.matrix_id === state.toolMatrixId) || null;
-  const slotContext = buildMatrixSlotContext(selected, scenarios, slotSchemas);
-  state.lastData.toolMatrixSlotContext = slotContext;
   elements.viewContent.innerHTML = [
     section(
-      '4. ReAct-вызовы и матрица запуска',
-      `${blockCatalogControls({
-        selectId: 'toolMatrixSelect',
-        label: 'Матрица ReAct-вызовов',
-        items: matrices,
-        idKey: 'matrix_id',
-        selectedId: state.toolMatrixId,
-        labelKey: 'display_name',
-        actionPrefix: 'tool-matrix',
-        operation: state.toolMatrixOperation,
-      })}
-      ${renderToolLaunchEditor({ matrix: selected, matrices, scenarios, tools, integrationEndpoints, slotContext })}`,
+      'ReAct-вызовы',
+      '<div class="empty">Матрица запуска удалена из сценариев. ReAct-вызовы настраиваются в профилях разрешения и каталоге интеграций.</div>',
     ),
   ].join('');
-  attachCatalogSelect('toolMatrixSelect', 'toolMatrixId', renderScenarioTools);
-}
-
-async function renderScenarioEscalation() {
-  const [active, scenariosConfig] = await Promise.all([
-    api('/admin/config/active/escalation_policies'),
-    api('/admin/config/active/service_scenarios'),
-  ]);
-  const policies = active.payload?.policies || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
-  if (!policies.some((policy) => policy.policy_id === state.escalationPolicyId)) {
-    state.escalationPolicyId = policies[0]?.policy_id || '';
-  }
-  const selected = policies.find((policy) => policy.policy_id === state.escalationPolicyId) || null;
-  elements.viewContent.innerHTML = [
-    section(
-      '5. Решение и эскалация',
-      `${blockCatalogControls({
-        selectId: 'escalationPolicySelect',
-        label: 'Политика',
-        items: policies,
-        idKey: 'policy_id',
-        selectedId: state.escalationPolicyId,
-        labelKey: 'display_name',
-        actionPrefix: 'escalation',
-        operation: state.escalationOperation,
-      })}
-      ${renderEscalationEditor({ policy: selected, policies, scenarios })}`,
-    ),
-  ].join('');
-  attachCatalogSelect('escalationPolicySelect', 'escalationPolicyId', renderScenarioEscalation);
 }
 
 async function renderScenarioPrompts() {
@@ -1668,9 +1521,7 @@ function renderScenarioEditor({
   slotSchemas,
   routes,
   policies,
-  toolMatrices,
   promptPacks,
-  escalationPolicies,
   interactionChannels = [],
 }) {
   if (state.scenarioOperation === 'delete') {
@@ -1682,7 +1533,7 @@ function renderScenarioEditor({
         <div>
           <div class="metric-label">Удаляемый сценарий</div>
           <div class="scenario-title">${escapeHtml(detail.scenario.display_name)}</div>
-          <div class="meta">Будет удалена запись сценария из домена service_scenarios. Связанные слоты, маршруты, prompt pack и матрица ReAct-вызовов остаются в своих доменах для повторного использования или отдельной очистки.</div>
+          <div class="meta">Будет удалена запись сценария из домена service_scenarios. Связанные слоты, маршруты и prompt pack остаются в своих доменах для повторного использования или отдельной очистки.</div>
         </div>
         <button class="danger" type="submit">Удалить сценарий</button>
       </form>
@@ -1704,6 +1555,7 @@ function renderScenarioEditor({
       <input type="hidden" name="scenario_id" value="${escapeHtml(scenario.scenario_id || '')}">
       <input type="hidden" name="existing_tags" value="${escapeHtml(JSON.stringify(scenario.tags || []))}">
       <input type="hidden" name="orchestrator_policy_id" value="${escapeHtml(scenario.orchestrator_policy_id || reactPolicy.policy_id || '')}">
+      <input type="hidden" name="escalation_policy_id" value="${escapeHtml(scenario.escalation_policy_id || defaultEscalationPolicyId(scenario.scenario_id))}">
       <div class="grid two">
         <label>Статус<select name="status">${statusOptions}</select></label>
       </div>
@@ -1712,12 +1564,10 @@ function renderScenarioEditor({
       <div class="grid two">
         <label>Схема слотов<select name="slot_schema_id">${referenceOptions(slotSchemas, 'slot_schema_id', scenario.slot_schema_id, 'display_name')}</select></label>
         <label>Маршрут классификации<select name="classification_route_id">${referenceOptions(routes, 'route_id', scenario.classification_route_id, 'display_name')}</select></label>
-        <label>Матрица ReAct-вызовов<select name="tool_launch_matrix_id">${referenceOptions(toolMatrices, 'matrix_id', scenario.tool_launch_matrix_id, 'display_name')}</select></label>
         <label>Пакет промптов
           <select name="prompt_pack_id">${referenceOptions(promptPacks, 'prompt_pack_id', scenario.prompt_pack_id, (pack) => promptPackLabel(pack))}</select>
           <span class="field-help">Связь сценария с пакетом. Содержимое обязательных блоков редактируется в меню "Сценарии обработки -> 6. Промпты".</span>
         </label>
-        <label>Политика эскалации<select name="escalation_policy_id">${referenceOptions(escalationPolicies, 'policy_id', scenario.escalation_policy_id, 'display_name')}</select></label>
         <label>Канал по умолчанию
           <select name="default_channel_id">${referenceOptions(interactionChannels, 'channel_id', scenario.default_channel_id || 'debug', 'display_name')}</select>
           <span class="field-help">Канал определяет, куда задаются вопросы, как долго ждать ответ и что делать при незавершенном обсуждении или эскалации.</span>
@@ -1761,13 +1611,12 @@ function renderScenarioEditor({
 }
 
 async function renderResolutionProfiles() {
-  const [active, slotSchemasConfig, scenariosConfig, toolsConfig, endpointsConfig, matricesConfig, modelRoutingConfig] = await Promise.all([
+  const [active, slotSchemasConfig, scenariosConfig, toolsConfig, endpointsConfig, modelRoutingConfig] = await Promise.all([
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/slot_schemas'),
     api('/admin/config/active/service_scenarios'),
     api('/admin/config/active/tools'),
     api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/tool_launch_matrix'),
     api('/admin/config/active/model_routing'),
   ]);
   const profiles = active.payload?.profiles || [];
@@ -1775,13 +1624,11 @@ async function renderResolutionProfiles() {
   const scenarios = scenariosConfig.payload?.scenarios || [];
   const tools = toolsConfig.payload?.tools || [];
   const endpoints = endpointsConfig.payload?.endpoints || [];
-  const toolMatrices = matricesConfig.payload?.matrices || [];
   state.lastData.resolutionProfiles = profiles;
   state.lastData.slotSchemas = slotSchemas;
   state.lastData.serviceScenarios = scenarios;
   state.lastData.toolCatalog = tools;
   state.lastData.integrationEndpoints = endpoints;
-  state.lastData.toolMatrices = toolMatrices;
   state.lastData.modelConfig = normalizeModelConfig(modelRoutingConfig.payload || {});
   if (!profiles.some((profile) => profile.profile_id === state.resolutionProfileId)) {
     state.resolutionProfileId = profiles[0]?.profile_id || '';
@@ -1801,7 +1648,6 @@ async function renderResolutionProfiles() {
     scenarios,
     tools,
     endpoints,
-    toolMatrices,
   });
   elements.viewContent.innerHTML = [
     section(
@@ -1843,7 +1689,8 @@ function resolutionProfileHowToPanel() {
 
 function resolutionProfileUsagePanel(slotSchemas, scenarios, profileId) {
   const usedSchemas = (slotSchemas || []).filter((schema) =>
-    (schema.slots || []).some((slot) => slot.resolution_profile_id === profileId),
+    (schema.slots || []).some((slot) => slot.resolution_profile_id === profileId)
+    || slotSchemaStagesForEditor(schema).some((stage) => stage.resolution_profile_id === profileId),
   );
   const schemaIds = new Set(usedSchemas.map((schema) => schema.slot_schema_id));
   const usedScenarios = (scenarios || []).filter((scenario) => schemaIds.has(scenario.slot_schema_id));
@@ -1867,10 +1714,152 @@ function resolutionProfileUsagePanel(slotSchemas, scenarios, profileId) {
   `;
 }
 
+function profileCleanupSlotIds(profile, slotSchema) {
+  const result = new Set();
+  const schemaSlots = slotSchema?.slots || [];
+  const schemaSlotIds = new Set(schemaSlots.map((slot) => slot.slot_id));
+  for (const output of profile?.output_slots_order || []) {
+    if (schemaSlotIds.has(output.slot_id)) {
+      result.add(output.slot_id);
+    }
+  }
+  for (const slot of schemaSlots) {
+    if (slot.resolution_profile_id === profile?.profile_id) {
+      result.add(slot.slot_id);
+    }
+  }
+  return [...result];
+}
+
+function profileMatchesSlotSchema(profile, slotSchema) {
+  if (!profile || !slotSchema) return false;
+  if (profile.slot_schema_id === slotSchema.slot_schema_id) return true;
+  const schemaSlotIds = new Set((slotSchema.slots || []).map((slot) => slot.slot_id));
+  return profileCleanupSlotIds(profile, slotSchema).length > 0
+    || (profile.output_slots_order || []).some((output) => schemaSlotIds.has(output.slot_id));
+}
+
+function legacyCleanupScenarioText(slotSchema, scenarios) {
+  const names = (scenarios || [])
+    .filter((scenario) => scenario.slot_schema_id === slotSchema?.slot_schema_id)
+    .map((scenario) => scenario.display_name || scenario.scenario_id);
+  return names.length ? names.join(', ') : 'сценарии не найдены';
+}
+
+function legacyCleanupPreviewPanel(slotSchemaId) {
+  const result = state.legacyCleanupPreview;
+  if (!result || result.summary?.slot_schema_id !== slotSchemaId) {
+    return '';
+  }
+  const summary = result.summary || {};
+  const list = (items, key, emptyText) => {
+    if (!items?.length) return `<li>${escapeHtml(emptyText)}</li>`;
+    return items.map((item) => `<li>${escapeHtml(item.display_name || item[key] || item.profile_id || item.slot_id || '')}</li>`).join('');
+  };
+  const blocked = result.status === 'blocked';
+  return `
+    <div class="slot-schema-derived ${blocked ? 'danger-panel' : ''}">
+      <div class="metric-label">${blocked ? 'Очистка заблокирована' : 'Предпросмотр очистки'}</div>
+      <div class="grid two">
+        <div>
+          <strong>Слоты к удалению</strong>
+          <ul>${list(summary.slots_to_remove, 'slot_id', 'слоты не выбраны')}</ul>
+        </div>
+        <div>
+          <strong>Профили к удалению</strong>
+          <ul>${list(summary.profiles_to_delete, 'profile_id', 'профили не удаляются')}</ul>
+        </div>
+        <div>
+          <strong>Профили к изменению</strong>
+          <ul>${list(summary.profiles_to_update, 'profile_id', 'профили не изменяются')}</ul>
+        </div>
+        <div>
+          <strong>Затронутые сценарии</strong>
+          <ul>${list(summary.affected_scenarios, 'scenario_id', 'сценарии не найдены')}</ul>
+        </div>
+      </div>
+      ${(result.blocked_reasons || []).length ? `
+        <div class="meta">Причины: ${escapeHtml(result.blocked_reasons.join('; '))}</div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], profile = null }) {
+  if (!slotSchema) return '';
+  const schemaSlotIds = new Set((slotSchema.slots || []).map((slot) => slot.slot_id));
+  const remembered = state.legacyCleanupRequest?.slot_schema_id === slotSchema.slot_schema_id
+    ? state.legacyCleanupRequest
+    : null;
+  const selectedProfileIds = new Set(
+    remembered?.profile_ids || (profile ? [profile.profile_id] : []),
+  );
+  const selectedSlotIds = new Set(
+    remembered?.slot_ids || (profile ? profileCleanupSlotIds(profile, slotSchema) : []),
+  );
+  const candidateProfiles = (profiles || []).filter((item) =>
+    profileMatchesSlotSchema(item, slotSchema) || selectedProfileIds.has(item.profile_id),
+  );
+  if (!candidateProfiles.length && !(slotSchema.slots || []).length) {
+    return '';
+  }
+  const slotRows = (slotSchema.slots || []).map((slot) => `
+    <label class="checkbox-line">
+      <input type="checkbox" name="cleanup_slot_id" value="${escapeHtml(slot.slot_id)}" ${selectedSlotIds.has(slot.slot_id) ? 'checked' : ''}>
+      <span>${escapeHtml(slot.display_name || slot.slot_id)} <small>${escapeHtml(slot.slot_id)}</small></span>
+    </label>
+  `).join('');
+  const profileRows = candidateProfiles.map((item) => {
+    const outputIds = (item.output_slots_order || [])
+      .map((output) => output.slot_id)
+      .filter((slotId) => schemaSlotIds.has(slotId));
+    const linkedSlots = profileCleanupSlotIds(item, slotSchema);
+    const detail = [...new Set([...outputIds, ...linkedSlots])].join(', ') || 'нет выходных слотов в схеме';
+    return `
+      <label class="checkbox-line">
+        <input type="checkbox" name="cleanup_profile_id" value="${escapeHtml(item.profile_id)}" ${selectedProfileIds.has(item.profile_id) ? 'checked' : ''}>
+        <span>${escapeHtml(item.display_name || item.profile_id)} <small>${escapeHtml(detail)}</small></span>
+      </label>
+    `;
+  }).join('');
+  return `
+    <details class="launch-editor legacy-cleanup" data-legacy-cleanup-panel open>
+      <summary>Очистка legacy-связок слотов и профилей</summary>
+      <input type="hidden" name="cleanup_slot_schema_id" value="${escapeHtml(slotSchema.slot_schema_id)}">
+      <div class="meta">
+        Используйте этот блок, когда обычное удаление слота или профиля упирается в циклическую ссылку.
+        Очистка одной операцией меняет схему слотов и профили разрешения. Сценарии: ${escapeHtml(legacyCleanupScenarioText(slotSchema, scenarios))}.
+      </div>
+      <div class="grid two">
+        <div>
+          <div class="metric-label">Слоты для удаления</div>
+          ${slotRows || '<div class="empty">В схеме нет слотов</div>'}
+        </div>
+        <div>
+          <div class="metric-label">Профили для удаления или очистки</div>
+          ${profileRows || '<div class="empty">Связанные профили не найдены</div>'}
+        </div>
+      </div>
+      ${legacyCleanupPreviewPanel(slotSchema.slot_schema_id)}
+      <label class="checkbox-line">
+        <input type="checkbox" name="cleanup_confirm" value="true">
+        <span>Подтверждаю изменение слотов и профилей разрешения</span>
+      </label>
+      <div class="scenario-editor-actions">
+        <button type="button" data-action="legacy-cleanup-preview">Предпросмотр</button>
+        <button class="danger" type="button" data-action="legacy-cleanup-apply">Применить очистку</button>
+      </div>
+    </details>
+  `;
+}
+
 function buildResolutionSlotContext(profile, slotSchemas, scenarios) {
   const schemaById = slotSchemaById(slotSchemas);
   const usedSchemaIds = new Set((slotSchemas || [])
-    .filter((schema) => (schema.slots || []).some((slot) => slot.resolution_profile_id === profile?.profile_id))
+    .filter((schema) =>
+      (schema.slots || []).some((slot) => slot.resolution_profile_id === profile?.profile_id)
+      || slotSchemaStagesForEditor(schema).some((stage) => stage.resolution_profile_id === profile?.profile_id),
+    )
     .map((schema) => schema.slot_schema_id));
   if (profile?.slot_schema_id) {
     usedSchemaIds.add(profile.slot_schema_id);
@@ -1966,9 +1955,9 @@ function resolutionSlotContextPanel(slotContext) {
 function resolutionTargetSlotField(slotContext, selectedSlotId) {
   const slots = slotContext.slots || [];
   const selectedExists = slots.some((slot) => slot.slot_id === selectedSlotId);
-  const customSelected = !selectedSlotId && !slots.length;
+  const customSelected = selectedSlotId === '__custom__';
   const options = [
-    ...(slots.length ? [`<option value="" ${!selectedSlotId ? 'selected' : ''}>выберите слот</option>`] : []),
+    `<option value="" ${!selectedSlotId && !customSelected ? 'selected' : ''}>без целевого слота / профиль этапа</option>`,
     ...slots.map((slot) => `<option value="${escapeHtml(slot.slot_id)}" ${
       slot.slot_id === selectedSlotId ? 'selected' : ''
     }>${escapeHtml(slotOptionLabel(slot, slotContext))}</option>`),
@@ -1982,7 +1971,7 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
   return `
     <label>Целевой слот
       <select name="target_slot_id" data-resolution-target-slot>${options.join('')}</select>
-      <span class="field-help">Основной слот, ради которого выполняется профиль. Если слота еще нет, выберите создание нового и укажите его будущий ключ.</span>
+      <span class="field-help">Для slot-level профиля выберите основной слот. Для stage-level профиля оставьте "без целевого слота".</span>
     </label>
     <label data-resolution-target-slot-custom ${customSelected ? '' : 'hidden'}>
       Ключ нового слота
@@ -1992,17 +1981,15 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
   `;
 }
 
-function toolsForScenario(tools = [], scenarios = [], toolMatrices = [], scenario = null, referencedToolNames = []) {
-  const matrix = scenario
-    ? (toolMatrices || []).find((item) => item.matrix_id === scenario.tool_launch_matrix_id)
-    : null;
-  const allowedNames = new Set((matrix?.launches || []).map((launch) => launch.tool_name).filter(Boolean));
+function toolsForScenario(tools = [], scenarios = [], scenario = null, referencedToolNames = []) {
+  void scenarios;
+  void scenario;
   const referenced = new Set((referencedToolNames || []).filter(Boolean));
-  const result = (tools || []).filter((tool) => !allowedNames.size || allowedNames.has(tool.tool_name) || referenced.has(tool.tool_name));
+  const result = (tools || []).filter((tool) => !referenced.size || referenced.has(tool.tool_name) || tool.status !== 'disabled');
   return result.length ? result : tools;
 }
 
-function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [], toolMatrices = [] }) {
+function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [] }) {
   if (state.resolutionOperation === 'delete') {
     if (!profile) {
       return '<div class="empty">Нет выбранного профиля для удаления</div>';
@@ -2014,6 +2001,13 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <div class="scenario-title">${escapeHtml(profile.display_name)}</div>
         </div>
         ${resolutionProfileUsagePanel(slotSchemas, scenarios, profile.profile_id)}
+        ${renderLegacyCleanupPanel({
+          slotSchema: (slotSchemas || []).find((schema) => schema.slot_schema_id === profile.slot_schema_id)
+            || (slotSchemas || []).find((schema) => profileCleanupSlotIds(profile, schema).length),
+          profiles,
+          scenarios,
+          profile,
+        })}
         <button class="danger" type="submit">Удалить профиль</button>
       </form>
     `;
@@ -2027,14 +2021,13 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
   }
   const slotContext = buildResolutionSlotContext(current, slotSchemas, scenarios);
   const humanPolicy = current.human_resolution_policy || {};
-  const handoffAction = humanPolicy.handoff_action || 'operator_handoff';
-  const handoffOptions = ['operator_handoff', 'escalate', 'debug_stop', 'leave_empty']
-    .map((value) => `<option value="${value}" ${handoffAction === value ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`)
+  const humanAction = ['ask_client', 'escalate_operator'].includes(humanPolicy.action)
+    ? humanPolicy.action
+    : 'ask_client';
+  const humanActionOptions = ['ask_client', 'escalate_operator']
+    .map((value) => `<option value="${value}" ${humanAction === value ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`)
     .join('');
-  const fallbackAction = humanPolicy.fallback_action || current.fallback?.action || 'ask_user';
-  const fallbackOptions = ['ask_user', 'operator_handoff', 'escalate', 'leave_empty']
-    .map((value) => `<option value="${value}" ${fallbackAction === value ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`)
-    .join('');
+  const humanMessageTemplate = humanPolicy.message_template || humanPolicy.clarification_question || current.fallback?.question || 'Уточните данные для заполнения слота.';
   const enrichmentSteps = profileEnrichmentSteps(current, tools, endpoints);
   const outputRules = profileOutputRules(current);
   const llmScript = current.llm_resolution_script || {};
@@ -2042,7 +2035,6 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
   const contextTools = toolsForScenario(
     tools,
     scenarios,
-    toolMatrices,
     slotContext.selectedScenario,
     enrichmentSteps.map((step) => step.react_call),
   );
@@ -2074,7 +2066,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
         <legend>Обогащение контекста</legend>
         <div class="meta">Шаги выполняются сверху вниз. Результат каждого ReAct-вызова доступен следующим шагам и LLM-правилу через ссылку вида step.</div>
         <div data-enrichment-step-list>
-          ${renderEnrichmentStepCards(enrichmentSteps, slotContext, outputRules, contextTools)}
+          ${renderEnrichmentStepCards(enrichmentSteps, slotContext, outputRules, contextTools, endpoints)}
         </div>
         <button type="button" data-action="enrichment-step-add">Добавить шаг обогащения</button>
       </fieldset>
@@ -2116,23 +2108,14 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
         <legend>Уточнение у клиента и эскалация оператору</legend>
         <div class="meta">Уточнение продолжает AI-сценарий после ответа клиента. Эскалация останавливает самостоятельную обработку и передает контекст оператору.</div>
         <div class="grid two">
-          <label>Слоты для уточнения у клиента
-            <select name="clarification_slots" multiple size="6">${resolutionSlotMultiOptions(slotContext, humanPolicy.clarification_slots || [])}</select>
-            <span class="field-help">Какие слоты сценария запросить у клиента для следующей попытки разрешения слота.</span>
-          </label>
-          <label>Пакет эскалации оператору
-            <select name="handoff_package" multiple size="6">${resolutionSlotMultiOptions(slotContext, humanPolicy.handoff_package || [])}</select>
-            <span class="field-help">Какие слоты сценария передать оператору, если AI не может продолжить самостоятельно.</span>
-          </label>
-          <label>Действие эскалации оператору
-            <select name="handoff_action">${handoffOptions}</select>
-          </label>
-          <label>Резервное действие
-            <select name="fallback_action">${fallbackOptions}</select>
+          <label>Действие
+            <select name="human_resolution_action">${humanActionOptions}</select>
+            <span class="field-help">Что делать, если профиль не смог заполнить обязательные выходные слоты.</span>
           </label>
         </div>
-        <label>Вопрос клиенту при неоднозначном или пустом результате
-          <textarea name="clarification_question" rows="2">${escapeHtml(humanPolicy.clarification_question || current.fallback?.question || '')}</textarea>
+        <label>Сообщение
+          <textarea name="human_resolution_message_template" rows="3">${escapeHtml(humanMessageTemplate)}</textarea>
+          <span class="field-help">Для уточнения это вопрос клиенту, для эскалации - сообщение оператору. Используйте подсказки через ${'${...}'}.</span>
         </label>
       </fieldset>
       ${resolutionProfileUsagePanel(slotSchemas, scenarios, current.profile_id)}
@@ -2317,7 +2300,7 @@ function profileEnrichmentSteps(profile = {}, tools = [], endpoints = []) {
   }];
 }
 
-function renderEnrichmentStepCards(steps, slotContext, outputRules, tools) {
+function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpoints = []) {
   const normalizedSteps = (steps || []).map((step, index) => normalizeEnrichmentStep(step, index, tools));
   if (!normalizedSteps.length) {
     state.resolutionEnrichmentEditIndex = 0;
@@ -2341,6 +2324,7 @@ function renderEnrichmentStepCards(steps, slotContext, outputRules, tools) {
         slotContext,
         outputRules,
         tools,
+        endpoints,
         index === activeIndex,
       )).join('')}
     </div>
@@ -2354,6 +2338,9 @@ function normalizeEnrichmentStep(step = {}, index = 0, tools = []) {
     step_id: normalizeEnrichmentStepId(step.step_id, index),
     step_name: step.step_name || '',
     react_call: reactCall,
+    endpoint_id: step.endpoint_id || '',
+    operation_id: step.operation_id || '',
+    completion_policy: step.completion_policy || {},
     parameter_mapping: step.parameter_mapping || {},
     result_fields: step.result_fields?.length ? step.result_fields : resultFieldsFromTool(tool),
     on_error: step.on_error || 'continue_to_llm',
@@ -2370,7 +2357,7 @@ function normalizeEnrichmentStepId(stepId, index = 0) {
   return `step${index + 1}`;
 }
 
-function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], active = false) {
+function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = [], active = false) {
   const tool = findToolInCatalog(tools, step.react_call) || null;
   const stepTitle = step.step_name || tool?.description || step.react_call || 'новый ReAct-вызов';
   const stepId = normalizeEnrichmentStepId(step.step_id, index);
@@ -2390,15 +2377,17 @@ function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slot
           <button class="danger" type="button" data-action="enrichment-step-remove">Удалить</button>
         </span>
       </div>
-      ${active ? renderEnrichmentStepEditor(step, index, previousSteps, slotContext, outputRules, tools) : ''}
+      ${active ? renderEnrichmentStepEditor(step, index, previousSteps, slotContext, outputRules, tools, endpoints) : ''}
     </div>
   `;
 }
 
-function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = []) {
+function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = []) {
   const tool = findToolInCatalog(tools, step.react_call) || tools[0] || null;
   const reactCall = step.react_call || tool?.tool_name || '';
   const stepId = normalizeEnrichmentStepId(step.step_id, index);
+  const completionPolicy = step.completion_policy || {};
+  const completionMode = completionPolicy.mode || 'sync';
   return `
     <div class="enrichment-step-editor" data-enrichment-step-editor>
       <input type="hidden" data-enrichment-step-id value="${escapeHtml(stepId)}">
@@ -2422,11 +2411,42 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
           </label>
           <label>ReAct-вызов
             <select data-enrichment-react-call>${toolCatalogOptions(tools, reactCall)}</select>
-            <span class="field-help">Привязка к endpoint-операции берется из меню "Вызовы и интеграции".</span>
+            <span class="field-help">ReAct-вызов выбирает бизнес-действие, binding ниже фиксирует endpoint-операцию для запуска.</span>
+          </label>
+          <label>Привязка операции
+            <select data-enrichment-binding>${candidateBindingOptions(tools, { tool_name: reactCall, endpoint_id: step.endpoint_id, operation_id: step.operation_id })}</select>
+            <span class="field-help">Для long-running n8n выбирайте binding n8n / start_systemcenter_runbook.</span>
           </label>
           <label>Действие при ошибке
             <select data-enrichment-on-error>${enrichmentOnErrorOptions(step.on_error || 'continue_to_llm')}</select>
             <span class="field-help">Результат шага доступен ниже по ссылке ${escapeHtml(`\${step.${stepId}.react.${reactCall || '<react_call>'}.output.<field>}`)}.</span>
+          </label>
+        </div>
+        <div class="grid two">
+          <label>Режим завершения
+            <select data-enrichment-completion-mode>
+              <option value="sync" ${completionMode === 'sync' ? 'selected' : ''}>sync</option>
+              <option value="external_event" ${completionMode === 'external_event' ? 'selected' : ''}>external_event</option>
+            </select>
+          </label>
+          <label>Ожидание, секунд
+            <input data-enrichment-max-wait-seconds type="number" min="0" max="604800" value="${escapeHtml(completionPolicy.max_wait_seconds ?? (completionMode === 'external_event' ? 3600 : 0))}">
+          </label>
+          <label>Тип события результата
+            <input data-enrichment-expected-event-type value="${escapeHtml(completionPolicy.expected_event_type || `${step.operation_id || reactCall || 'operation'}_completed`)}" autocomplete="off">
+          </label>
+          <label>Транспорт результата
+            <select data-enrichment-result-transport>
+              ${['http_callback', 'kafka_event', 'both'].map((value) => `<option value="${value}" ${(completionPolicy.result_transport || 'kafka_event') === value ? 'selected' : ''}>${value}</option>`).join('')}
+            </select>
+          </label>
+          <label>Topic результата
+            <input data-enrichment-result-topic value="${escapeHtml(completionPolicy.result_topic || 'external.events')}" autocomplete="off">
+          </label>
+          <label>При timeout
+            <select data-enrichment-timeout-action>
+              ${['resume_agent', 'escalate_operator', 'mark_failed'].map((value) => `<option value="${value}" ${(completionPolicy.timeout_action || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent')) === value ? 'selected' : ''}>${value}</option>`).join('')}
+            </select>
           </label>
         </div>
         ${renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, index)}
@@ -2784,11 +2804,8 @@ function resolutionProfileCreateTemplate(source, profiles) {
       response_contract: template.llm_resolution_script?.response_contract || defaultResolutionResponseContract(),
     },
     human_resolution_policy: template.human_resolution_policy || {
-      clarification_question: 'Уточните данные для заполнения слота.',
-      clarification_slots: [targetSlotId].filter(Boolean),
-      handoff_package: [targetSlotId].filter(Boolean),
-      handoff_action: 'operator_handoff',
-      fallback_action: 'ask_user',
+      action: 'ask_client',
+      message_template: 'Уточните данные для заполнения слота.',
     },
     fallback: template.fallback || {
       action: 'ask_user',
@@ -2913,6 +2930,41 @@ function humanizeTechnicalKey(value) {
   return tail.replace(/[_-]+/g, ' ');
 }
 
+function defaultEscalationPolicyId(scenarioId) {
+  const suffix = String(scenarioId || 'custom').trim() || 'custom';
+  return `escalation.${suffix}`;
+}
+
+function defaultEscalationPolicyForScenario(scenario, policyId = '') {
+  const resolvedPolicyId = String(policyId || '').trim() || defaultEscalationPolicyId(scenario.scenario_id);
+  return {
+    policy_id: resolvedPolicyId,
+    display_name: `Решение и эскалация: ${scenario.display_name || scenario.scenario_id || 'сценарий'}`,
+    auto_close: {
+      requires_tool_success: true,
+    },
+    handoff_conditions: [
+      'two_tool_errors',
+      'iteration_limit',
+      'confidence_below_050',
+      'affected_users_threshold',
+      'policy_blocked',
+    ],
+    major_incident: {
+      affected_users_threshold: 10,
+    },
+    handoff_package: [
+      'slots',
+      'react_history',
+      'tool_results',
+      'agent_hypothesis',
+      'sla_remaining',
+      'user_notification',
+    ],
+    user_notification_template: 'Передаю обращение специалисту со всеми собранными данными. Мы сохранили контекст и вернемся с обновлением.',
+  };
+}
+
 function scenarioCreateTemplate(source, serviceScenarios, policies = []) {
   const template = source || serviceScenarios[0] || {};
   const scenarioId = nextScenarioId(template.scenario_id || 'custom_scenario', serviceScenarios);
@@ -2924,9 +2976,8 @@ function scenarioCreateTemplate(source, serviceScenarios, policies = []) {
     slot_schema_id: template.slot_schema_id || '',
     classification_route_id: template.classification_route_id || '',
     orchestrator_policy_id: nextConfigItemId(`policy.${scenarioId}`, policies, 'policy_id'),
-    tool_launch_matrix_id: template.tool_launch_matrix_id || '',
     prompt_pack_id: template.prompt_pack_id || '',
-    escalation_policy_id: template.escalation_policy_id || '',
+    escalation_policy_id: defaultEscalationPolicyId(scenarioId),
     default_channel_id: template.default_channel_id || 'debug',
     allowed_channel_ids: template.allowed_channel_ids || ['messenger_bot', 'service_desk', 'debug'],
     audit_required: template.audit_required ?? true,
@@ -3020,8 +3071,8 @@ function renderSlotSchemaEditor({ slotSchema, slotSchemas, scenarios, resolution
   if (!current) {
     return '<div class="empty">Схема слотов не выбрана</div>';
   }
-  const cards = (current.slots || [])
-    .map((slot, index) => renderSlotCard(slot, index + 1, false, resolutionProfiles, confidenceDefaults))
+  const stageCards = slotSchemaStagesForEditor(current)
+    .map((stage, index) => renderSlotStageCard(stage, index + 1, resolutionProfiles, confidenceDefaults))
     .join('');
   return `
     <form class="scenario-editor panel" data-form="slot-schema-editor">
@@ -3035,13 +3086,80 @@ function renderSlotSchemaEditor({ slotSchema, slotSchemas, scenarios, resolution
           сценарий выбирает схему слотов, а схема слотов уже содержит связь слота с профилем.
         </div>
       </div>
-      <div id="slotCards" class="slot-card-list">${cards}</div>
-      <button type="button" data-action="slot-add">Добавить слот</button>
+      <div class="slot-stage-list" data-slot-stage-list>${stageCards}</div>
+      <button type="button" data-action="slot-stage-add">Добавить этап</button>
+      ${renderLegacyCleanupPanel({ slotSchema: current, profiles: resolutionProfiles, scenarios })}
       ${usagePanel(scenarios, 'slot_schema_id', current.slot_schema_id)}
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.slotSchemaOperation === 'create' ? 'Создать схему слотов' : 'Сохранить слоты'}</button>
       </div>
     </form>
+  `;
+}
+
+function slotSchemaStagesForEditor(schema = {}) {
+  const stages = Array.isArray(schema.stages) && schema.stages.length
+    ? schema.stages
+    : [{
+        stage_id: 'stage.collect_context',
+        display_name: 'Сбор и разрешение слотов',
+        description: '',
+        order: 1,
+        slots: schema.slots || [],
+      }];
+  return stages
+    .map((stage, index) => ({
+      stage_id: stage.stage_id || `stage.${index + 1}`,
+      display_name: stage.display_name || `Этап ${index + 1}`,
+      description: stage.description || '',
+      order: stage.order || index + 1,
+      resolution_profile_id: stage.resolution_profile_id || '',
+      slots: stage.slots || [],
+    }))
+    .sort((left, right) => Number(left.order || 999) - Number(right.order || 999));
+}
+
+function renderSlotStageCard(stage = {}, order = 1, resolutionProfiles = [], confidenceDefaults = {}) {
+  const slots = stage.slots || [];
+  const slotCards = slots
+    .map((slot, index) => renderSlotCard(slot, index + 1, false, resolutionProfiles, confidenceDefaults))
+    .join('');
+  const profile = (resolutionProfiles || []).find((item) => item.profile_id === stage.resolution_profile_id);
+  const profileSummary = profile
+    ? `Профиль этапа: ${profile.display_name}`
+    : 'Профиль этапа не выбран';
+  return `
+    <details class="slot-card slot-stage-card" data-slot-stage-card open>
+      <summary class="slot-card-summary">
+        <span class="slot-card-order" data-slot-stage-order>${escapeHtml(String(order))}</span>
+        <div class="slot-card-summary-main">
+          <strong>${escapeHtml(stage.display_name || `Этап ${order}`)}</strong>
+          <span>${escapeHtml(stage.stage_id || '')} · ${escapeHtml(profileSummary)} · слотов: ${slots.length}</span>
+        </div>
+        <button class="danger slot-delete-button" type="button" data-action="slot-stage-remove">Удалить этап</button>
+      </summary>
+      <div class="slot-card-body">
+        <div class="grid two">
+          <label>Ключ этапа
+            <input name="stage_id" value="${escapeHtml(stage.stage_id || '')}" autocomplete="off" placeholder="stage.collect_context">
+          </label>
+          <label>Название этапа
+            <input name="stage_display_name" value="${escapeHtml(stage.display_name || '')}" autocomplete="off" placeholder="Сбор и разрешение слотов">
+          </label>
+          <label>Порядок
+            <input name="stage_order" type="number" min="1" value="${escapeHtml(stage.order || order)}">
+          </label>
+          <label>Профиль разрешения этапа
+            <select name="stage_resolution_profile_id">${stageResolutionProfileOptions(resolutionProfiles, stage.resolution_profile_id || '')}</select>
+          </label>
+        </div>
+        <label>Описание этапа
+          <textarea name="stage_description" rows="2">${escapeHtml(stage.description || '')}</textarea>
+        </label>
+        <div class="slot-card-list" data-stage-slot-cards>${slotCards}</div>
+        <button type="button" data-action="stage-slot-add">Добавить слот в этап</button>
+      </div>
+    </details>
   `;
 }
 
@@ -3063,7 +3181,8 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
         <div class="meta">
           ${escapeHtml(profile.display_name)}. Целевой слот: ${escapeHtml(profile.target_slot_id || 'н/д')}.
           Выходы: ${escapeHtml(formatList(profileOutputSlotIds(profile)))}.
-          Вопрос при неоднозначности: ${escapeHtml(profile.human_resolution_policy?.clarification_question || profile.fallback?.question || 'н/д')}.
+          Если слот не заполнен: ${escapeHtml(visibleLabels[profile.human_resolution_policy?.action] || profile.human_resolution_policy?.action || 'н/д')}.
+          Сообщение: ${escapeHtml(profile.human_resolution_policy?.message_template || profile.fallback?.question || 'н/д')}.
         </div>
       </div>`
     : `<div class="slot-schema-derived">
@@ -3074,6 +3193,8 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
   return `
     <details class="slot-card" data-slot-card${openAttribute}>
       <summary class="slot-card-summary">
+        <button class="slot-drag-handle" type="button" draggable="true" data-slot-drag-handle title="Перетащить слот">::</button>
+        <span class="slot-card-order" data-slot-order>${escapeHtml(order || '')}</span>
         <div class="slot-card-summary-main">
           <strong>${escapeHtml(title)}</strong>
           <span>${escapeHtml(keyLabel)} · ${escapeHtml(priorityGroup)} · ${escapeHtml(methodLabel)} · ${escapeHtml(requiredLabel)}</span>
@@ -3088,7 +3209,7 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
         <div class="grid two">
           <label>Ключ слота
             <input name="slot_id" value="${escapeHtml(slot.slot_id || '')}" autocomplete="off" placeholder="user_login">
-            <span class="field-help">Технический ключ поля. Используется в матрице ReAct-вызовов и prompt pack. Формат: латиница, цифры, _, -, .</span>
+            <span class="field-help">Технический ключ поля. Используется в профилях разрешения и prompt pack. Формат: латиница, цифры, _, -, .</span>
           </label>
           <label>Название
             <input name="display_name" value="${escapeHtml(slot.display_name || '')}" autocomplete="off" placeholder="Логин пользователя">
@@ -3136,24 +3257,12 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
             <select name="resolution_profile_id">${resolutionProfileOptions(resolutionProfiles, slot.resolution_profile_id, slot.slot_id)}</select>
             <span class="field-help">Профиль задает порядок извлечения моделью, endpoint-операций чтения и уточняющих вопросов.</span>
           </label>
-          <label>Запасной вопрос
-            <textarea name="fallback_question" rows="3" placeholder="Уточните ФИО, должность или табельный номер пользователя.">${escapeHtml(slot.fallback_question || slot.question || '')}</textarea>
-            <span class="field-help">Используется, если профиль не смог однозначно заполнить слот и не вернул свой вопрос.</span>
-          </label>
         </div>
         <div class="slot-method-section" data-fill-method-section="operator_manual">
           <label>Подсказка оператору
             <textarea name="operator_hint" rows="3" placeholder="Проверьте значение вручную и заполните слот.">${escapeHtml(slot.operator_hint || slot.question || '')}</textarea>
             <span class="field-help">Инструкция оператору, когда значение не должно заполняться автоматически.</span>
           </label>
-        </div>
-        <div class="slot-method-section" data-fill-method-order>
-          <div class="grid two">
-          <label>Порядок вопроса
-            <input name="question_order" type="number" min="1" max="999" value="${escapeHtml(order || '')}">
-            <span class="field-help">Позиция в очереди обогащения. Учитывается для вопросов клиенту, профилей разрешения и ручного заполнения оператором.</span>
-          </label>
-          </div>
         </div>
         <details class="slot-method-section" data-fill-method-advanced="llm_extraction" ${fillMethod === 'llm_extraction' ? '' : 'hidden'}>
           <summary>${escapeHtml(slotConfidenceSummary)}</summary>
@@ -3347,6 +3456,16 @@ function resolutionProfileOptions(profiles, selected, slotId) {
   return options.join('');
 }
 
+function stageResolutionProfileOptions(profiles, selected) {
+  const options = ['<option value="">без профиля</option>'];
+  for (const profile of profiles || []) {
+    options.push(
+      `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === selected ? 'selected' : ''}>${escapeHtml(profile.display_name || profile.profile_id)}</option>`,
+    );
+  }
+  return options.join('');
+}
+
 function routeCreateTemplate(source, routes) {
   const template = source || routes[0] || {};
   return {
@@ -3460,7 +3579,7 @@ function renderPolicyEditor({ policy, policies, scenarios }) {
       </div>
       <fieldset class="launch-editor">
         <legend>Разрешенные группы действий ReAct</legend>
-        <div class="meta">Верхнеуровневые рамки планирования. Конкретные ReAct-вызовы ИИ и режим запуска задаются в блоке "4. ReAct-вызовы и матрица запуска".</div>
+        <div class="meta">Верхнеуровневые рамки планирования. Конкретные ReAct-вызовы ИИ задаются в профилях разрешения и каталоге интеграций.</div>
         ${renderChoiceChecklist('allowed_react_action_groups', reactActionGroupChoices, current.allowed_react_action_groups || [])}
       </fieldset>
       <fieldset class="launch-editor">
@@ -3474,35 +3593,6 @@ function renderPolicyEditor({ policy, policies, scenarios }) {
       </div>
     </form>
   `;
-}
-
-function toolMatrixCreateTemplate(source, matrices) {
-  const template = source || matrices[0] || {};
-  return {
-    matrix_id: nextConfigItemId(template.matrix_id || 'matrix.custom', matrices, 'matrix_id'),
-    display_name: '',
-    launches: template.launches || [
-      {
-        launch_id: 'launch.custom.tool',
-        tool_name: 'check_zabbix_status',
-        required_slots: [],
-        parameter_bindings: {
-          query: 'context:query',
-        },
-        execution_level: 'auto',
-        target_execution_level: 'auto',
-        endpoint_id: 'mock',
-        operation_id: 'check_zabbix_status',
-        risk_level: 'low',
-        stop_on_error: true,
-        completion_policy: {
-          mode: 'sync',
-          max_wait_seconds: 0,
-          timeout_action: 'resume_agent',
-        },
-      },
-    ],
-  };
 }
 
 function selectOptions(options, selected, emptyLabel = 'Нет доступных значений') {
@@ -3594,6 +3684,57 @@ function referenceHelperParameterItems(tool, kind) {
   });
 }
 
+function referenceHelperCaseItems() {
+  return [
+    ['case_id', 'ID обращения'],
+    ['ticket_id', 'ID заявки'],
+    ['description', 'Текст обращения'],
+    ['input_text', 'Исходный текст'],
+    ['scenario_id', 'Сценарий'],
+    ['channel_id', 'Канал'],
+    ['priority', 'Приоритет'],
+    ['user', 'Пользователь'],
+  ].map(([field, label]) => ({
+    token: `\${case.${field}}`,
+    label,
+    detail: `Данные обращения: case.${field}`,
+  }));
+}
+
+function referenceHelperWaitItems() {
+  return [
+    ['wait_id', 'ID ожидания'],
+    ['wait_type', 'Тип ожидания'],
+    ['status', 'Статус ожидания'],
+    ['correlation_id', 'Correlation ID'],
+    ['deadline_at', 'Дедлайн'],
+    ['reason', 'Причина ожидания'],
+    ['result_transport', 'Транспорт результата'],
+    ['result_topic', 'Topic результата'],
+    ['expected_event_type', 'Ожидаемое событие'],
+  ].map(([field, label]) => ({
+    token: `\${wait.${field}}`,
+    label,
+    detail: `Ожидание или async-результат: wait.${field}`,
+  }));
+}
+
+function referenceHelperStageItems() {
+  return [
+    ['0.input_text', '0. Текст обращения'],
+    ['0.slot_values', '0. Слоты после нормализации'],
+    ['1.resolution_state', '1. Разрешение слотов'],
+    ['2.classification', '2. Классификация'],
+    ['2.confidence', '2. Confidence'],
+    ['5.final_decision', '5. Финальное решение'],
+    ['5.agent_outcome', '5. Итог агента'],
+  ].map(([field, label]) => ({
+    token: `\${stage.${field}}`,
+    label,
+    detail: `Данные этапа: stage.${field}`,
+  }));
+}
+
 function referenceHelperStepItems(previousSteps = []) {
   const items = [];
   for (const [index, step] of (previousSteps || []).entries()) {
@@ -3621,10 +3762,22 @@ function referenceHelperStepItems(previousSteps = []) {
 }
 
 function isReferenceAutocompleteTextarea(target) {
+  if (target?.tagName !== 'TEXTAREA') return false;
   return target?.matches?.(
     [
       '[data-enrichment-configuration-instruction]',
       '[name="llm_resolution_script_text"]',
+      '[name="human_resolution_message_template"]',
+      '[name="message_template"]',
+      '[name$="_message_template"]',
+      '[name="user_notification_template"]',
+      '[name="slot_resolution_prompt"]',
+      '[name="action"]',
+      '[name="user_question"]',
+      '[name="extraction_instruction"]',
+      '[name="operator_hint"]',
+      '[data-form="prompt-pack-editor"] textarea',
+      '[data-form="system-prompts-editor"] textarea',
     ].join(','),
   );
 }
@@ -3637,6 +3790,9 @@ function referenceAutocompleteItems({ slots = [], tools = [], selectedTool = nul
   const selected = selectedTool?.tool_name ? selectedTool : null;
   const parameterTools = selected ? [selected] : (tools || []);
   return [
+    ...referenceAutocompleteGroup('Данные обращения', referenceHelperCaseItems()),
+    ...referenceAutocompleteGroup('Ожидание', referenceHelperWaitItems()),
+    ...referenceAutocompleteGroup('Этапы', referenceHelperStageItems()),
     ...referenceAutocompleteGroup('Слоты', referenceHelperSlotItems(slots)),
     ...referenceAutocompleteGroup('ReAct-вызовы', referenceHelperReactItems(tools)),
     ...referenceAutocompleteGroup('Входные параметры', parameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'input'))),
@@ -3668,9 +3824,30 @@ function safeEnrichmentStepsFromForm(form, limit = Infinity) {
     .filter((step) => step && (step.react_call || step.result_fields?.length));
 }
 
+function allKnownSlotsForReferences() {
+  const seen = new Map();
+  for (const schema of state.lastData.slotSchemas || []) {
+    for (const slot of schema.slots || []) {
+      if (slot.slot_id && !seen.has(slot.slot_id)) {
+        seen.set(slot.slot_id, slot);
+      }
+    }
+  }
+  return Array.from(seen.values());
+}
+
+function genericReferenceAutocompleteContext() {
+  return {
+    slots: allKnownSlotsForReferences(),
+    tools: state.lastData.toolCatalog || [],
+    selectedTool: null,
+    previousSteps: [],
+  };
+}
+
 function referenceAutocompleteContextForTextarea(textarea) {
   const form = textarea.closest('form');
-  if (!form) return null;
+  if (!form) return genericReferenceAutocompleteContext();
   if (textarea.matches('[data-enrichment-configuration-instruction]')) {
     const card = textarea.closest('[data-enrichment-step-card]');
     const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
@@ -3696,7 +3873,17 @@ function referenceAutocompleteContextForTextarea(textarea) {
       previousSteps: steps,
     };
   }
-  return null;
+  if (textarea.matches('[name="human_resolution_message_template"]')) {
+    const slotContext = currentResolutionSlotContextFromForm(form);
+    const steps = safeEnrichmentStepsFromForm(form);
+    return {
+      slots: slotContext.slots || [],
+      tools: currentResolutionToolsFromForm(form, steps),
+      selectedTool: null,
+      previousSteps: steps,
+    };
+  }
+  return genericReferenceAutocompleteContext();
 }
 
 function toolBindingValue(binding) {
@@ -3743,69 +3930,6 @@ function slotSchemaById(slotSchemas) {
   return Object.fromEntries((slotSchemas || []).map((schema) => [schema.slot_schema_id, schema]));
 }
 
-function buildMatrixSlotContext(matrix, scenarios, slotSchemas) {
-  const schemaById = slotSchemaById(slotSchemas);
-  const usedScenarios = (scenarios || []).filter(
-    (scenario) => matrix?.matrix_id && scenario.tool_launch_matrix_id === matrix.matrix_id,
-  );
-  const fallbackScenario = (scenarios || []).find((scenario) => scenario.scenario_id === state.scenarioId)
-    || (scenarios || [])[0]
-    || null;
-  const contextScenarios = usedScenarios.length ? usedScenarios : (fallbackScenario ? [fallbackScenario] : []);
-  const slotMap = new Map();
-  for (const scenario of contextScenarios) {
-    const schema = schemaById[scenario.slot_schema_id];
-    for (const slot of schema?.slots || []) {
-      const entry = slotMap.get(slot.slot_id) || {
-        slot_id: slot.slot_id,
-        display_name: slot.display_name,
-        priority_group: slot.priority_group,
-        required: slot.required,
-        fill_method: slot.fill_method,
-        scenario_ids: new Set(),
-        scenario_names: new Set(),
-      };
-      entry.display_name = entry.display_name || slot.display_name;
-      entry.priority_group = entry.priority_group || slot.priority_group;
-      entry.required = entry.required || slot.required;
-      entry.fill_method = entry.fill_method || slot.fill_method;
-      entry.scenario_ids.add(scenario.scenario_id);
-      entry.scenario_names.add(scenario.display_name || scenario.scenario_id);
-      slotMap.set(slot.slot_id, entry);
-    }
-  }
-  const scenarioNames = contextScenarios.map((scenario) => scenario.display_name || scenario.scenario_id);
-  const slots = Array.from(slotMap.values()).map((slot) => {
-    const missingScenarioNames = contextScenarios
-      .filter((scenario) => !slot.scenario_ids.has(scenario.scenario_id))
-      .map((scenario) => scenario.display_name || scenario.scenario_id);
-    return {
-      ...slot,
-      scenario_ids: Array.from(slot.scenario_ids),
-      scenario_names: Array.from(slot.scenario_names),
-      missing_scenario_names: missingScenarioNames,
-    };
-  });
-  return {
-    usedByMatrix: usedScenarios.length > 0,
-    scenarioCount: contextScenarios.length,
-    scenarioNames,
-    slots,
-  };
-}
-
-function slotContextPanel(slotContext) {
-  const scope = slotContext.usedByMatrix
-    ? `Матрица используется в сценариях: ${slotContext.scenarioNames.join(', ')}.`
-    : `Матрица пока не привязана к сценарию; для подсказок используется контекст: ${slotContext.scenarioNames.join(', ') || 'не выбран'}.`;
-  return `
-    <div class="slot-schema-derived">
-      <div class="metric-label">Контекст слотов для маппинга параметров</div>
-      <div class="meta">${escapeHtml(scope)}</div>
-    </div>
-  `;
-}
-
 function parameterSchemaProperties(tool) {
   return tool?.parameters_schema?.properties || {};
 }
@@ -3815,15 +3939,6 @@ function parameterNamesForTool(tool, parameterBindings) {
   const schemaNames = Object.keys(parameterSchemaProperties(tool));
   const existing = Object.keys(parameterBindings || {});
   return Array.from(new Set([...required, ...schemaNames, ...existing]));
-}
-
-function defaultParameterBindingsForTool(tool) {
-  const required = tool?.parameters_schema?.required || [];
-  const result = {};
-  for (const parameterName of required) {
-    result[parameterName] = `context:${parameterName}`;
-  }
-  return result;
 }
 
 function parameterTypeLabel(schema) {
@@ -3845,15 +3960,6 @@ function parseBindingString(binding) {
   };
 }
 
-function parameterSourceOptions(selected) {
-  return [
-    `<option value="" ${!selected ? 'selected' : ''}>не задано</option>`,
-    ...['slot', 'case', 'context', 'constant', 'secret'].map(
-      (value) => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`,
-    ),
-  ].join('');
-}
-
 function slotOptionLabel(slot, slotContext) {
   const base = `${slot.display_name || slot.slot_id} (${slot.slot_id})`;
   const flags = [
@@ -3867,41 +3973,6 @@ function slotOptionLabel(slot, slotContext) {
   return `${base} — ${flags}${scope}`;
 }
 
-function slotOptions(slotContext, selectedSlotId) {
-  const selectedExists = (slotContext.slots || []).some((slot) => slot.slot_id === selectedSlotId);
-  const options = (slotContext.slots || []).map((slot) => ({
-    value: slot.slot_id,
-    label: slotOptionLabel(slot, slotContext),
-  }));
-  if (selectedSlotId && !selectedExists) {
-    options.unshift({
-      value: selectedSlotId,
-      label: `Слот не найден в выбранной схеме: ${selectedSlotId}`,
-    });
-  }
-  if (!options.length) {
-    return '<option value="">Нет доступных слотов</option>';
-  }
-  return [
-    `<option value="" ${!selectedSlotId ? 'selected' : ''}>выберите слот</option>`,
-    ...options.map(
-      (option) => `<option value="${escapeHtml(option.value)}" ${option.value === selectedSlotId ? 'selected' : ''}>${escapeHtml(option.label)}</option>`,
-    ),
-  ].join('');
-}
-
-function slotWarning(slotContext, slotId) {
-  if (!slotId) return '';
-  const slot = (slotContext.slots || []).find((item) => item.slot_id === slotId);
-  if (!slot) {
-    return `Слот ${slotId} отсутствует в выбранном контексте слотов.`;
-  }
-  if (slot.missing_scenario_names?.length) {
-    return `Слот отсутствует в сценариях: ${slot.missing_scenario_names.join(', ')}.`;
-  }
-  return '';
-}
-
 function schemaDisplayName(parameterName, schema) {
   return schema?.title || parameterName;
 }
@@ -3910,280 +3981,6 @@ function schemaMetaLine(parameterName, schema, required, suffix = '') {
   const typeText = parameterTypeLabel(schema);
   const codePrefix = schema?.title && schema.title !== parameterName ? `${parameterName} · ` : '';
   return `${codePrefix}${required ? 'обязательный' : 'необязательный'} · ${typeText}${suffix}`;
-}
-
-function renderParameterBindingRow(parameterName, binding, tool, slotContext, rowIndex) {
-  const properties = parameterSchemaProperties(tool);
-  const required = (tool?.parameters_schema?.required || []).includes(parameterName);
-  const schema = properties[parameterName] || null;
-  const parsed = parseBindingString(binding);
-  const source = parsed.source || '';
-  const value = parsed.value || '';
-  const warning = source === 'slot' ? slotWarning(slotContext, value) : '';
-  return `
-    <div class="parameter-binding-row" data-param-binding-row data-required="${required ? 'true' : 'false'}">
-      <input type="hidden" value="${escapeHtml(parameterName)}" data-binding-param-name>
-      <div class="parameter-binding-meta">
-        <strong>${escapeHtml(schemaDisplayName(parameterName, schema))}</strong>
-        <span>${escapeHtml(schemaMetaLine(parameterName, schema, required))}</span>
-      </div>
-      <label>Заполняется из
-        <select data-binding-source name="binding_source_${rowIndex}">${parameterSourceOptions(source)}</select>
-      </label>
-      <label data-binding-slot-wrap ${source === 'slot' ? '' : 'hidden'}>Слот
-        <select data-binding-slot-select name="binding_slot_${rowIndex}">${slotOptions(slotContext, value)}</select>
-        <span class="field-help" data-binding-slot-warning ${warning ? '' : 'hidden'}>${escapeHtml(warning)}</span>
-      </label>
-      <label data-binding-value-wrap ${source && source !== 'slot' ? '' : 'hidden'}>Параметр или значение
-        <input data-binding-value-input name="binding_value_${rowIndex}" value="${source === 'slot' ? '' : escapeHtml(value)}" autocomplete="off" placeholder="${source}:...">
-      </label>
-    </div>
-  `;
-}
-
-function parameterBindingsEditor(tool, parameterBindings, slotContext) {
-  const names = parameterNamesForTool(tool, parameterBindings);
-  if (!names.length) {
-    return '<div class="empty" data-launch-parameters>У вызова нет описанных параметров.</div>';
-  }
-  const requiredNames = names.filter((name) => (tool?.parameters_schema?.required || []).includes(name));
-  const optionalNames = names.filter((name) => !requiredNames.includes(name));
-  const renderRows = (items, offset = 0) => items.map((name, index) => renderParameterBindingRow(
-    name,
-    parameterBindings?.[name] || '',
-    tool,
-    slotContext,
-    offset + index,
-  )).join('');
-  return `
-    <div class="parameter-binding-list" data-launch-parameters>
-      <div class="parameter-binding-header">
-        <span>Параметр вызова</span>
-        <span>Заполняется из</span>
-        <span>Параметр или значение</span>
-      </div>
-      ${renderRows(requiredNames)}
-      ${optionalNames.length
-        ? `<details class="slot-card">
-            <summary class="slot-card-summary">
-              <div class="slot-card-summary-main">
-                <strong>Необязательные параметры</strong>
-                <span>${escapeHtml(optionalNames.length)} параметров</span>
-              </div>
-            </summary>
-            <div class="slot-card-body">${renderRows(optionalNames, requiredNames.length)}</div>
-          </details>`
-        : ''}
-    </div>
-  `;
-}
-
-function renderToolLaunchEditor({ matrix, matrices, scenarios, tools, integrationEndpoints, slotContext }) {
-  if (state.toolMatrixOperation === 'delete') {
-    if (!matrix?.matrix_id) {
-      return '<div class="empty">Нет выбранной матрицы ReAct-вызовов для удаления</div>';
-    }
-    return `
-      <form class="scenario-editor panel" data-form="tool-matrix-delete">
-        <div>
-          <div class="metric-label">Удаляемая матрица ReAct-вызовов</div>
-          <div class="scenario-title">${escapeHtml(matrix.display_name)}</div>
-        </div>
-        ${usagePanel(scenarios, 'tool_launch_matrix_id', matrix.matrix_id)}
-        <button class="danger" type="submit">Удалить матрицу ReAct-вызовов</button>
-      </form>
-    `;
-  }
-  const current = state.toolMatrixOperation === 'create'
-    ? toolMatrixCreateTemplate(matrix, matrices)
-    : matrix;
-  if (!current?.matrix_id) {
-    return '<div class="empty">Матрица ReAct-вызовов не выбрана</div>';
-  }
-  const launches = current.launches || [];
-  const launchForms = launches
-    .map((launch, index) => renderLaunchCard(launch, index, tools, integrationEndpoints, slotContext))
-    .join('');
-  return `
-    <form class="scenario-editor panel" data-form="tool-launch-editor">
-      <input type="hidden" name="matrix_id" value="${escapeHtml(current.matrix_id)}">
-      <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
-      <input type="hidden" name="launch_count" value="${escapeHtml(launches.length)}">
-      ${slotContextPanel(slotContext)}
-      <div id="launchCards">${launchForms}</div>
-      <button type="button" data-action="launch-add">Добавить запуск</button>
-      ${usagePanel(scenarios, 'tool_launch_matrix_id', current.matrix_id)}
-      <div class="scenario-editor-actions">
-        <button class="primary" type="submit">${state.toolMatrixOperation === 'create' ? 'Создать матрицу ReAct-вызовов' : 'Сохранить матрицу ReAct-вызовов'}</button>
-      </div>
-    </form>
-  `;
-}
-
-function renderLaunchCard(
-  launch,
-  index,
-  tools = state.lastData.toolCatalog || [],
-  integrationEndpoints = state.lastData.integrationEndpoints || [],
-  slotContext = state.lastData.toolMatrixSlotContext || { slots: [], scenarioNames: [], scenarioCount: 0, usedByMatrix: false },
-) {
-  const launchMode = launch.execution_level || 'operator_approval';
-  const completionPolicy = normalizeCompletionPolicy(launch.completion_policy);
-  const toolName = launch.tool_name || (tools || [])[0]?.tool_name || '';
-  const tool = findToolInCatalog(tools, toolName);
-  const binding = currentToolBinding(tool);
-  const endpointId = binding?.endpoint_id || '';
-  const operationId = binding?.operation_id || '';
-  const bindingStatus = binding
-    ? operationBindingSummary(binding, integrationEndpoints)
-    : 'У выбранного ReAct-вызова ИИ нет привязки операции. Настройте ее в меню "Вызовы и интеграции -> Привязка операций".';
-  return `
-    <fieldset class="launch-editor" data-launch-card>
-      <legend>${escapeHtml(toolName || `Запуск ${index + 1}`)}</legend>
-      <input type="hidden" name="launch_id_${index}" value="${escapeHtml(launch.launch_id)}">
-      <input type="hidden" name="endpoint_id_${index}" value="${escapeHtml(endpointId)}" data-launch-endpoint>
-      <input type="hidden" name="operation_id_${index}" value="${escapeHtml(operationId)}" data-launch-operation>
-      ${renderLaunchGroup(
-        'ReAct-вызов ИИ',
-        'Выберите действие, которое может предложить ИИ в ReAct-loop.',
-        `<div class="grid two">
-          <label>ReAct-вызов ИИ<select name="tool_name_${index}" data-launch-tool>${toolCatalogOptions(tools, toolName)}</select></label>
-        </div>`,
-        'data-launch-tool-group',
-      )}
-      ${renderLaunchGroup(
-        'Текущая привязка операции',
-        'Техническое подключение выбирается в меню "Вызовы и интеграции -> Привязка операций" и подставляется сюда автоматически.',
-        `<div class="${binding ? 'meta' : 'field-help'}" data-launch-binding-status>${escapeHtml(bindingStatus)}</div>`,
-      )}
-      ${renderLaunchGroup(
-        'Получение результата',
-        'Показывает, завершится ли вызов сразу или откроет ожидание результата от endpoint, timer worker или n8n. Сам цикл ожидания не добавляется в ReAct-loop.',
-        `<div class="grid two">
-          <label>Режим результата<select name="completion_mode_${index}">${optionList(completionModes, completionPolicy.mode)}</select></label>
-          <label>Максимальное ожидание, сек.<input name="completion_max_wait_seconds_${index}" type="number" min="0" max="604800" value="${escapeHtml(completionPolicy.max_wait_seconds)}"></label>
-          <label>Интервал проверки, сек.<input name="completion_check_interval_seconds_${index}" type="number" min="0" max="604800" value="${escapeHtml(completionPolicy.check_interval_seconds || 0)}"></label>
-          <label>Ожидаемый тип события<input name="completion_expected_event_type_${index}" value="${escapeHtml(completionPolicy.expected_event_type || '')}" autocomplete="off"></label>
-          <label>Действие по timeout<select name="completion_timeout_action_${index}">${optionList(completionTimeoutActions, completionPolicy.timeout_action)}</select></label>
-        </div>`,
-      )}
-      ${renderLaunchGroup(
-        'Параметры вызова',
-        'Какие слоты, поля кейса, контекст, константы или секреты заполняют параметры выбранного вызова. Технический payload endpoint настраивается в "Вызовы и интеграции -> Привязка операций". Required slots вычисляются из источников вида slot:<slot_id>.',
-        parameterBindingsEditor(tool, launch.parameter_bindings || {}, slotContext),
-      )}
-      ${renderLaunchGroup(
-        'Контроль запуска',
-        'Сценарная политика исполнения: согласование, риск, аудит, логирование и остановка при ошибке.',
-        `<div class="grid two">
-          <label>Режим исполнения сейчас<select name="execution_mode_${index}">${activeOptionList(activeLaunchExecutionModes, launchMode)}</select></label>
-          <label>Риск<select name="risk_level_${index}">${optionList(['low', 'medium', 'high', 'critical', 'blocked'], launch.risk_level)}</select></label>
-          <label>Роль согласования<input name="approval_role_${index}" value="${escapeHtml(launch.approval_role || '')}" autocomplete="off"></label>
-          <label>Остановить при ошибке<select name="stop_on_error_${index}">${booleanOptions(launch.stop_on_error)}</select></label>
-        </div>`,
-      )}
-      <button class="danger" type="button" data-action="launch-remove">Удалить запуск</button>
-    </fieldset>
-  `;
-}
-
-function normalizeCompletionPolicy(policy = {}) {
-  const mode = completionModes.includes(policy.mode) ? policy.mode : 'sync';
-  if (mode === 'sync') {
-    return {
-      mode: 'sync',
-      max_wait_seconds: 0,
-      check_interval_seconds: 0,
-      expected_event_type: '',
-      timeout_action: policy.timeout_action || 'resume_agent',
-    };
-  }
-  return {
-    mode,
-    max_wait_seconds: Number(policy.max_wait_seconds || 86400),
-    check_interval_seconds: Number(policy.check_interval_seconds || 0),
-    expected_event_type: policy.expected_event_type || '',
-    timeout_action: completionTimeoutActions.includes(policy.timeout_action) ? policy.timeout_action : 'escalate_operator',
-  };
-}
-
-function escalationCreateTemplate(source, policies) {
-  const template = source || policies[0] || {};
-  return {
-    policy_id: nextConfigItemId(template.policy_id || 'escalation.custom', policies, 'policy_id'),
-    display_name: '',
-    auto_close: template.auto_close || {
-      requires_tool_success: true,
-    },
-    handoff_conditions: template.handoff_conditions || [
-      'two_tool_errors',
-      'iteration_limit',
-      'confidence_below_050',
-      'affected_users_threshold',
-      'policy_blocked',
-    ],
-    major_incident: template.major_incident || {
-      affected_users_threshold: 10,
-    },
-    handoff_package: template.handoff_package || [
-      'slots',
-      'react_history',
-      'tool_results',
-      'agent_hypothesis',
-      'sla_remaining',
-      'user_notification',
-    ],
-    user_notification_template: template.user_notification_template || '',
-  };
-}
-
-function renderEscalationEditor({ policy, policies, scenarios }) {
-  if (state.escalationOperation === 'delete') {
-    if (!policy?.policy_id) {
-      return '<div class="empty">Нет выбранной политики эскалации для удаления</div>';
-    }
-    return `
-      <form class="scenario-editor panel" data-form="escalation-delete">
-        <div>
-          <div class="metric-label">Удаляемая политика решения и эскалации оператору</div>
-          <div class="scenario-title">${escapeHtml(policy.display_name)}</div>
-        </div>
-        ${usagePanel(scenarios, 'escalation_policy_id', policy.policy_id)}
-        <button class="danger" type="submit">Удалить политику решения и эскалации</button>
-      </form>
-    `;
-  }
-  const current = state.escalationOperation === 'create'
-    ? escalationCreateTemplate(policy, policies)
-    : policy;
-  if (!current?.policy_id) {
-    return '<div class="empty">Политика решения и эскалации не выбрана</div>';
-  }
-  return `
-    <form class="scenario-editor panel" data-form="escalation-editor">
-      <input type="hidden" name="policy_id" value="${escapeHtml(current.policy_id)}">
-      <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
-      <div class="grid two">
-        <label>Автозакрытие требует успех ReAct-вызова<select name="requires_tool_success">${booleanOptions(current.auto_close?.requires_tool_success)}</select></label>
-        <label>Major Incident threshold<input name="affected_users_threshold" type="number" min="1" max="100000" value="${escapeHtml(current.major_incident?.affected_users_threshold || 10)}"></label>
-      </div>
-      <fieldset class="launch-editor">
-        <legend>Условия эскалации оператору</legend>
-        <div class="meta">Когда AI останавливает самостоятельную обработку и кейс передается оператору через выбранный канал взаимодействия.</div>
-        ${renderChoiceChecklist('handoff_conditions', handoffConditionChoices, current.handoff_conditions || [])}
-      </fieldset>
-      <fieldset class="launch-editor">
-        <legend>Пакет эскалации оператору</legend>
-        <div class="meta">Какие данные попадут в пакет контекста для оператора или функциональной группы. Обязательные пункты нельзя отключить.</div>
-        ${renderChoiceChecklist('handoff_package', handoffPackageChoices, current.handoff_package || [])}
-      </fieldset>
-      <label>Шаблон уведомления клиента<textarea name="user_notification_template" rows="4">${escapeHtml(current.user_notification_template || '')}</textarea></label>
-      ${usagePanel(scenarios, 'escalation_policy_id', current.policy_id)}
-      <div class="scenario-editor-actions">
-        <button class="primary" type="submit">${state.escalationOperation === 'create' ? 'Создать политику решения и эскалации' : 'Сохранить решение и эскалацию'}</button>
-      </div>
-    </form>
-  `;
 }
 
 function renderPromptPackEditor({ promptPack, packs, scenarios }) {
@@ -4767,19 +4564,18 @@ async function loadExecutionCatalogContext({ includeAudit = false } = {}) {
     api('/admin/config/active/tools'),
     api('/admin/config/active/integration_endpoints'),
     api('/admin/config/active/n8n_workflows'),
-    api('/admin/config/active/tool_launch_matrix'),
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/interaction_channels'),
   ];
   if (includeAudit) {
     requests.push(api('/admin/security/audit?limit=30'));
   }
-  const [toolsActive, endpointsActive, n8nActive, matrixActive, resolutionActive, channelsActive, audit] = await Promise.all(requests);
+  const [toolsActive, endpointsActive, n8nActive, resolutionActive, channelsActive, audit] = await Promise.all(requests);
   const context = {
     tools: toolsActive.payload?.tools || [],
     endpoints: endpointsActive.payload?.endpoints || [],
     workflows: n8nActive.payload?.workflows || [],
-    matrices: matrixActive.payload?.matrices || [],
+    matrices: [],
     resolutionProfiles: resolutionActive.payload?.profiles || [],
     channels: channelsActive.payload?.channels || [],
     audit: audit || { events: [] },
@@ -5099,6 +4895,77 @@ function endpointContractSource(endpoint = {}) {
   };
 }
 
+function defaultEndpointTransportSecurity(endpoint = {}) {
+  return {
+    http: {
+      policy: 'admin_configured',
+      base_url_env: endpoint.base_url_env || 'N8N_WEBHOOK_BASE_URL',
+      callback_base_url_env: 'ORCHESTRATOR_PUBLIC_URL',
+      production_recommended_scheme: 'https',
+      token_header: 'X-ServiceDesk-Callback-Token',
+      token_env: 'INTEGRATION_CALLBACK_TOKEN__N8N',
+    },
+    kafka: {
+      policy: 'admin_configured',
+      bootstrap_servers_env: 'KAFKA_BOOTSTRAP_SERVERS',
+      security_protocol_env: 'KAFKA_SECURITY_PROTOCOL',
+      supported_security_protocols: ['SASL_SSL', 'SSL'],
+      supported_auth: ['sasl', 'mtls'],
+    },
+  };
+}
+
+function endpointTransportSecurity(endpoint = {}) {
+  const current = endpoint.extensions?.transport_security || {};
+  const defaults = defaultEndpointTransportSecurity(endpoint);
+  return {
+    http: {
+      ...defaults.http,
+      ...(current.http || {}),
+    },
+    kafka: {
+      ...defaults.kafka,
+      ...(current.kafka || {}),
+    },
+  };
+}
+
+function csvList(value, fallback = []) {
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (typeof value === 'string') {
+    const items = value.split(',').map((item) => item.trim()).filter(Boolean);
+    return items.length ? items : fallback;
+  }
+  return fallback;
+}
+
+function renderEndpointTransportSecurityEditor(endpoint = {}) {
+  if (endpoint.adapter_type !== 'n8n_webhook') {
+    return '';
+  }
+  const security = endpointTransportSecurity(endpoint);
+  return `
+    <fieldset class="launch-editor">
+      <legend>Безопасность транспорта n8n</legend>
+      <div class="meta">Этот блок описывает защиту HTTP и Kafka транспортов. Способ доставки результата конкретного запуска выбирается отдельно в async completion policy через result_transport.</div>
+      <div class="grid three">
+        <label>HTTP policy<input name="transport_http_policy" value="${escapeHtml(security.http.policy || 'admin_configured')}" readonly></label>
+        <label>Production scheme<input name="transport_http_production_scheme" value="${escapeHtml(security.http.production_recommended_scheme || 'https')}" readonly></label>
+        <label>Env базового URL<input name="transport_http_base_url_env" value="${escapeHtml(security.http.base_url_env || '')}" autocomplete="off" placeholder="N8N_WEBHOOK_BASE_URL"></label>
+        <label>Env callback URL<input name="transport_http_callback_base_url_env" value="${escapeHtml(security.http.callback_base_url_env || '')}" autocomplete="off" placeholder="ORCHESTRATOR_PUBLIC_URL"></label>
+        <label>Callback header<input name="transport_http_token_header" value="${escapeHtml(security.http.token_header || '')}" autocomplete="off" placeholder="X-ServiceDesk-Callback-Token"></label>
+        <label>Env callback token<input name="transport_http_token_env" value="${escapeHtml(security.http.token_env || '')}" autocomplete="off" placeholder="INTEGRATION_CALLBACK_TOKEN__N8N"></label>
+        <label>Kafka policy<input name="transport_kafka_policy" value="${escapeHtml(security.kafka.policy || 'admin_configured')}" readonly></label>
+        <label>Env Kafka bootstrap<input name="transport_kafka_bootstrap_servers_env" value="${escapeHtml(security.kafka.bootstrap_servers_env || '')}" autocomplete="off" placeholder="KAFKA_BOOTSTRAP_SERVERS"></label>
+        <label>Env Kafka security protocol<input name="transport_kafka_security_protocol_env" value="${escapeHtml(security.kafka.security_protocol_env || '')}" autocomplete="off" placeholder="KAFKA_SECURITY_PROTOCOL"></label>
+        <label>Kafka protocols<input name="transport_kafka_supported_security_protocols" value="${escapeHtml(csvList(security.kafka.supported_security_protocols, ['SASL_SSL', 'SSL']).join(', '))}" autocomplete="off"></label>
+        <label>Kafka auth<input name="transport_kafka_supported_auth" value="${escapeHtml(csvList(security.kafka.supported_auth, ['sasl', 'mtls']).join(', '))}" autocomplete="off"></label>
+      </div>
+      <div class="meta">Kafka не является HTTPS. Для production используйте broker ACL с SASL_SSL или SSL/mTLS; секреты задаются через env/Vault и здесь не показываются.</div>
+    </fieldset>
+  `;
+}
+
 function renderEndpointContractSourceEditor(endpoint = {}) {
   if (endpoint.adapter_type !== 'n8n_webhook') {
     return '';
@@ -5139,6 +5006,46 @@ function openApiPreviewWarnings(result = {}) {
   ];
 }
 
+function renderTransportSecurityPreview(transportSecurity = {}) {
+  if (!transportSecurity?.http && !transportSecurity?.kafka) {
+    return '<div class="empty">OpenAPI не содержит x-transport-security; текущая security metadata endpoint будет сохранена.</div>';
+  }
+  const rows = [];
+  if (transportSecurity.http) {
+    rows.push([
+      'HTTP',
+      escapeHtml(transportSecurity.http.policy || 'admin_configured'),
+      escapeHtml(`production: ${transportSecurity.http.production_recommended_scheme || 'https'}`),
+      escapeHtml([
+        transportSecurity.http.base_url_env ? `base URL env ${transportSecurity.http.base_url_env}` : '',
+        transportSecurity.http.callback_base_url_env ? `callback env ${transportSecurity.http.callback_base_url_env}` : '',
+        transportSecurity.http.token_header ? `header ${transportSecurity.http.token_header}` : '',
+      ].filter(Boolean).join('; ') || 'н/д'),
+    ]);
+  }
+  if (transportSecurity.kafka) {
+    rows.push([
+      'Kafka',
+      escapeHtml(transportSecurity.kafka.policy || 'admin_configured'),
+      escapeHtml(csvList(transportSecurity.kafka.supported_security_protocols, ['SASL_SSL', 'SSL']).join(', ')),
+      escapeHtml([
+        transportSecurity.kafka.bootstrap_servers_env ? `bootstrap env ${transportSecurity.kafka.bootstrap_servers_env}` : '',
+        transportSecurity.kafka.security_protocol_env ? `protocol env ${transportSecurity.kafka.security_protocol_env}` : '',
+        csvList(transportSecurity.kafka.supported_auth, ['sasl', 'mtls']).length
+          ? `auth ${csvList(transportSecurity.kafka.supported_auth, ['sasl', 'mtls']).join(', ')}`
+          : '',
+      ].filter(Boolean).join('; ') || 'н/д'),
+    ]);
+  }
+  return `
+    <div class="slot-schema-derived">
+      <div class="metric-label">x-transport-security</div>
+      <div class="meta">Это metadata защиты транспорта. Доставка результата конкретного запуска продолжает выбираться через result_transport в async policy.</div>
+      ${table(['Транспорт', 'Policy', 'Production/security', 'Env/header'], rows)}
+    </div>
+  `;
+}
+
 function renderOpenApiImportPreview(endpointId) {
   const preview = openApiPreviewForEndpoint(endpointId);
   if (!preview) {
@@ -5168,6 +5075,7 @@ function renderOpenApiImportPreview(endpointId) {
       <div class="meta">Источник: ${escapeHtml(result.source_url || 'н/д')}. Изменения будут применены только после нажатия кнопки.</div>
       ${warnings.length ? `<ul class="usage-list">${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>` : '<div class="meta">Критичных предупреждений нет.</div>'}
     </div>
+    ${renderTransportSecurityPreview(result.transport_security)}
     ${table(['Операция', 'Название', 'Вызов', 'Статус'], operationRows)}
     ${table(['ReAct-вызов ИИ', 'Тип', 'Привязка', 'Статус'], toolRows)}
     <div class="scenario-editor-actions">
@@ -5317,6 +5225,7 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
         <label>Env-переменная токена<input name="auth_token_env" value="${escapeHtml(current.auth?.token_env || '')}" autocomplete="off" placeholder="N8N_WEBHOOK_TOKEN"></label>
       </div>
       ${renderEndpointContractSourceEditor(current)}
+      ${renderEndpointTransportSecurityEditor(current)}
       <details class="launch-editor endpoint-operations-toggle" data-endpoint-operations-section>
         <summary class="endpoint-operations-summary">
           <div class="slot-card-summary-main">
@@ -5529,7 +5438,7 @@ function renderAsyncEventContractsEditor(asyncContracts = {}) {
   return `
     <fieldset class="launch-editor">
       <legend>Контракты асинхронных событий</legend>
-      <div class="meta">Ключ верхнего уровня должен совпадать с expected_event_type из матрицы ReAct-вызова. result_schema проверяет success.result, progress_schema проверяет progress.result, error_schema проверяет error.error.</div>
+      <div class="meta">Ключ верхнего уровня должен совпадать с expected_event_type из профиля разрешения. result_schema проверяет success.result, progress_schema проверяет progress.result, error_schema проверяет error.error.</div>
       <label>async_event_contracts JSON
         <textarea name="operation_async_event_contracts" rows="9">${escapeHtml(jsonPretty(asyncContracts || {}))}</textarea>
       </label>
@@ -5580,7 +5489,7 @@ function renderEndpointOperationCard({ endpointId, adapterType = 'mock', operati
         <div class="grid two">
           <label>Техническое имя операции
             <input name="operation_id" value="${escapeHtml(operationId || '')}" autocomplete="off">
-            <span class="field-help">Ключ операции внутри подключения. Используется в bindings, матрицах запуска и логах.</span>
+            <span class="field-help">Ключ операции внутри подключения. Используется в bindings, профилях разрешения и логах.</span>
           </label>
           <label>Название<input name="operation_display_name" value="${escapeHtml(operation.display_name || '')}" autocomplete="off"></label>
           <label>Описание<textarea name="operation_description" rows="3">${escapeHtml(operation.description || '')}</textarea></label>
@@ -5661,7 +5570,7 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
       <div class="grid two">
         <label>Техническое имя ReAct-вызова
           <input name="tool_name" value="${escapeHtml(current.tool_name)}" autocomplete="off" ${state.toolCatalogOperation === 'modify' ? 'readonly' : ''}>
-          <span class="field-help">Стабильное имя вызова, который может выбрать ИИ в ReAct-loop. Используется в матрице запуска, профилях разрешения и аудите.</span>
+          <span class="field-help">Стабильное имя вызова, который может выбрать ИИ в ReAct-loop. Используется в профилях разрешения и аудите.</span>
         </label>
         <label>Тип действия<select name="action_type">${optionList(['read_only', 'action'], current.action_type)}</select></label>
         <label>Версия контракта<input name="contract_version" value="${escapeHtml(current.contract_version || '1.0')}" autocomplete="off"></label>
@@ -5754,7 +5663,7 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
       </div>
       <fieldset class="launch-editor">
         <legend>Входные параметры endpoint</legend>
-        <div class="meta">Здесь выбирается, какие параметры endpoint-операции видит ReAct-вызов. Слоты сценария сюда не подставляются: они заполняют параметры ReAct в матрице запуска или профиле разрешения слота.</div>
+        <div class="meta">Здесь выбирается, какие параметры endpoint-операции видит ReAct-вызов. Слоты сценария сюда не подставляются: они заполняют параметры ReAct в профиле разрешения слота.</div>
         ${renderOperationParameterVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       <fieldset class="launch-editor">
@@ -6094,7 +6003,7 @@ function renderOperationParameterVisibilityRow(parameterName, sourceRef, tool, o
         </label>
         <label data-operation-param-react-wrap ${source === 'react' ? '' : 'hidden'}>Имя параметра ReAct
           <input data-operation-param-react name="operation_mapping_react_${rowIndex}" value="${source === 'react' ? escapeHtml(value || parameterName) : escapeHtml(parameterName)}" autocomplete="off">
-          <span class="field-help">Это имя увидит оркестратор. Слоты сценария настраиваются в матрице запуска или профиле разрешения слота.</span>
+          <span class="field-help">Это имя увидит оркестратор. Слоты сценария настраиваются в профиле разрешения слота.</span>
         </label>
         <label data-operation-param-react-wrap ${source === 'react' ? '' : 'hidden'}>Обязателен для ReAct
           <select data-operation-param-react-required name="operation_mapping_react_required_${rowIndex}">${booleanOptions(reactRequired)}</select>
@@ -6244,13 +6153,6 @@ function operationBindingCompatibilityPanel(compatibility) {
 
 function toolUsage(toolName, matrices, resolutionProfiles, channels) {
   const refs = [];
-  for (const matrix of matrices || []) {
-    for (const launch of matrix.launches || []) {
-      if (launch.tool_name === toolName) {
-        refs.push(`Матрица "${matrix.display_name || matrix.matrix_id}", запуск "${launch.launch_id}"`);
-      }
-    }
-  }
   for (const profile of resolutionProfiles || []) {
     if ((profile.enrichment_steps || []).some((step) => step.react_call === toolName)) {
       refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
@@ -6281,19 +6183,12 @@ function toolBindingUsage(toolName, endpointId, operationId, matrices, resolutio
   if (!toolName || !endpointId || !operationId) {
     return refs;
   }
-  for (const matrix of matrices || []) {
-    for (const launch of matrix.launches || []) {
-      if (
-        launch.tool_name === toolName
-        && launch.endpoint_id === endpointId
-        && launch.operation_id === operationId
-      ) {
-        refs.push(`Матрица "${matrix.display_name || matrix.matrix_id}", запуск "${launch.launch_id}"`);
-      }
-    }
-  }
   for (const profile of resolutionProfiles || []) {
-    if ((profile.enrichment_steps || []).some((step) => step.react_call === toolName)) {
+    if ((profile.enrichment_steps || []).some((step) =>
+      step.react_call === toolName
+      && (!step.endpoint_id || step.endpoint_id === endpointId)
+      && (!step.operation_id || step.operation_id === operationId)
+    )) {
       refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
     }
   }
@@ -6848,6 +6743,55 @@ function endpointContractSourceFromFormData(data, adapterType) {
   };
 }
 
+function currentIntegrationEndpointById(endpointId) {
+  return (state.lastData.integrationEndpoints || [])
+    .find((endpoint) => endpoint.endpoint_id === endpointId);
+}
+
+function endpointTransportSecurityFromFormData(data, adapterType, currentEndpoint = {}) {
+  if (adapterType !== 'n8n_webhook') {
+    return null;
+  }
+  const defaults = endpointTransportSecurity(currentEndpoint);
+  const http = {
+    policy: 'admin_configured',
+    base_url_env: String(data.get('transport_http_base_url_env') || defaults.http.base_url_env || '').trim(),
+    callback_base_url_env: String(data.get('transport_http_callback_base_url_env') || defaults.http.callback_base_url_env || '').trim(),
+    production_recommended_scheme: 'https',
+    token_header: String(data.get('transport_http_token_header') || defaults.http.token_header || '').trim(),
+    token_env: String(data.get('transport_http_token_env') || defaults.http.token_env || '').trim(),
+  };
+  const kafka = {
+    policy: 'admin_configured',
+    bootstrap_servers_env: String(data.get('transport_kafka_bootstrap_servers_env') || defaults.kafka.bootstrap_servers_env || '').trim(),
+    security_protocol_env: String(data.get('transport_kafka_security_protocol_env') || defaults.kafka.security_protocol_env || '').trim(),
+    supported_security_protocols: csvList(
+      String(data.get('transport_kafka_supported_security_protocols') || ''),
+      csvList(defaults.kafka.supported_security_protocols, ['SASL_SSL', 'SSL']),
+    ),
+    supported_auth: csvList(
+      String(data.get('transport_kafka_supported_auth') || ''),
+      csvList(defaults.kafka.supported_auth, ['sasl', 'mtls']),
+    ),
+  };
+  return { http, kafka };
+}
+
+function endpointExtensionsFromFormData(data, adapterType) {
+  const endpointId = String(data.get('endpoint_id') || '').trim();
+  const currentEndpoint = currentIntegrationEndpointById(endpointId) || {};
+  const extensions = cloneJson(currentEndpoint.extensions || {});
+  const transportSecurity = endpointTransportSecurityFromFormData(data, adapterType, currentEndpoint);
+  delete extensions.selected_transport;
+  delete extensions.result_transport;
+  if (transportSecurity) {
+    extensions.transport_security = transportSecurity;
+  } else {
+    delete extensions.transport_security;
+  }
+  return Object.keys(extensions).length ? extensions : null;
+}
+
 function endpointBaseFromForm(form) {
   const data = new FormData(form);
   const adapterType = String(data.get('adapter_type') || '').trim();
@@ -6867,6 +6811,8 @@ function endpointBaseFromForm(form) {
   endpoint.auth = endpointAuthFromFormData(data);
   const contractSource = endpointContractSourceFromFormData(data, adapterType);
   if (contractSource) endpoint.contract_source = contractSource;
+  const extensions = endpointExtensionsFromFormData(data, adapterType);
+  if (extensions) endpoint.extensions = extensions;
   return endpoint;
 }
 
@@ -6889,6 +6835,8 @@ async function saveIntegrationEndpointForm(form) {
   endpoint.auth = endpointAuthFromFormData(data);
   const contractSource = endpointContractSourceFromFormData(data, adapterType);
   if (contractSource) endpoint.contract_source = contractSource;
+  const extensions = endpointExtensionsFromFormData(data, adapterType);
+  if (extensions) endpoint.extensions = extensions;
   await applyIntegrationEndpointMutation(state.integrationEndpointOperation, endpoint);
 }
 
@@ -7330,7 +7278,6 @@ async function saveScenarioForm(form) {
     slot_schema_id: data.get('slot_schema_id'),
     classification_route_id: data.get('classification_route_id'),
     orchestrator_policy_id: orchestratorPolicyId,
-    tool_launch_matrix_id: data.get('tool_launch_matrix_id'),
     prompt_pack_id: data.get('prompt_pack_id'),
     escalation_policy_id: data.get('escalation_policy_id'),
     default_channel_id: data.get('default_channel_id'),
@@ -7344,6 +7291,7 @@ async function saveScenarioForm(form) {
     consecutive_tool_errors_to_escalate: parseInt(data.get('react_consecutive_tool_errors_to_escalate'), 10),
   };
   scenario.orchestrator_policy_id = await ensureScenarioReactPolicy(scenario, reactPolicySettings);
+  scenario.escalation_policy_id = await ensureScenarioEscalationPolicy(scenario);
   await applyScenarioMutation(state.scenarioOperation, scenario);
 }
 
@@ -7413,11 +7361,8 @@ function resolutionProfileBootstrapTemplate(slot, profiles) {
       response_contract: defaultResolutionResponseContract(),
     },
     human_resolution_policy: {
-      clarification_question: question,
-      clarification_slots: [slot.slot_id],
-      handoff_package: [slot.slot_id],
-      handoff_action: 'operator_handoff',
-      fallback_action: 'ask_user',
+      action: 'ask_client',
+      message_template: question,
     },
     fallback: {
       action: 'ask_user',
@@ -7453,11 +7398,16 @@ function nextBootstrapProfileId(slotId, profiles) {
 
 async function saveSlotSchemaForm(form) {
   const data = new FormData(form);
-  const slots = parseSlotCards(form);
+  const stages = parseSlotStages(form);
+  const slots = stages.flatMap((stage) => stage.slots);
   await ensureResolutionProfilesForSlots(slots);
   const slotSchema = {
     slot_schema_id: String(data.get('slot_schema_id') || '').trim(),
     display_name: String(data.get('display_name') || '').trim(),
+    stages: stages.map((stage) => ({
+      ...stage,
+      slots: stage.slots.map(({ question_order: _questionOrder, ...slot }) => slot),
+    })),
     required_slots: slots.filter((slot) => slot.required).map((slot) => slot.slot_id),
     auto_fill_slots: slots
       .filter((slot) => !['user_question', 'operator_manual'].includes(slot.fill_method))
@@ -7498,6 +7448,66 @@ async function deleteSlotSchemaForm() {
   });
 }
 
+function parseSlotStages(form) {
+  const cards = Array.from(form.querySelectorAll('[data-slot-stage-card]'));
+  const stages = cards.map((card, index) => {
+    const value = (name) => card.querySelector(`:scope > .slot-card-body [name="${name}"]`)?.value?.trim() || '';
+    const stage = {
+      stage_id: value('stage_id'),
+      display_name: value('stage_display_name'),
+      description: value('stage_description'),
+      order: parseInt(value('stage_order') || String(index + 1), 10),
+      resolution_profile_id: value('stage_resolution_profile_id'),
+      slots: parseSlotCards(card),
+    };
+    if (!stage.description) {
+      delete stage.description;
+    }
+    if (!stage.resolution_profile_id) {
+      delete stage.resolution_profile_id;
+    }
+    return stage;
+  });
+  if (!stages.length) {
+    throw new Error('Схема слотов должна содержать хотя бы один этап.');
+  }
+  const emptyStage = stages.find((stage) => !stage.stage_id || !stage.display_name || !stage.order);
+  if (emptyStage) {
+    throw new Error('Каждый этап должен иметь ключ, название и порядок.');
+  }
+  const invalidStage = stages.find((stage) => !/^[a-z][a-z0-9_.-]*$/.test(stage.stage_id));
+  if (invalidStage) {
+    throw new Error(`Ключ этапа "${invalidStage.stage_id}" должен начинаться с латинской буквы и содержать только латиницу, цифры, _, - или точку.`);
+  }
+  const duplicateStageId = stages
+    .map((stage) => stage.stage_id)
+    .find((stageId, index, all) => all.indexOf(stageId) !== index);
+  if (duplicateStageId) {
+    throw new Error(`Ключ этапа дублируется: ${duplicateStageId}.`);
+  }
+  const duplicateStageOrder = stages
+    .map((stage) => stage.order)
+    .find((order, index, all) => all.indexOf(order) !== index);
+  if (duplicateStageOrder) {
+    throw new Error(`Порядок этапа дублируется: ${duplicateStageOrder}.`);
+  }
+  const emptyWithoutProfile = stages.find((stage) => !stage.slots.length && !stage.resolution_profile_id);
+  if (emptyWithoutProfile) {
+    throw new Error(`Этап ${emptyWithoutProfile.stage_id} должен содержать слоты или профиль разрешения этапа.`);
+  }
+  const duplicateSlotId = slotsFromStages(stages)
+    .map((slot) => slot.slot_id)
+    .find((slotId, index, all) => all.indexOf(slotId) !== index);
+  if (duplicateSlotId) {
+    throw new Error(`Ключ слота дублируется между этапами: ${duplicateSlotId}.`);
+  }
+  return stages.sort((left, right) => left.order - right.order);
+}
+
+function slotsFromStages(stages) {
+  return (stages || []).flatMap((stage) => stage.slots || []);
+}
+
 function parseSlotCards(form) {
   const cards = Array.from(form.querySelectorAll('[data-slot-card]'));
   const slots = cards.map((card, index) => {
@@ -7508,7 +7518,7 @@ function parseSlotCards(form) {
       priority_group: value('priority_group'),
       required: parseBoolean(value('required')),
       fill_method: normalizeSlotFillMethod(value('fill_method')),
-      question_order: parseInt(value('question_order') || String(index + 1), 10),
+      question_order: index + 1,
     };
     if (slot.fill_method === 'user_question') {
       slot.user_question = value('user_question');
@@ -7523,8 +7533,6 @@ function parseSlotCards(form) {
       if (profileId) {
         slot.resolution_profile_id = profileId;
       }
-      const fallbackQuestion = value('fallback_question');
-      if (fallbackQuestion) slot.fallback_question = fallbackQuestion;
     } else if (slot.fill_method === 'operator_manual') {
       slot.operator_hint = value('operator_hint');
     }
@@ -7748,145 +7756,20 @@ async function ensureScenarioReactPolicy(scenario, settings) {
   return policyId;
 }
 
-async function saveToolLaunchForm(form) {
-  const data = new FormData(form);
-  const launchCards = Array.from(form.querySelectorAll('[data-launch-card]'));
-  const launches = [];
-  for (const [index, card] of launchCards.entries()) {
-    const value = (prefix) => card.querySelector(`[name^="${prefix}_"]`)?.value?.trim() || '';
-    const executionMode = value('execution_mode') || 'operator_approval';
-    const parameterBindings = parameterBindingsFromRows(card, {
-      validate: true,
-      launchLabel: `Запуск ${index + 1}`,
-    });
-    const toolName = value('tool_name');
-    const tool = findToolInCatalog(state.lastData.toolCatalog || [], toolName);
-    const binding = currentToolBinding(tool);
-    if (!binding) {
-      throw new Error(`Запуск ${index + 1}: для ReAct-вызова ${toolName || 'н/д'} не настроена привязка операции.`);
-    }
-    const launch = {
-      launch_id: value('launch_id'),
-      tool_name: toolName,
-      required_slots: requiredSlotsFromParameterBindings(parameterBindings),
-      parameter_bindings: parameterBindings,
-      execution_level: executionMode,
-      target_execution_level: executionMode,
-      endpoint_id: binding.endpoint_id,
-      operation_id: binding.operation_id,
-      risk_level: value('risk_level'),
-      stop_on_error: parseBoolean(value('stop_on_error')),
-      completion_policy: completionPolicyFromCard(card),
-    };
-    const approvalRole = value('approval_role');
-    if (approvalRole) {
-      launch.approval_role = approvalRole;
-    }
-    launches.push(launch);
+async function ensureScenarioEscalationPolicy(scenario) {
+  const active = await api('/admin/config/active/escalation_policies');
+  const payload = JSON.parse(JSON.stringify(active.payload));
+  const policies = payload.policies || [];
+  const policyId = String(scenario.escalation_policy_id || '').trim()
+    || defaultEscalationPolicyId(scenario.scenario_id);
+  const existing = policies.find((item) => item.policy_id === policyId);
+  if (existing) {
+    return policyId;
   }
-  const matrix = {
-    matrix_id: String(data.get('matrix_id') || '').trim(),
-    display_name: String(data.get('display_name') || '').trim(),
-    launches,
-  };
-  await applyConfigItemMutation({
-    domain: 'tool_launch_matrix',
-    collectionKey: 'matrices',
-    idKey: 'matrix_id',
-    item: matrix,
-    operation: state.toolMatrixOperation,
-    referenceKey: 'tool_launch_matrix_id',
-    stateIdKey: 'toolMatrixId',
-    stateOperationKey: 'toolMatrixOperation',
-    successNoun: 'Матрица ReAct-вызовов',
-  });
-}
-
-function completionPolicyFromCard(card) {
-  const read = (prefix) => card.querySelector(`[name^="${prefix}_"]`)?.value?.trim() || '';
-  const mode = read('completion_mode') || 'sync';
-  const policy = {
-    mode,
-    max_wait_seconds: mode === 'sync' ? 0 : Number(read('completion_max_wait_seconds') || 86400),
-    timeout_action: read('completion_timeout_action') || (mode === 'sync' ? 'resume_agent' : 'escalate_operator'),
-  };
-  const checkInterval = Number(read('completion_check_interval_seconds') || 0);
-  const expectedEventType = read('completion_expected_event_type');
-  if (checkInterval > 0) {
-    policy.check_interval_seconds = checkInterval;
-  }
-  if (expectedEventType) {
-    policy.expected_event_type = expectedEventType;
-  }
-  if (mode === 'external_event' && !policy.expected_event_type) {
-    throw new Error('Для external event/callback укажите ожидаемый тип события.');
-  }
-  if (mode === 'timer_wait' && checkInterval > policy.max_wait_seconds) {
-    throw new Error('Интервал проверки не должен быть больше максимального ожидания.');
-  }
-  return policy;
-}
-
-async function deleteToolMatrixForm() {
-  if (!state.toolMatrixId) {
-    throw new Error('Матрица ReAct-вызовов для удаления не выбрана.');
-  }
-  await applyConfigItemMutation({
-    domain: 'tool_launch_matrix',
-    collectionKey: 'matrices',
-    idKey: 'matrix_id',
-    item: { matrix_id: state.toolMatrixId },
-    operation: 'delete',
-    referenceKey: 'tool_launch_matrix_id',
-    stateIdKey: 'toolMatrixId',
-    stateOperationKey: 'toolMatrixOperation',
-    successNoun: 'Матрица ReAct-вызовов',
-  });
-}
-
-async function saveEscalationForm(form) {
-  const data = new FormData(form);
-  const policy = {
-    policy_id: String(data.get('policy_id') || '').trim(),
-    display_name: String(data.get('display_name') || '').trim(),
-    auto_close: {
-      requires_tool_success: parseBoolean(data.get('requires_tool_success')),
-    },
-    handoff_conditions: formList(data, 'handoff_conditions'),
-    major_incident: {
-      affected_users_threshold: parseInt(data.get('affected_users_threshold'), 10),
-    },
-    handoff_package: formList(data, 'handoff_package'),
-    user_notification_template: String(data.get('user_notification_template') || '').trim(),
-  };
-  await applyConfigItemMutation({
-    domain: 'escalation_policies',
-    collectionKey: 'policies',
-    idKey: 'policy_id',
-    item: policy,
-    operation: state.escalationOperation,
-    referenceKey: 'escalation_policy_id',
-    stateIdKey: 'escalationPolicyId',
-    stateOperationKey: 'escalationOperation',
-    successNoun: 'Политика эскалации',
-  });
-}
-
-async function deleteEscalationForm() {
-  if (!state.escalationPolicyId) {
-    throw new Error('Политика эскалации для удаления не выбрана.');
-  }
-  await applyConfigItemMutation({
-    domain: 'escalation_policies',
-    collectionKey: 'policies',
-    idKey: 'policy_id',
-    item: { policy_id: state.escalationPolicyId },
-    operation: 'delete',
-    referenceKey: 'escalation_policy_id',
-    stateIdKey: 'escalationPolicyId',
-    stateOperationKey: 'escalationOperation',
-    successNoun: 'Политика эскалации',
-  });
+  policies.push(defaultEscalationPolicyForScenario(scenario, policyId));
+  payload.policies = policies;
+  await activateConfigPayload('escalation_policies', payload, active.active_version_id);
+  return policyId;
 }
 
 async function saveInteractionChannelForm(form) {
@@ -8171,30 +8054,24 @@ function readModelProvider(data, providerId) {
 
 async function saveResolutionProfileForm(form) {
   const data = new FormData(form);
-  const clarificationQuestion = String(data.get('clarification_question') || '').trim();
+  const humanResolutionAction = String(data.get('human_resolution_action') || 'ask_client').trim();
+  if (!['ask_client', 'escalate_operator'].includes(humanResolutionAction)) {
+    throw new Error('Выберите действие: уточнить у клиента или эскалировать оператору.');
+  }
+  const humanResolutionMessage = String(data.get('human_resolution_message_template') || '').trim();
+  if (!humanResolutionMessage) {
+    throw new Error('Укажите сообщение для уточнения у клиента или эскалации оператору.');
+  }
   const selectedTargetSlotId = String(data.get('target_slot_id') || '').trim();
   const customTargetSlotId = String(data.get('target_slot_id_custom') || '').trim();
   const targetSlotId = selectedTargetSlotId === '__custom__'
     ? customTargetSlotId
     : selectedTargetSlotId;
-  if (!targetSlotId) {
-    throw new Error('Выберите целевой слот или укажите ключ нового слота.');
-  }
-  if (!/^[a-z][a-z0-9_.-]*$/.test(targetSlotId)) {
+  if (targetSlotId && !/^[a-z][a-z0-9_.-]*$/.test(targetSlotId)) {
     throw new Error('Ключ целевого слота должен начинаться с латинской буквы и содержать только латиницу, цифры, _, - или точку.');
   }
   const outputRules = parseResolutionOutputRules(form, targetSlotId);
-  const outputSlotIds = outputRules.map((rule) => rule.slot_id);
   const slotContext = currentResolutionSlotContextFromForm(form);
-  const availableSlotIds = new Set([
-    ...outputSlotIds,
-    targetSlotId,
-    ...(slotContext.slots || []).map((slot) => slot.slot_id),
-  ].filter(Boolean));
-  const clarificationSlots = formList(data, 'clarification_slots')
-    .filter((slotId) => availableSlotIds.has(slotId));
-  const handoffSlots = formList(data, 'handoff_package')
-    .filter((slotId) => availableSlotIds.has(slotId));
   const enrichmentSteps = parseEnrichmentSteps(form);
   const existingProfile = currentResolutionProfileById(String(data.get('profile_id') || '').trim());
   const profile = {
@@ -8203,7 +8080,6 @@ async function saveResolutionProfileForm(form) {
 	    status: existingProfile?.status || 'active',
 	    description: String(data.get('description') || '').trim(),
 	    slot_schema_id: slotContext.schema?.slot_schema_id || String(data.get('slot_schema_id') || '').trim(),
-	    target_slot_id: targetSlotId,
     use_llm_after_steps: form.querySelector('[name="use_llm_after_steps"]')?.checked === true,
     enrichment_steps: enrichmentSteps,
     output_slots_order: outputRules,
@@ -8212,14 +8088,14 @@ async function saveResolutionProfileForm(form) {
       response_contract: defaultResolutionResponseContract(),
     },
     human_resolution_policy: {
-      clarification_question: clarificationQuestion,
-      clarification_slots: clarificationSlots.length ? clarificationSlots : [targetSlotId].filter(Boolean),
-      handoff_package: handoffSlots.length ? handoffSlots : outputSlotIds,
-      handoff_action: String(data.get('handoff_action') || 'operator_handoff').trim(),
-      fallback_action: String(data.get('fallback_action') || 'ask_user').trim(),
+      action: humanResolutionAction,
+      message_template: humanResolutionMessage,
     },
     max_attempts: parseInt(data.get('max_attempts'), 10),
   };
+  if (targetSlotId) {
+    profile.target_slot_id = targetSlotId;
+  }
   if (!profile.llm_resolution_script.script_text) {
     profile.llm_resolution_script.script_text = defaultResolutionScriptText(profile);
   }
@@ -8260,7 +8136,6 @@ function compactScenarioPayload(scenario) {
     slot_schema_id: String(scenario.slot_schema_id || '').trim(),
     classification_route_id: String(scenario.classification_route_id || '').trim(),
     orchestrator_policy_id: String(scenario.orchestrator_policy_id || '').trim(),
-    tool_launch_matrix_id: String(scenario.tool_launch_matrix_id || '').trim(),
     prompt_pack_id: String(scenario.prompt_pack_id || '').trim(),
     escalation_policy_id: String(scenario.escalation_policy_id || '').trim(),
     default_channel_id: String(scenario.default_channel_id || '').trim(),
@@ -8300,7 +8175,8 @@ async function applyResolutionProfileMutation(operation, profile) {
       api('/admin/config/active/service_scenarios'),
     ]);
     const usedSchemas = (slotSchemasActive.payload?.slot_schemas || []).filter((schema) =>
-      (schema.slots || []).some((slot) => slot.resolution_profile_id === profile.profile_id),
+      (schema.slots || []).some((slot) => slot.resolution_profile_id === profile.profile_id)
+      || slotSchemaStagesForEditor(schema).some((stage) => stage.resolution_profile_id === profile.profile_id),
     );
     if (usedSchemas.length) {
       const schemaIds = new Set(usedSchemas.map((schema) => schema.slot_schema_id));
@@ -8311,7 +8187,7 @@ async function applyResolutionProfileMutation(operation, profile) {
       const details = scenarioNames.length
         ? `Сценарии: ${scenarioNames.join(', ')}.`
         : `Схемы слотов: ${schemaNames.join(', ')}.`;
-      throw new Error(`Профиль используется. ${details} Сначала уберите профиль из схем слотов.`);
+      throw new Error(`Профиль используется. ${details} Используйте блок "Очистка legacy-связок слотов и профилей".`);
     }
     profiles.splice(index, 1);
   } else {
@@ -8444,9 +8320,8 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
 }
 
 async function applyToolCatalogMutation(operation, tool) {
-  const [active, matrixActive, resolutionActive, channelsActive] = await Promise.all([
+  const [active, resolutionActive, channelsActive] = await Promise.all([
     api('/admin/config/active/tools'),
-    api('/admin/config/active/tool_launch_matrix'),
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/interaction_channels'),
   ]);
@@ -8454,7 +8329,7 @@ async function applyToolCatalogMutation(operation, tool) {
   const tools = payload.tools || [];
   const toolName = tool.tool_name;
   const index = tools.findIndex((item) => item.tool_name === toolName);
-  const matrices = matrixActive.payload?.matrices || [];
+  const matrices = [];
   const resolutionProfiles = resolutionActive.payload?.profiles || [];
   const channels = channelsActive.payload?.channels || [];
   if (operation === 'create') {
@@ -8524,10 +8399,9 @@ async function applyOperationBindingMutation({
   toolName,
   binding,
 }) {
-  const [active, endpointsActive, matrixActive, resolutionActive, channelsActive] = await Promise.all([
+  const [active, endpointsActive, resolutionActive, channelsActive] = await Promise.all([
     api('/admin/config/active/tools'),
     api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/tool_launch_matrix'),
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/interaction_channels'),
   ]);
@@ -8538,7 +8412,7 @@ async function applyOperationBindingMutation({
     throw new Error(`ReAct-вызов ИИ не найден: ${toolName}`);
   }
   const currentBinding = currentToolBinding(tool);
-  const matrices = matrixActive.payload?.matrices || [];
+  const matrices = [];
   const resolutionProfiles = resolutionActive.payload?.profiles || [];
   const channels = channelsActive.payload?.channels || [];
   const endpoints = endpointsActive.payload?.endpoints || [];
@@ -8623,31 +8497,13 @@ async function applyOperationBindingCreateMutation(tool) {
 
 async function updateOperationBindingReferences(toolName, binding) {
   if (!binding) return;
-  const [matrixActive, channelsActive] = await Promise.all([
-    api('/admin/config/active/tool_launch_matrix'),
-    api('/admin/config/active/interaction_channels'),
-  ]);
+  const channelsActive = await api('/admin/config/active/interaction_channels');
   const updateAction = (action) => {
     if (action?.tool_name !== toolName) return false;
     action.endpoint_id = binding.endpoint_id;
     action.operation_id = binding.operation_id;
     return true;
   };
-  const matrixPayload = JSON.parse(JSON.stringify(matrixActive.payload));
-  let matrixChanged = false;
-  for (const matrix of matrixPayload.matrices || []) {
-    for (const launch of matrix.launches || []) {
-      if (launch.tool_name === toolName) {
-        launch.endpoint_id = binding.endpoint_id;
-        launch.operation_id = binding.operation_id;
-        matrixChanged = true;
-      }
-    }
-  }
-  if (matrixChanged) {
-    await activateConfigPayload('tool_launch_matrix', matrixPayload, matrixActive.active_version_id);
-  }
-
   const channelsPayload = JSON.parse(JSON.stringify(channelsActive.payload));
   let channelsChanged = false;
   for (const channel of channelsPayload.channels || []) {
@@ -8886,6 +8742,61 @@ async function activateConfigPayload(domain, payload, baseVersionId) {
   });
 }
 
+function legacyCleanupRequestFromPanel(panel, dryRun) {
+  const slotSchemaId = panel.querySelector('[name="cleanup_slot_schema_id"]')?.value || '';
+  const slotIds = Array.from(panel.querySelectorAll('[name="cleanup_slot_id"]:checked'))
+    .map((input) => input.value)
+    .filter(Boolean);
+  const profileIds = Array.from(panel.querySelectorAll('[name="cleanup_profile_id"]:checked'))
+    .map((input) => input.value)
+    .filter(Boolean);
+  if (!slotSchemaId) {
+    throw new Error('Схема слотов для очистки не определена.');
+  }
+  if (!slotIds.length && !profileIds.length) {
+    throw new Error('Выберите хотя бы один слот или профиль для очистки.');
+  }
+  if (!dryRun && panel.querySelector('[name="cleanup_confirm"]')?.checked !== true) {
+    throw new Error('Подтвердите изменение слотов и профилей разрешения.');
+  }
+  return {
+    operator_id: state.actorId,
+    slot_schema_id: slotSchemaId,
+    slot_ids: slotIds,
+    profile_ids: profileIds,
+    dry_run: dryRun,
+  };
+}
+
+async function runLegacyCleanup(target, dryRun) {
+  const panel = target.closest('[data-legacy-cleanup-panel]');
+  if (!panel) {
+    throw new Error('Панель очистки legacy-связок не найдена.');
+  }
+  const request = legacyCleanupRequestFromPanel(panel, dryRun);
+  const result = await api('/admin/config/legacy-slot-resolution-cleanup', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+  state.legacyCleanupRequest = request;
+  if (dryRun) {
+    state.legacyCleanupPreview = result;
+    setNotice(
+      result.status === 'blocked'
+        ? `Очистка заблокирована: ${(result.blocked_reasons || []).join('; ')}`
+        : 'Предпросмотр очистки построен. Проверьте список изменений перед применением.',
+      result.status === 'blocked' ? 'error' : 'success',
+    );
+    await renderView(state.activeView);
+    return;
+  }
+  state.legacyCleanupPreview = null;
+  state.legacyCleanupRequest = null;
+  const versions = (result.versions || []).map((version) => version.version_id).join(', ');
+  setNotice(`Legacy-связки очищены. Активированы версии: ${versions}.`, 'success');
+  await renderView(state.activeView);
+}
+
 function parseCsv(value) {
   return String(value || '')
     .split(',')
@@ -8988,11 +8899,33 @@ function parseEnrichmentStepCard(card, index) {
       throw new Error(`Шаг обогащения ${index + 1}: не удалось прочитать данные (${error.message})`);
     }
   }
-  const reactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
+  let reactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
+  const bindingValue = card.querySelector('[data-enrichment-binding]')?.value?.trim() || '';
+  let endpointId = '';
+  let operationId = '';
+  if (bindingValue) {
+    const parts = bindingValue.split('::');
+    if (parts.length === 3) {
+      reactCall = parts[0] || reactCall;
+      endpointId = parts[1] || '';
+      operationId = parts[2] || '';
+    }
+  }
   if (!reactCall) {
     throw new Error(`В шаге обогащения ${index + 1} выберите ReAct-вызов.`);
   }
-  return {
+  const completionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || 'sync';
+  const completionPolicy = {
+    mode: completionMode,
+    max_wait_seconds: parseInt(card.querySelector('[data-enrichment-max-wait-seconds]')?.value || (completionMode === 'external_event' ? '3600' : '0'), 10),
+    timeout_action: card.querySelector('[data-enrichment-timeout-action]')?.value || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent'),
+  };
+  if (completionMode === 'external_event') {
+    completionPolicy.expected_event_type = card.querySelector('[data-enrichment-expected-event-type]')?.value?.trim() || `${operationId || reactCall}_completed`;
+    completionPolicy.result_transport = card.querySelector('[data-enrichment-result-transport]')?.value || 'kafka_event';
+    completionPolicy.result_topic = card.querySelector('[data-enrichment-result-topic]')?.value?.trim() || 'external.events';
+  }
+  const step = {
     step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
     react_call: reactCall,
@@ -9004,6 +8937,10 @@ function parseEnrichmentStepCard(card, index) {
       `Шаг обогащения ${index + 1}: метаданные сформированной структуры`,
     ),
   };
+  if (endpointId) step.endpoint_id = endpointId;
+  if (operationId) step.operation_id = operationId;
+  if (endpointId || operationId || completionMode !== 'sync') step.completion_policy = completionPolicy;
+  return step;
 }
 
 function parseEnrichmentSteps(form) {
@@ -9059,8 +8996,11 @@ function parseResolutionOutputRules(form, targetSlotId) {
       fallback: 'ask_clarification',
     });
   }
-  if (!rules.length) {
+  if (!rules.length && targetSlotId) {
     throw new Error('Профиль должен содержать хотя бы один выходной слот.');
+  }
+  if (rules.length && !rules.some((rule) => rule.required_for_success)) {
+    rules[0].required_for_success = true;
   }
   return rules
     .sort((left, right) => left.order - right.order)
@@ -9089,8 +9029,29 @@ function parseHistoryFilter(card) {
   return filter;
 }
 
-function addSlotCard() {
-  const container = document.getElementById('slotCards');
+function addSlotStageCard() {
+  const container = document.querySelector('[data-slot-stage-list]');
+  if (!container) return;
+  const order = container.querySelectorAll('[data-slot-stage-card]').length + 1;
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderSlotStageCard(
+    {
+      stage_id: `stage.${order}`,
+      display_name: `Этап ${order}`,
+      order,
+      slots: [],
+    },
+    order,
+    state.lastData.resolutionProfiles || [],
+    state.lastData.confidenceDefaults || {},
+  ).trim();
+  container.appendChild(wrapper.firstElementChild);
+  renumberSlotCards();
+}
+
+function addSlotCard(target) {
+  const container = target?.closest('[data-slot-stage-card]')?.querySelector('[data-stage-slot-cards]')
+    || document.querySelector('[data-stage-slot-cards]');
   if (!container) return;
   const order = container.querySelectorAll('[data-slot-card]').length + 1;
   const wrapper = document.createElement('div');
@@ -9103,6 +9064,14 @@ function addSlotCard() {
   ).trim();
   container.appendChild(wrapper.firstElementChild);
   syncSlotCardFillMethod(container.lastElementChild);
+  renumberSlotCards();
+}
+
+function removeSlotStageCard(target) {
+  const card = target.closest('[data-slot-stage-card]');
+  if (!card) return;
+  card.remove();
+  renumberSlotCards();
 }
 
 function referenceAutocompletePopup() {
@@ -9372,7 +9341,6 @@ function currentResolutionToolsFromForm(form, steps = []) {
   return toolsForScenario(
     state.lastData.toolCatalog || [],
     state.lastData.serviceScenarios || [],
-    state.lastData.toolMatrices || [],
     slotContext.selectedScenario,
     (steps || []).map((step) => step.react_call),
   );
@@ -9441,6 +9409,7 @@ function rerenderEnrichmentSteps(form, steps) {
     slotContext,
     currentResolutionOutputRulesFromDom(form),
     currentResolutionToolsFromForm(form, steps),
+    state.lastData.integrationEndpoints || [],
   );
 }
 
@@ -9456,13 +9425,32 @@ function readEnrichmentStepsForCompile(form, activeIndex) {
       } catch {
         metadata = {};
       }
-      steps.push({
+      const parsed = {
         step_id: item.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
         step_name: item.querySelector('[data-enrichment-step-name]')?.value?.trim() || '',
         react_call: item.querySelector('[data-enrichment-react-call]')?.value?.trim() || '',
         configuration_instruction: item.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
         generated_structure_metadata: metadata,
-      });
+      };
+      const bindingValue = item.querySelector('[data-enrichment-binding]')?.value?.trim() || '';
+      const parts = bindingValue.split('::');
+      if (parts.length === 3) {
+        parsed.react_call = parts[0] || parsed.react_call;
+        parsed.endpoint_id = parts[1] || '';
+        parsed.operation_id = parts[2] || '';
+      }
+      const completionMode = item.querySelector('[data-enrichment-completion-mode]')?.value || 'sync';
+      parsed.completion_policy = {
+        mode: completionMode,
+        max_wait_seconds: parseInt(item.querySelector('[data-enrichment-max-wait-seconds]')?.value || (completionMode === 'external_event' ? '3600' : '0'), 10),
+        timeout_action: item.querySelector('[data-enrichment-timeout-action]')?.value || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent'),
+      };
+      if (completionMode === 'external_event') {
+        parsed.completion_policy.expected_event_type = item.querySelector('[data-enrichment-expected-event-type]')?.value?.trim() || `${parsed.operation_id || parsed.react_call || 'operation'}_completed`;
+        parsed.completion_policy.result_transport = item.querySelector('[data-enrichment-result-transport]')?.value || 'kafka_event';
+        parsed.completion_policy.result_topic = item.querySelector('[data-enrichment-result-topic]')?.value?.trim() || 'external.events';
+      }
+      steps.push(parsed);
       return;
     }
     try {
@@ -9632,14 +9620,6 @@ function syncSlotCardFillMethod(card) {
       input.disabled = !visible;
     });
   });
-  const orderSection = card.querySelector('[data-fill-method-order]');
-  if (orderSection) {
-    const visible = ['user_question', 'resolution_profile', 'operator_manual'].includes(fillMethod);
-    orderSection.hidden = !visible;
-    orderSection.querySelectorAll('input, select, textarea').forEach((input) => {
-      input.disabled = !visible;
-    });
-  }
   card.querySelectorAll('[data-fill-method-advanced]').forEach((section) => {
     const visible = section.dataset.fillMethodAdvanced === fillMethod;
     section.hidden = !visible;
@@ -9653,118 +9633,60 @@ function syncSlotCardFillMethod(card) {
 }
 
 function renumberSlotCards() {
-  document.querySelectorAll('#slotCards [data-slot-card]').forEach((card, index) => {
-    const orderInput = card.querySelector('[name="question_order"]');
-    if (orderInput && !orderInput.value) {
-      orderInput.value = String(index + 1);
+  document.querySelectorAll('[data-slot-stage-card]').forEach((stageCard, stageIndex) => {
+    const stageOrderLabel = stageCard.querySelector('[data-slot-stage-order]');
+    if (stageOrderLabel) {
+      stageOrderLabel.textContent = String(stageIndex + 1);
     }
+    stageCard.querySelectorAll('[data-stage-slot-cards] [data-slot-card]').forEach((card, index) => {
+      const orderLabel = card.querySelector('[data-slot-order]');
+      if (orderLabel) {
+        orderLabel.textContent = String(index + 1);
+      }
+    });
   });
 }
 
-function addLaunchCard() {
-  const container = document.getElementById('launchCards');
-  if (!container) return;
-  const index = container.querySelectorAll('[data-launch-card]').length;
-  const tools = state.lastData.toolCatalog || [];
-  const tool = findToolInCatalog(tools, 'check_zabbix_status') || tools[0] || {};
-  const binding = currentToolBinding(tool) || {};
-  const wrapper = document.createElement('div');
-  wrapper.innerHTML = renderLaunchCard(
-    {
-      launch_id: `launch.custom_${index + 1}`,
-      tool_name: tool.tool_name || 'check_zabbix_status',
-      required_slots: [],
-      parameter_bindings: defaultParameterBindingsForTool(tool),
-      execution_level: 'auto',
-      target_execution_level: 'auto',
-      endpoint_id: binding.endpoint_id || '',
-      operation_id: binding.operation_id || '',
-      risk_level: 'low',
-      stop_on_error: true,
-    },
-    index,
-    tools,
-    state.lastData.integrationEndpoints || [],
-    state.lastData.toolMatrixSlotContext || { slots: [], scenarioNames: [], scenarioCount: 0, usedByMatrix: false },
-  ).trim();
-  container.appendChild(wrapper.firstElementChild);
+function slotCardAfterPointer(container, y) {
+  const cards = Array.from(container.querySelectorAll('[data-slot-card]:not(.dragging)'));
+  return cards.reduce((closest, card) => {
+    const box = card.getBoundingClientRect();
+    const offset = y - box.top - (box.height / 2);
+    if (offset < 0 && offset > closest.offset) {
+      return { offset, card };
+    }
+    return closest;
+  }, { offset: Number.NEGATIVE_INFINITY, card: null }).card;
 }
 
-function removeLaunchCard(target) {
-  const card = target.closest('[data-launch-card]');
+function startSlotCardDrag(handle, event) {
+  const card = handle.closest('[data-slot-card]');
   if (!card) return;
-  card.remove();
+  state.draggedSlotCard = card;
+  card.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', 'slot-card');
 }
 
-function parameterBindingsFromRows(card, { validate = false, launchLabel = 'запуска' } = {}) {
-  const result = {};
-  const slotContext = state.lastData.toolMatrixSlotContext || { slots: [], scenarioCount: 0 };
-  const slotById = Object.fromEntries((slotContext.slots || []).map((slot) => [slot.slot_id, slot]));
-  const rows = Array.from(card.querySelectorAll('[data-param-binding-row]'));
-  for (const row of rows) {
-    const parameterName = row.querySelector('[data-binding-param-name]')?.value?.trim() || '';
-    const required = row.dataset.required === 'true';
-    const source = row.querySelector('[data-binding-source]')?.value?.trim() || '';
-    const value = source === 'slot'
-      ? row.querySelector('[data-binding-slot-select]')?.value?.trim() || ''
-      : row.querySelector('[data-binding-value-input]')?.value?.trim() || '';
-    if (!parameterName) {
-      continue;
-    }
-    if (!source || !value) {
-      if (validate && required) {
-        throw new Error(`${launchLabel}: обязательный параметр ${parameterName} должен иметь источник значения.`);
-      }
-      continue;
-    }
-    if (validate && !['slot', 'case', 'context', 'constant', 'secret'].includes(source)) {
-      throw new Error(`${launchLabel}: параметр ${parameterName} имеет неизвестный тип источника ${source}.`);
-    }
-    if (validate && source === 'slot') {
-      const slot = slotById[value];
-      if (!slot) {
-        throw new Error(`${launchLabel}: параметр ${parameterName} ссылается на отсутствующий слот ${value}.`);
-      }
-      if (slot.missing_scenario_names?.length) {
-        throw new Error(`${launchLabel}: слот ${value} отсутствует в сценариях: ${slot.missing_scenario_names.join(', ')}.`);
-      }
-    }
-    result[parameterName] = `${source}:${value}`;
+function moveSlotCardDuringDrag(container, event) {
+  const dragged = state.draggedSlotCard;
+  if (!dragged || !container?.contains(dragged)) return;
+  event.preventDefault();
+  const afterCard = slotCardAfterPointer(container, event.clientY);
+  if (afterCard) {
+    container.insertBefore(dragged, afterCard);
+  } else {
+    container.appendChild(dragged);
   }
-  if (validate && !Object.keys(result).length) {
-    throw new Error(`${launchLabel}: должен быть задан хотя бы один маппинг параметра.`);
-  }
-  return result;
+  renumberSlotCards();
 }
 
-function requiredSlotsFromParameterBindings(parameterBindings) {
-  return Array.from(new Set(
-    Object.values(parameterBindings || {})
-      .map(parseBindingString)
-      .filter((binding) => binding.source === 'slot' && binding.value)
-      .map((binding) => binding.value),
-  ));
-}
-
-function syncParameterBindingRow(row) {
-  const source = row.querySelector('[data-binding-source]')?.value || '';
-  const slotWrap = row.querySelector('[data-binding-slot-wrap]');
-  const valueWrap = row.querySelector('[data-binding-value-wrap]');
-  if (slotWrap) {
-    slotWrap.hidden = source !== 'slot';
+function finishSlotCardDrag() {
+  if (state.draggedSlotCard) {
+    state.draggedSlotCard.classList.remove('dragging');
   }
-  if (valueWrap) {
-    valueWrap.hidden = !source || source === 'slot';
-  }
-  const warning = row.querySelector('[data-binding-slot-warning]');
-  const slotId = row.querySelector('[data-binding-slot-select]')?.value || '';
-  const text = source === 'slot'
-    ? slotWarning(state.lastData.toolMatrixSlotContext || { slots: [] }, slotId)
-    : '';
-  if (warning) {
-    warning.textContent = text;
-    warning.hidden = !text;
-  }
+  state.draggedSlotCard = null;
+  renumberSlotCards();
 }
 
 function syncOperationParameterMappingRow(row) {
@@ -9782,45 +9704,6 @@ function syncOperationResultMappingRow(row) {
   row.querySelectorAll('[data-operation-result-react-wrap]').forEach((element) => {
     element.hidden = !include;
   });
-}
-
-function syncLaunchSelectors(card) {
-  if (!card) return;
-  const tools = state.lastData.toolCatalog || [];
-  const integrationEndpoints = state.lastData.integrationEndpoints || [];
-  const slotContext = state.lastData.toolMatrixSlotContext || { slots: [], scenarioNames: [], scenarioCount: 0, usedByMatrix: false };
-  const toolSelect = card.querySelector('[data-launch-tool]');
-  const endpointInput = card.querySelector('[data-launch-endpoint]');
-  const operationInput = card.querySelector('[data-launch-operation]');
-  const tool = findToolInCatalog(tools, toolSelect?.value);
-  if (!tool) return;
-
-  const currentParameterBindings = parameterBindingsFromRows(card, { validate: false });
-  const binding = currentToolBinding(tool);
-  if (endpointInput) {
-    endpointInput.value = binding?.endpoint_id || '';
-  }
-  if (operationInput) {
-    operationInput.value = binding?.operation_id || '';
-  }
-  const bindingStatus = card.querySelector('[data-launch-binding-status]');
-  if (bindingStatus) {
-    bindingStatus.textContent = binding
-      ? operationBindingSummary(binding, integrationEndpoints)
-      : 'У выбранного ReAct-вызова ИИ нет привязки операции. Настройте ее в меню "Вызовы и интеграции -> Привязка операций".';
-    bindingStatus.className = binding ? 'meta' : 'field-help';
-  }
-
-  const legend = card.querySelector('legend');
-  if (legend) {
-    legend.textContent = tool.tool_name;
-  }
-  const parameters = card.querySelector('[data-launch-parameters]');
-  if (parameters) {
-    const nextParameters = document.createElement('div');
-    nextParameters.innerHTML = parameterBindingsEditor(tool, currentParameterBindings, slotContext).trim();
-    parameters.replaceWith(nextParameters.firstElementChild);
-  }
 }
 
 function addEndpointOperationCard() {
@@ -10068,6 +9951,12 @@ async function applyEndpointOpenApiImport(target) {
     throw new Error('Сначала загрузите preview OpenAPI-контракта.');
   }
   endpoint.operations = parseEndpointOperationCards(form, endpoint.adapter_type);
+  if (preview.result?.transport_security) {
+    endpoint.extensions = {
+      ...(endpoint.extensions || {}),
+      transport_security: cloneJson(preview.result.transport_security),
+    };
+  }
   const warnings = openApiPreviewWarnings(preview.result || {});
   if (warnings.length) {
     const message = [
@@ -10224,7 +10113,8 @@ function initEvents() {
     }
     const action = target.dataset.action;
     if (
-      action === 'slot-remove'
+	      action === 'slot-remove'
+	      || action === 'slot-stage-remove'
       || action === 'launch-remove'
       || action === 'route-rule-remove'
       || action === 'model-provider-remove'
@@ -10307,12 +10197,6 @@ function initEvents() {
       } else if (action === 'policy-operation') {
         state.policyOperation = target.dataset.operation;
         await renderScenarioReact();
-      } else if (action === 'tool-matrix-operation') {
-        state.toolMatrixOperation = target.dataset.operation;
-        await renderScenarioTools();
-      } else if (action === 'escalation-operation') {
-        state.escalationOperation = target.dataset.operation;
-        await renderScenarioEscalation();
       } else if (action === 'prompt-pack-operation') {
         state.promptPackOperation = target.dataset.operation;
         await renderScenarioPrompts();
@@ -10322,6 +10206,10 @@ function initEvents() {
       } else if (action === 'resolution-operation') {
         state.resolutionOperation = target.dataset.operation;
         await renderResolutionProfiles();
+      } else if (action === 'legacy-cleanup-preview') {
+        await runLegacyCleanup(target, true);
+      } else if (action === 'legacy-cleanup-apply') {
+        await runLegacyCleanup(target, false);
       } else if (action === 'endpoint-connection-operation') {
         state.integrationEndpointOperation = target.dataset.operation;
         await renderIntegrations();
@@ -10339,10 +10227,14 @@ function initEvents() {
         removeModelProviderCard(target);
       } else if (action === 'reference-autocomplete-select') {
         insertReferenceAutocompleteItem(Number(target.dataset.referenceAutocompleteIndex || 0));
-      } else if (action === 'slot-add') {
-        addSlotCard();
+      } else if (action === 'slot-stage-add') {
+        addSlotStageCard();
+      } else if (action === 'stage-slot-add' || action === 'slot-add') {
+        addSlotCard(target);
       } else if (action === 'slot-remove') {
         removeSlotCard(target);
+      } else if (action === 'slot-stage-remove') {
+        removeSlotStageCard(target);
       } else if (action === 'resolution-result-field-add') {
         addResolutionResultFieldRow(target);
       } else if (action === 'resolution-result-field-remove') {
@@ -10363,10 +10255,6 @@ function initEvents() {
         addRouteRuleCard();
       } else if (action === 'route-rule-remove') {
         removeRouteRuleCard(target);
-      } else if (action === 'launch-add') {
-        addLaunchCard();
-      } else if (action === 'launch-remove') {
-        removeLaunchCard(target);
       } else if (action === 'channel-profile-add') {
         addChannelProfileCard();
       } else if (action === 'channel-profile-remove') {
@@ -10404,9 +10292,43 @@ function initEvents() {
   });
 
   document.addEventListener('click', (event) => {
+    if (event.target.closest('[data-slot-drag-handle]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (isReferenceAutocompleteTextarea(event.target)) {
       renderReferenceAutocomplete(event.target);
     }
+  });
+
+  document.addEventListener('mousedown', (event) => {
+    if (event.target.closest('[data-slot-drag-handle]')) {
+      event.stopPropagation();
+    }
+  });
+
+  document.addEventListener('dragstart', (event) => {
+    const handle = event.target.closest?.('[data-slot-drag-handle]');
+    if (!handle) return;
+    startSlotCardDrag(handle, event);
+  });
+
+  document.addEventListener('dragover', (event) => {
+    const container = event.target.closest?.('[data-stage-slot-cards]');
+    if (!container) return;
+    moveSlotCardDuringDrag(container, event);
+  });
+
+  document.addEventListener('drop', (event) => {
+    const container = event.target.closest?.('[data-stage-slot-cards]');
+    if (!container) return;
+    event.preventDefault();
+    finishSlotCardDrag();
+  });
+
+  document.addEventListener('dragend', () => {
+    finishSlotCardDrag();
   });
 
   document.addEventListener('keydown', (event) => {
@@ -10438,10 +10360,6 @@ function initEvents() {
     }
     if (target?.matches?.('[data-operation-mock-control]')) {
       updateEndpointOperationJsonPreview(target.closest('[data-endpoint-operation-card]'));
-      return;
-    }
-    if (target?.matches?.('[data-binding-source], [data-binding-slot-select]')) {
-      syncParameterBindingRow(target.closest('[data-param-binding-row]'));
       return;
     }
     if (target?.matches?.('[data-operation-param-source]')) {
@@ -10504,10 +10422,6 @@ function initEvents() {
       syncEnrichmentSourceCustom(target.closest('[data-enrichment-param-row]'));
       return;
     }
-    if (!target?.matches?.('[data-launch-tool]')) {
-      return;
-    }
-    syncLaunchSelectors(target.closest('[data-launch-card]'));
   });
 
   document.addEventListener('input', (event) => {
@@ -10548,14 +10462,6 @@ function initEvents() {
         await saveConfidenceDefaultsForm(form);
       } else if (form.dataset.form === 'policy-delete') {
         await deletePolicyForm();
-      } else if (form.dataset.form === 'tool-launch-editor') {
-        await saveToolLaunchForm(form);
-      } else if (form.dataset.form === 'tool-matrix-delete') {
-        await deleteToolMatrixForm();
-      } else if (form.dataset.form === 'escalation-editor') {
-        await saveEscalationForm(form);
-      } else if (form.dataset.form === 'escalation-delete') {
-        await deleteEscalationForm();
       } else if (form.dataset.form === 'prompt-pack-editor') {
         await savePromptPackForm(form);
       } else if (form.dataset.form === 'prompt-pack-delete') {

@@ -9,7 +9,7 @@ The administrator manages:
 - processing scenarios;
 - slots and slot resolution;
 - classification and routing;
-- ReAct calls and launch matrix;
+- ReAct calls and resolution profiles;
 - ReAct limits, decision rules and escalation through scenario settings and backend policy;
 - prompt packs;
 - knowledge base;
@@ -53,6 +53,21 @@ The `Processing Scenarios` area configures orchestrator behavior around five ste
 - `6. Prompts` - prompt pack with mandatory system prompt blocks.
 
 The system prompt for slot resolution is edited under `Settings -> System Prompts`. ReAct planning and escalation policies remain backend configuration and are applied through scenario references.
+
+## Runtime Variables in Templates
+
+Prompts, messages, slot-resolution rules and ReAct-step instructions may use `${...}` references. The UI opens a helper menu after typing `${`.
+
+Main reference namespaces:
+
+- `${case.<field>}` - case data: `scenario_id`, `input_text`, `ticket_id`, `priority`, `channel_id`;
+- `${slot.<slot_id>}` - current scenario slot value;
+- `${step.<step_id>.react.<react_call>.input.<parameter>}` - input parameter of an executed ReAct step;
+- `${step.<step_id>.react.<react_call>.output.<field>}` - result field of an executed ReAct step;
+- `${stage.<number>.<field>}` - aggregated orchestrator-stage result, for example `${stage.2.classification}` or `${stage.5.agent_outcome}`;
+- `${wait.<field>}` - active wait or async-result data: `wait_id`, `correlation_id`, `status`, `result_transport`, `result_topic`.
+
+Inside an enrichment step, references may point only to already executed previous steps. Legacy `entity:*` and `${entity.*}` references are forbidden; use `step.*` instead. The debug console dry-run trace shows `Available Runtime Variables`, where the actual values from the current run can be inspected.
 
 Scenario changes go through draft, validation, regression and activation. Active configuration changes only after successful activation.
 
@@ -180,7 +195,9 @@ Long-running actions use `wait_state` plus an external result. The platform crea
 
 For asynchronous ReAct calls, the worker passes n8n a callback package with `idempotency_key_base`. This is the command key, not the result key. Each `progress`, `success`, `error`, `timeout` or `cancelled` result must be returned as a separate `ExternalEvent` with a stable `idempotency_key`, for example `<idempotency_key_base>:<event_id>`. HTTP callback is accepted only for `http_callback` or `both` waits; Kafka events are accepted only for `kafka_event` or `both` waits and only from the expected `result_topic`.
 
-The result contract is defined on the endpoint operation through `async_event_contracts`. The contract key must match `expected_event_type` from the ReAct launch matrix. When a wait is opened, the platform stores a contract snapshot in `wait_state`, so already running waits are not affected by later endpoint-operation edits. For old waits without a snapshot, the runtime may fall back to the active configuration by `origin.endpoint_id`, `origin.operation_id` and `event_type`. The platform validates `success.result`, `progress.result` and `error.error` with that JSON Schema before updating `wait_state`. `wait_state` and the idempotency receipt store a safe compact external event version: secrets are masked and large payloads are replaced with a summary.
+`result_transport` selects result delivery for one run. Endpoint/OpenAPI/workflow-level `transport_security` only describes protection for those transports and must not contain `selected_transport` or change the delivery mode.
+
+The result contract is defined on the endpoint operation through `async_event_contracts`. The contract key must match `expected_event_type` from the resolution profile step. When a wait is opened, the platform stores a contract snapshot in `wait_state`, so already running waits are not affected by later endpoint-operation edits. For old waits without a snapshot, the runtime may fall back to the active configuration by `origin.endpoint_id`, `origin.operation_id` and `event_type`. The platform validates `success.result`, `progress.result` and `error.error` with that JSON Schema before updating `wait_state`. `wait_state` and the idempotency receipt store a safe compact external event version: secrets are masked and large payloads are replaced with a summary.
 
 ## Audit and Security
 

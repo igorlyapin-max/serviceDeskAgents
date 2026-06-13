@@ -172,6 +172,31 @@ PYTHON=.venv/bin/python make async-external-event-worker
 
 For the local stand, the default outbound n8n runbook command topic is `tool.commands`; the default inbound external event topic is `external.events`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
 
+Kafka transport security is selected by the administrator through env. Local/dev default:
+
+```text
+KAFKA_SECURITY_PROTOCOL=PLAINTEXT
+```
+
+Production baseline:
+
+```text
+# SASL over TLS
+KAFKA_SECURITY_PROTOCOL=SASL_SSL
+KAFKA_SASL_MECHANISM=PLAIN|SCRAM-SHA-256|SCRAM-SHA-512
+KAFKA_SASL_USERNAME=<service-account>
+KAFKA_SASL_PASSWORD=<secret>
+KAFKA_SSL_CA_FILE=/etc/kafka/ca.pem
+
+# or mTLS
+KAFKA_SECURITY_PROTOCOL=SSL
+KAFKA_SSL_CA_FILE=/etc/kafka/ca.pem
+KAFKA_SSL_CERT_FILE=/etc/kafka/client.pem
+KAFKA_SSL_KEY_FILE=/etc/kafka/client.key
+```
+
+Kafka is not an HTTPS transport. Production also requires broker ACLs that restrict the producer/consumer identity to the approved topics.
+
 `worker` and `external-event-worker` run as long-running consumer processes and do not stop after a message count unless `--limit` is provided. For manual diagnostics, add `--limit N`, for example to process only the first 3 messages. In production, run these processes under a supervisor, systemd or a container restart policy.
 
 ## Logging and Diagnostics
@@ -267,6 +292,8 @@ POST http://127.0.0.1:18088/external-events/{source}
 Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 ```
 
+Local/dev callback URL may use `http://127.0.0.1`. In shared/staging/production set `ORCHESTRATOR_PUBLIC_URL=https://...`; outbound n8n webhook base is configured with `N8N_WEBHOOK_BASE_URL=https://...`.
+
 In local/dev, the shared `INTEGRATION_CALLBACK_TOKEN` is allowed. In shared/staging/production, use source-specific variables, for example `INTEGRATION_CALLBACK_TOKEN__N8N` for `POST /external-events/n8n`.
 
 For a long-running n8n runbook, the worker passes `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic`, and operation business parameters to the webhook. n8n must not close or escalate the case directly: the result is returned through the allowed result transport.
@@ -278,6 +305,8 @@ The envelope validates the common event shape. The `result` or `error` payload i
 External systems do not close or escalate cases directly. They only return a result, error or progress update. `idempotency_key_base` is the command key; each `ExternalEvent` must have its own stable `idempotency_key`, for example `<idempotency_key_base>:<event_id>`. The platform deduplicates events by `idempotency_key`; a repeated key with a different `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type`, `status`, or payload hash is rejected as `external_event_idempotency_conflict`. Event payload is masked and compacted before it is written to timeline, outbox and receipt storage.
 
 `result_transport` is a runtime rule, not a hint. HTTP callback is accepted only for `http_callback` or `both` waits; Kafka events are accepted only for `kafka_event` or `both` waits and only from the expected `result_topic`. In shared/staging/production, Kafka producer identity must be restricted with ACL/SASL/mTLS or an equivalent infrastructure control.
+
+Do not mix up `result_transport` and `transport_security`. `result_transport` lives in the async command package (`invocation.extensions.async_callback.result_transport`) and selects the delivery mode for one run: `http_callback`, `kafka_event` or `both`. `transport_security` is published in OpenAPI/endpoint/workflow catalogs as machine-readable metadata for protecting the available transports: HTTP uses administrator-selected HTTPS URLs and token auth, while Kafka is not HTTPS and is protected by broker ACLs with `SASL_SSL`, `SSL`/mTLS, signed envelopes or an equivalent infrastructure control.
 
 ## Production Hardening Backlog
 

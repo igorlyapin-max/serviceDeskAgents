@@ -21,10 +21,7 @@
         "required": [
           "slot_schema_id",
           "display_name",
-          "required_slots",
-          "auto_fill_slots",
-          "question_order",
-          "slots"
+          "stages"
         ],
         "properties": {
           "slot_schema_id": {
@@ -34,6 +31,13 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 240
+          },
+          "stages": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/stage"
+            }
           },
           "required_slots": {
             "$ref": "#/$defs/id_list"
@@ -46,89 +50,8 @@
           },
           "slots": {
             "type": "array",
-            "minItems": 1,
             "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "slot_id",
-                "display_name",
-                "priority_group",
-                "required",
-                "fill_method"
-              ],
-              "properties": {
-                "slot_id": {
-                  "$ref": "#/$defs/id"
-                },
-                "display_name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 240
-                },
-                "priority_group": {
-                  "type": "string",
-                  "enum": [
-                    "who",
-                    "what",
-                    "when",
-                    "where",
-                    "context"
-                  ]
-                },
-                "required": {
-                  "type": "boolean"
-                },
-                "fill_method": {
-                  "type": "string",
-                  "enum": [
-                    "user_question",
-                    "case",
-                    "llm_extraction",
-                    "resolution_profile",
-                    "operator_manual"
-                  ]
-                },
-                "resolution_profile_id": {
-                  "$ref": "#/$defs/id"
-                },
-                "user_question": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 600
-                },
-                "case_source_ref": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                },
-                "extraction_instruction": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 1000
-                },
-                "fallback_question": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 600
-                },
-                "operator_hint": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 600
-                },
-                "confidence_overrides": {
-                  "$ref": "#/$defs/confidence_overrides"
-                },
-                "examples": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 240
-                  }
-                }
-              }
+              "$ref": "#/$defs/slot"
             }
           }
         }
@@ -141,6 +64,127 @@
       "minLength": 1,
       "maxLength": 160,
       "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "display_name",
+        "order",
+        "slots"
+      ],
+      "properties": {
+        "stage_id": {
+          "$ref": "#/$defs/id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1200
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resolution_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/slot"
+          }
+        }
+      }
+    },
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot_id",
+        "display_name",
+        "priority_group",
+        "required",
+        "fill_method"
+      ],
+      "properties": {
+        "slot_id": {
+          "$ref": "#/$defs/id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "priority_group": {
+          "type": "string",
+          "enum": [
+            "who",
+            "what",
+            "when",
+            "where",
+            "context"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "fill_method": {
+          "type": "string",
+          "enum": [
+            "user_question",
+            "case",
+            "llm_extraction",
+            "resolution_profile",
+            "operator_manual"
+          ]
+        },
+        "resolution_profile_id": {
+          "$ref": "#/$defs/id"
+        },
+        "user_question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "case_source_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "extraction_instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "fallback_question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "operator_hint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600
+        },
+        "confidence_overrides": {
+          "$ref": "#/$defs/confidence_overrides"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        }
+      }
     },
     "confidence_overrides": {
       "type": "object",

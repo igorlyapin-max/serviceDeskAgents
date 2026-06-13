@@ -69,6 +69,8 @@ Required callback fields for long-running runbooks:
 
 Return progress or completion using `contracts/integrations/external-event.schema.json`. Each returned event must use a stable per-event `idempotency_key`, for example `<idempotency_key_base>:<event_id>`. Kafka results are accepted only when the wait allows `kafka_event` or `both` and the consumed topic matches `result_topic`.
 
+`result_transport` is delivery selection for this run. `transport_security` belongs to endpoint/OpenAPI/workflow metadata and only describes protection for HTTP callback or Kafka/event-queue transport.
+
 ## Source Files
 
 - `.env.example`

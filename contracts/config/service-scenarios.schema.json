@@ -26,7 +26,6 @@
           "slot_schema_id",
           "classification_route_id",
           "orchestrator_policy_id",
-          "tool_launch_matrix_id",
           "prompt_pack_id",
           "escalation_policy_id",
           "default_channel_id"
@@ -61,9 +60,6 @@
             "$ref": "#/$defs/id"
           },
           "orchestrator_policy_id": {
-            "$ref": "#/$defs/id"
-          },
-          "tool_launch_matrix_id": {
             "$ref": "#/$defs/id"
           },
           "prompt_pack_id": {

@@ -14,7 +14,7 @@ from .action_gates import (
     utc_now,
 )
 from .cases import CaseStore, new_case_id
-from .config_registry import ConfigStore, default_model_routing, default_prompt_catalog
+from .config_registry import DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC, ConfigStore, default_model_routing, default_prompt_catalog
 from .contracts import CONTRACTS_ROOT, ContractRegistry, load_json
 from .feedback import FeedbackStore
 from .integrations import IntegrationDispatcher, ToolRegistry
@@ -237,6 +237,7 @@ class TicketWorkflow:
                 invocation,
                 expected_event_type=completion_policy["expected_event_type"],
                 result_transport=completion_policy.get("result_transport", "http_callback"),
+                result_topic=completion_policy.get("result_topic"),
                 contract_snapshot=self._external_event_contract_snapshot(invocation, completion_policy),
                 deadline_seconds=completion_policy.get("max_wait_seconds"),
                 reason=f"Ожидание результата ReAct-вызова {invocation['tool_name']}.",
@@ -879,6 +880,18 @@ class TicketWorkflow:
                     "expected_effect": f"Для {service} будет запущена настроенная операция восстановления.",
                     "requires_state_change": True,
                     "risk_notes": "Политика MVP требует согласования оператора перед выполнением.",
+                    "extensions": {
+                        "endpoint_id": "n8n",
+                        "operation_id": "start_systemcenter_runbook",
+                        "completion_policy": {
+                            "mode": "external_event",
+                            "max_wait_seconds": 3600,
+                            "timeout_action": "escalate_operator",
+                            "expected_event_type": "start_systemcenter_runbook_completed",
+                            "result_transport": "kafka_event",
+                            "result_topic": DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
+                        },
+                    },
                 }
             ],
         }
@@ -943,20 +956,6 @@ class TicketWorkflow:
                 "completion_policy": copy.deepcopy(completion_policy or {"mode": "sync"}),
             }
             return {key: value for key, value in launch.items() if value not in (None, "", {}, [])}
-        launch_id = extensions.get("launch_id")
-        if not self.config_store:
-            return None
-        active_matrix = self.config_store.active_payload("tool_launch_matrix")
-        for matrix in active_matrix.get("matrices", []):
-            for launch in matrix.get("launches", []):
-                if launch_id and launch.get("launch_id") != launch_id:
-                    continue
-                if launch.get("tool_name") != action["tool_name"]:
-                    continue
-                if launch.get("completion_policy", {}).get("mode") == "external_event":
-                    return copy.deepcopy(launch)
-                if launch_id:
-                    return copy.deepcopy(launch)
         return None
 
     def _should_enqueue_async_tool(self, invocation: dict[str, Any], completion_policy: dict[str, Any]) -> bool:

@@ -166,6 +166,31 @@ PYTHON=.venv/bin/python make async-external-event-worker
 
 Для локального стенда default topic исходящих команд n8n runbook: `tool.commands`; default topic входящих external events: `external.events`. Доступ к Kafka с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
 
+Kafka transport security настраивается администратором через env. Local/dev default:
+
+```text
+KAFKA_SECURITY_PROTOCOL=PLAINTEXT
+```
+
+Production baseline:
+
+```text
+# SASL over TLS
+KAFKA_SECURITY_PROTOCOL=SASL_SSL
+KAFKA_SASL_MECHANISM=PLAIN|SCRAM-SHA-256|SCRAM-SHA-512
+KAFKA_SASL_USERNAME=<service-account>
+KAFKA_SASL_PASSWORD=<secret>
+KAFKA_SSL_CA_FILE=/etc/kafka/ca.pem
+
+# или mTLS
+KAFKA_SECURITY_PROTOCOL=SSL
+KAFKA_SSL_CA_FILE=/etc/kafka/ca.pem
+KAFKA_SSL_CERT_FILE=/etc/kafka/client.pem
+KAFKA_SSL_KEY_FILE=/etc/kafka/client.key
+```
+
+Kafka не является HTTPS-транспортом. Для production дополнительно нужны broker ACL, ограничивающие producer/consumer только согласованными topics.
+
 `worker` и `external-event-worker` работают как long-running consumer-процессы и не завершаются по счетчику сообщений, если `--limit` не указан. Для ручной диагностики можно добавить `--limit N`, например обработать только первые 3 сообщения. В production запускайте эти процессы под supervisor, systemd или container restart policy.
 
 `/metrics` по умолчанию доступен только с loopback IP (`127.0.0.1`, `::1`). Для внешнего Prometheus укажите допустимые адреса или CIDR в `METRICS_ALLOWED_IPS`.
@@ -267,6 +292,8 @@ POST http://127.0.0.1:18088/external-events/{source}
 Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 ```
 
+Local/dev callback URL может использовать `http://127.0.0.1`. В shared/staging/production задайте `ORCHESTRATOR_PUBLIC_URL=https://...`; n8n webhook base для исходящих вызовов задается через `N8N_WEBHOOK_BASE_URL=https://...`.
+
 В local/dev допустим общий `INTEGRATION_CALLBACK_TOKEN`. В shared/staging/production используйте source-specific переменные, например `INTEGRATION_CALLBACK_TOKEN__N8N` для `POST /external-events/n8n`.
 
 Для долгого n8n runbook worker передает в webhook `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic` и бизнес-параметры операции. n8n не закрывает и не эскалирует заявку напрямую: результат возвращается через разрешенный транспорт результата.
@@ -278,6 +305,8 @@ Envelope проверяет общую форму события. Содержи
 Внешняя система не закрывает и не эскалирует заявку напрямую. Она возвращает только результат, ошибку или progress. `idempotency_key_base` является ключом команды; каждый `ExternalEvent` должен иметь собственный стабильный `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Платформа дедуплицирует событие по `idempotency_key`; повтор с тем же ключом, но другим `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type`, `status` или payload hash, отклоняется как `external_event_idempotency_conflict`. Payload события перед записью в timeline, outbox и receipt маскируется и компактируется.
 
 `result_transport` является runtime-правилом, а не подсказкой. HTTP callback принимается только для ожиданий `http_callback` или `both`; Kafka event принимается только для `kafka_event` или `both` и только из ожидаемого `result_topic`. Для shared/staging/production Kafka producer identity должен ограничиваться ACL/SASL/mTLS или равноценным механизмом инфраструктуры.
+
+Не смешивайте `result_transport` и `transport_security`. `result_transport` находится в async command package (`invocation.extensions.async_callback.result_transport`) и выбирает delivery mode конкретного запуска: `http_callback`, `kafka_event` или `both`. `transport_security` публикуется в OpenAPI/каталоге endpoint/workflow как machine-readable metadata защиты выбранных транспортов: HTTP использует administrator-selected HTTPS URL и token auth, Kafka не является HTTPS и защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем.
 
 ## Production hardening backlog
 

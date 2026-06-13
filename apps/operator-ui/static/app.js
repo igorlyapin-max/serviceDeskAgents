@@ -122,6 +122,7 @@ const visibleLabels = {
   model_unavailable: 'модель недоступна',
   operator_approval: 'согласование оператора',
   approval_required: 'нужно подтверждение',
+  ask_client: 'уточнить у клиента',
   operator_manual: 'ручное заполнение оператором',
   optional: 'необязательный',
   p1: 'P1',
@@ -585,6 +586,65 @@ function renderDryRunTraceItem(item, index) {
   `;
 }
 
+function renderVariableContextSnapshot(simulation) {
+  const snapshot = simulation?.variable_context_snapshot || null;
+  if (!snapshot) return '';
+  const slotRows = Object.entries(snapshot.slot || {}).map(([slotId, slotState]) => {
+    const value = slotState && typeof slotState === 'object' && 'value' in slotState ? slotState.value : slotState;
+    const status = slotState && typeof slotState === 'object' ? slotState.status : '';
+    return [
+      `<code>\${slot.${escapeHtml(slotId)}}</code>`,
+      traceJson(value),
+      badge(status || 'н/д'),
+    ];
+  });
+  const stageRows = [
+    ['${stage.0.slot_values}', 'Слоты после приема и нормализации'],
+    ['${stage.1.resolution_state}', 'Результаты разрешения слотов'],
+    ['${stage.2.classification}', 'Классификация и маршрут'],
+    ['${stage.4.ready_tool_launches}', 'Подготовленные ReAct-вызовы'],
+    ['${stage.4.planned_waits}', 'Запланированные ожидания'],
+    ['${stage.5.final_decision}', 'Финальное решение'],
+    ['${stage.5.agent_outcome}', 'Итог агента'],
+  ].map(([token, description]) => [
+    `<code>${escapeHtml(token)}</code>`,
+    escapeHtml(description),
+    '',
+  ]);
+  const waitRows = Object.keys(snapshot.wait || {}).length
+    ? [
+        ['${wait.wait_id}', snapshot.wait.wait_id],
+        ['${wait.status}', snapshot.wait.status],
+        ['${wait.correlation_id}', snapshot.wait.correlation_id],
+        ['${wait.result_transport}', snapshot.wait.result_transport],
+      ].map(([token, value]) => [
+        `<code>${escapeHtml(token)}</code>`,
+        traceJson(value),
+        '',
+      ])
+    : [];
+  return `
+    <details class="trace-run-block variable-context-block">
+      <summary>
+        <span class="trace-run-title">Доступные переменные выполнения</span>
+        <span class="summary-line">${slotRows.length} слотов</span>
+      </summary>
+      <div class="trace-run-body">
+        ${table(
+          ['Ссылка', 'Текущее значение', 'Статус'],
+          [
+            [`<code>\${case.scenario_id}</code>`, traceJson(snapshot.case?.scenario_id), ''],
+            [`<code>\${case.input_text}</code>`, traceJson(snapshot.case?.input_text), ''],
+            ...slotRows,
+            ...waitRows,
+            ...stageRows,
+          ],
+        )}
+      </div>
+    </details>
+  `;
+}
+
 function renderDryRunTracePanel(simulation) {
   const trace = simulation?.execution_trace || [];
   if (!trace.length) {
@@ -605,6 +665,7 @@ function renderDryRunTracePanel(simulation) {
         <span class="summary-line">${trace.length} событий</span>
       </summary>
       <div class="trace-run-body">
+        ${renderVariableContextSnapshot(simulation)}
         ${trace.map((item, index) => renderDryRunTraceItem(item, index)).join('')}
       </div>
     </details>
@@ -1150,8 +1211,8 @@ function renderFiveStepView(detail, simulation, options = {}) {
     escapeHtml(resolutionProgressText(item)),
     escapeHtml(formatOutputValues(item.output_values)),
     escapeHtml(formatResolutionOutputSlots(item.output_slots_order)),
-    escapeHtml(item.pending_question || item.fallback?.question || item.fallback?.action || 'н/д'),
-    escapeHtml(formatList(item.human_resolution_policy?.handoff_package)),
+    escapeHtml(visibleLabels[item.human_resolution_policy?.action] || item.human_resolution_policy?.action || 'н/д'),
+    escapeHtml(item.pending_question || item.resolution_decision?.handoff_message || item.human_resolution_policy?.message_template || 'н/д'),
   ]);
   const classification = simulation?.classification || {};
   const topRouteRows = (classification.top_routes || []).map((item) => [
@@ -1255,7 +1316,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
       </div>
       ${table(['Слот', 'Приоритет', 'Тип', 'Способ заполнения', 'Статус', 'Результат слота', 'Confidence', 'Причина'], slotRows)}
-      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение dry-run', 'Результаты слотов', 'Выходные слоты', 'Вопрос клиенту', 'Пакет эскалации'], resolutionRows) : ''}`,
+      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение dry-run', 'Результаты слотов', 'Выходные слоты', 'Действие', 'Сообщение'], resolutionRows) : ''}`,
     ),
     stepBlock(
       2,

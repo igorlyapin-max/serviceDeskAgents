@@ -34,9 +34,50 @@ class KafkaRuntimeError(RuntimeError):
     pass
 
 
+KAFKA_SECURITY_PROTOCOLS = {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}
+KAFKA_SASL_MECHANISMS = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"}
+
+
 class MessageProducer(Protocol):
     def publish(self, topic: str, key: str, value: dict[str, Any]) -> None:
         ...
+
+
+def kafka_client_security_config() -> dict[str, Any]:
+    protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip().upper() or "PLAINTEXT"
+    if protocol not in KAFKA_SECURITY_PROTOCOLS:
+        raise KafkaRuntimeError(
+            "KAFKA_SECURITY_PROTOCOL должен быть PLAINTEXT, SSL, SASL_PLAINTEXT или SASL_SSL."
+        )
+
+    config: dict[str, Any] = {"security_protocol": protocol}
+    if protocol.startswith("SASL_"):
+        mechanism = os.getenv("KAFKA_SASL_MECHANISM", "PLAIN").strip().upper() or "PLAIN"
+        if mechanism not in KAFKA_SASL_MECHANISMS:
+            raise KafkaRuntimeError(
+                "KAFKA_SASL_MECHANISM должен быть PLAIN, SCRAM-SHA-256 или SCRAM-SHA-512."
+            )
+        username = os.getenv("KAFKA_SASL_USERNAME", "")
+        password = os.getenv("KAFKA_SASL_PASSWORD", "")
+        if not username or not password:
+            raise KafkaRuntimeError("KAFKA_SASL_USERNAME и KAFKA_SASL_PASSWORD обязательны для SASL Kafka.")
+        config.update(
+            sasl_mechanism=mechanism,
+            sasl_plain_username=username,
+            sasl_plain_password=password,
+        )
+
+    if protocol in {"SSL", "SASL_SSL"}:
+        ssl_options = {
+            "ssl_cafile": os.getenv("KAFKA_SSL_CA_FILE", ""),
+            "ssl_certfile": os.getenv("KAFKA_SSL_CERT_FILE", ""),
+            "ssl_keyfile": os.getenv("KAFKA_SSL_KEY_FILE", ""),
+        }
+        config.update({key: value for key, value in ssl_options.items() if value})
+        check_hostname = os.getenv("KAFKA_SSL_CHECK_HOSTNAME", "true").strip().lower()
+        config["ssl_check_hostname"] = check_hostname not in {"0", "false", "no", "off"}
+
+    return config
 
 
 class JsonKafkaProducer:
@@ -51,6 +92,7 @@ class JsonKafkaProducer:
             api_version=kafka_api_version(),
             key_serializer=lambda value: value.encode("utf-8"),
             value_serializer=lambda value: json.dumps(value, ensure_ascii=False).encode("utf-8"),
+            **kafka_client_security_config(),
         )
 
     def publish(self, topic: str, key: str, value: dict[str, Any]) -> None:
@@ -91,6 +133,7 @@ class JsonKafkaConsumer:
             auto_offset_reset=os.getenv(self.offset_reset_env, "earliest"),
             enable_auto_commit=False,
             key_deserializer=lambda value: value.decode("utf-8") if value else None,
+            **kafka_client_security_config(),
         )
 
     def __iter__(self) -> Iterable["KafkaCommandRecord"]:

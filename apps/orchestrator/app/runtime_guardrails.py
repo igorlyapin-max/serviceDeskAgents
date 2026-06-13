@@ -254,6 +254,26 @@ def debug_logging_level() -> str:
     return normalized
 
 
+def log_debug_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    verbose_fields: dict[str, Any] | None = None,
+    **fields: Any,
+) -> bool:
+    if not debug_logging_enabled():
+        return False
+    level = debug_logging_level()
+    payload = {
+        "debug_level": level,
+        **fields,
+    }
+    if level == "Verbose":
+        payload.update(verbose_fields or {})
+    log_json(logger, logging.INFO, f"diagnostic_{event}", **payload)
+    return True
+
+
 def readiness_http_status(report: dict[str, Any]) -> int:
     status = report.get("status")
     if status == "error":

@@ -179,9 +179,6 @@ class ContractRegistry:
             "orchestrator_policy": self.contracts_root
             / "config"
             / "orchestrator-policy.schema.json",
-            "tool_launch_matrix": self.contracts_root
-            / "config"
-            / "tool-launch-matrix.schema.json",
             "prompt_packs": self.contracts_root / "config" / "prompt-packs.schema.json",
             "escalation_policies": self.contracts_root
             / "config"

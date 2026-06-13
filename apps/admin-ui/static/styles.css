@@ -655,6 +655,11 @@ label {
   padding: var(--space-2) var(--space-3);
 }
 
+.slot-schema-derived.danger-panel {
+  border-color: rgba(180, 35, 24, 0.45);
+  background: rgba(180, 35, 24, 0.08);
+}
+
 .slot-card-list {
   display: grid;
   gap: 12px;
@@ -668,9 +673,13 @@ label {
   overflow: hidden;
 }
 
+.slot-card.dragging {
+  opacity: 0.62;
+}
+
 .slot-card-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 12px;
@@ -680,6 +689,47 @@ label {
 
 .slot-card-summary::-webkit-details-marker {
   display: none;
+}
+
+.slot-stage-card .slot-card-summary {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.slot-drag-handle {
+  align-items: center;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: grab;
+  display: inline-flex;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+  height: 30px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 30px;
+}
+
+.slot-drag-handle:active {
+  cursor: grabbing;
+}
+
+.slot-card-order {
+  align-items: center;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+  height: 28px;
+  justify-content: center;
+  min-width: 28px;
+  padding: 0 8px;
 }
 
 .endpoint-operations-summary {
@@ -1450,7 +1500,12 @@ tbody tr:hover {
   }
 
   .slot-card-summary {
-    grid-template-columns: 1fr;
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .slot-delete-button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
   }
 
   .admin-actions,

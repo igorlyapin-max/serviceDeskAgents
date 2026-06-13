@@ -146,7 +146,6 @@ class DebugRuntime:
         for scenario in self.config_store.scenario_overview()["scenarios"]:
             detail = self.config_store.scenario_detail(scenario["scenario_id"])
             slots = detail.get("slot_schema", {}).get("slots", [])
-            launches = detail.get("tool_launches", [])
             scenarios.append(
                 {
                     "scenario_id": scenario["scenario_id"],
@@ -157,15 +156,8 @@ class DebugRuntime:
                         for slot in slots
                         if slot.get("required")
                     ],
-                    "react_calls": [
-                        {
-                            "launch_id": launch.get("launch_id"),
-                            "display_name": launch.get("display_name") or launch.get("tool_name"),
-                            "tool_name": launch.get("tool_name"),
-                        }
-                        for launch in launches
-                    ],
-                    "variants": self._scenario_variants(slots, launches),
+                    "react_calls": [],
+                    "variants": self._scenario_variants(slots, []),
                 }
             )
         return {
@@ -219,7 +211,7 @@ class DebugRuntime:
             },
             "config_versions": {
                 domain: self.config_store.active_version_id(domain)
-                for domain in ("service_scenarios", "slot_schemas", "tool_launch_matrix", "integration_endpoints")
+                for domain in ("service_scenarios", "slot_schemas", "integration_endpoints")
             },
         }
         items: list[dict[str, Any]] = []
@@ -229,7 +221,7 @@ class DebugRuntime:
             for _ in range(count_per_scenario):
                 variant = rng.choice(self._scenario_variants(
                     detail.get("slot_schema", {}).get("slots", []),
-                    detail.get("tool_launches", []),
+                    [],
                 ))
                 item = self._build_simulation_item(
                     run,
@@ -1623,12 +1615,6 @@ class DebugRuntime:
         route = detail.get("route", {}).get("route")
         if route in {"major_incident", "human_review"}:
             return "escalation"
-        active_tool_names = {
-            tool.get("tool_name")
-            for tool in self.config_store.active_payload("tools").get("tools", [])
-        }
-        if detail.get("tool_launches") and "start_systemcenter_runbook" in active_tool_names:
-            return "runbook"
         return "answer"
 
     @staticmethod

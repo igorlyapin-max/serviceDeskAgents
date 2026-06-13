@@ -11,6 +11,38 @@
       "operations": [
         "start_systemcenter_runbook"
       ],
+      "result_delivery": {
+        "canonical_event": "ServiceDesk ExternalEvent",
+        "supported_transports": [
+          "http_callback",
+          "kafka_event",
+          "both"
+        ],
+        "default_transport": "kafka_event",
+        "default_result_topic": "external.events",
+        "transport_security": {
+          "http_callback": {
+            "policy": "admin_configured",
+            "recommended_production_scheme": "https",
+            "callback_base_url_env": "ORCHESTRATOR_PUBLIC_URL",
+            "token_header": "X-ServiceDesk-Callback-Token",
+            "token_env": "INTEGRATION_CALLBACK_TOKEN__N8N"
+          },
+          "kafka_event": {
+            "policy": "admin_configured",
+            "bootstrap_servers_env": "KAFKA_BOOTSTRAP_SERVERS",
+            "security_protocol_env": "KAFKA_SECURITY_PROTOCOL",
+            "supported_security_protocols": [
+              "SASL_SSL",
+              "SSL"
+            ],
+            "supported_auth": [
+              "sasl",
+              "mtls"
+            ]
+          }
+        }
+      },
       "management": {
         "restart_supported": false,
         "cancel_supported": false,
