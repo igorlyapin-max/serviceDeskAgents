@@ -76,8 +76,8 @@ else:
     raise SystemExit(f"healthz did not become ready: {last_error}")
 
 html = request("/admin", parse_json=False)
-assert "Разрешение атрибутов" in html, html[:300]
-assert "1. Разрешение атрибутов" in html, html[:300]
+assert "Разрешение слотов" in html, html[:300]
+assert "1. Разрешение слотов" in html, html[:300]
 assert "0. Слоты" in html, html[:300]
 assert "Сценарии обработки" in html, html[:300]
 js = request("/admin/static/app.js", parse_json=False)

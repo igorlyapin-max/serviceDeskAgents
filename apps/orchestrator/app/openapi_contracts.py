@@ -114,6 +114,8 @@ def fetch_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, 
 
 def normalize_operation_id(value: str | None, method: str, path: str) -> str:
     raw = value or f"{method.lower()}_{path.strip('/')}"
+    raw = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(raw))
+    raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw)
     normalized = re.sub(r"[^a-z0-9_]+", "_", str(raw).lower()).strip("_")
     normalized = re.sub(r"_+", "_", normalized)
     if not normalized:
@@ -121,6 +123,97 @@ def normalize_operation_id(value: str | None, method: str, path: str) -> str:
     if not re.match(r"^[a-z]", normalized):
         normalized = f"op_{normalized}"
     return normalized
+
+
+def normalize_react_call_name(endpoint_id: str, operation_id: str) -> str:
+    raw = f"{endpoint_id}_{operation_id}"
+    raw = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", raw)
+    raw = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw)
+    normalized = re.sub(r"[^a-z0-9_]+", "_", raw.lower()).strip("_")
+    normalized = re.sub(r"_+", "_", normalized)
+    if not normalized:
+        normalized = "react_call"
+    if not re.match(r"^[a-z]", normalized):
+        normalized = f"call_{normalized}"
+    return normalized
+
+
+def schema_property_names(schema: dict[str, Any] | None) -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    return [str(name) for name in properties]
+
+
+def default_parameter_mapping(operation: dict[str, Any]) -> dict[str, str]:
+    return {
+        parameter_name: f"react:{parameter_name}"
+        for parameter_name in schema_property_names(operation.get("request_schema"))
+    }
+
+
+def default_result_mapping(operation: dict[str, Any]) -> dict[str, str]:
+    return {
+        result_name: result_name
+        for result_name in schema_property_names(operation.get("response_schema"))
+    }
+
+
+def default_react_policy(action_type: str, operation: dict[str, Any]) -> dict[str, Any]:
+    read_only = action_type == "read_only"
+    return {
+        "default_timeout_seconds": int(operation.get("timeout_seconds") or 30),
+        "retry": {
+            "max_attempts": 1,
+            "backoff_seconds": 0,
+        },
+        "approval_required_hint": not read_only,
+        "auto_execution_eligible": read_only,
+        "max_risk_level": "low" if read_only else "medium",
+    }
+
+
+def proposed_react_calls_for_operations(
+    endpoint: dict[str, Any],
+    operations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    endpoint_id = str(endpoint.get("endpoint_id") or "endpoint")
+    proposed_tools: dict[str, dict[str, Any]] = {}
+    bindings: dict[str, dict[str, Any]] = {}
+    for operation_id, operation in sorted(operations.items()):
+        action_type = "read_only" if str(operation.get("method") or "").upper() == "GET" else "action"
+        tool_name = normalize_react_call_name(endpoint_id, operation_id)
+        binding = {
+            "endpoint_id": endpoint_id,
+            "operation_id": operation_id,
+            "parameter_mapping": default_parameter_mapping(operation),
+            "result_mapping": default_result_mapping(operation),
+        }
+        bindings[tool_name] = binding
+        proposed_tools[tool_name] = {
+            "tool_name": tool_name,
+            "action_type": action_type,
+            "description": operation.get("description")
+            or operation.get("display_name")
+            or f"ReAct-вызов ИИ для OpenAPI операции {operation_id}.",
+            "endpoint_bindings": [binding],
+            "parameters_schema": copy.deepcopy(operation.get("request_schema") or {"type": "object", "additionalProperties": True}),
+            "result_schema": copy.deepcopy(operation.get("response_schema") or {"type": "object", "additionalProperties": True}),
+            "contract_version": str(operation.get("contract_version") or "1.0"),
+            "contract_status": str(operation.get("contract_status") or "draft"),
+            "policy": default_react_policy(action_type, operation),
+            "extensions": {
+                "generated_from": "openapi_3_1",
+                "endpoint_id": endpoint_id,
+                "operation_id": operation_id,
+            },
+        }
+    return {
+        "tools": proposed_tools,
+        "bindings": bindings,
+    }
 
 
 def _json_pointer(document: dict[str, Any], pointer: str) -> Any:
@@ -343,6 +436,7 @@ def import_openapi_operations(document: dict[str, Any]) -> dict[str, Any]:
                 "extensions": {
                     "contract_source": "openapi_3_1",
                     "openapi_path": str(path),
+                    "openapi_operation_id": operation.get("operationId") or operation_id,
                 },
             }
 
@@ -366,5 +460,6 @@ def preview_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str
     source.setdefault("method", "GET")
     document, resolved_url = fetch_openapi_contract(endpoint, source)
     result = import_openapi_operations(document)
+    result["proposed_react_calls"] = proposed_react_calls_for_operations(endpoint, result["operations"])
     result["source_url"] = safe_url_for_log(resolved_url)
     return result

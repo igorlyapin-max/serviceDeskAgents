@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Администратор AI ServiceDesk</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/admin/static/styles.css?v=audit_hardening_20260612">
-    <script defer src="/admin/static/theme_plugin.js?v=audit_hardening_20260612"></script>
+    <link rel="stylesheet" href="/admin/static/styles.css?v=scenario_limits_20260612">
+    <script defer src="/admin/static/theme_plugin.js?v=scenario_limits_20260612"></script>
   </head>
   <body>
     <div class="admin-shell">
@@ -22,12 +22,9 @@
             <div class="nav-sublist">
               <button class="nav-item nav-subitem" type="button" data-view="scenarios">Сценарии</button>
               <button class="nav-item nav-subitem" type="button" data-view="scenarioSlots">0. Слоты</button>
-              <button class="nav-item nav-subitem" type="button" data-view="slotAutofill">0.1 Автозаполнение слотов</button>
-              <button class="nav-item nav-subitem" type="button" data-view="resolution">1. Разрешение атрибутов</button>
+              <button class="nav-item nav-subitem" type="button" data-view="resolution">1. Разрешение слотов</button>
               <button class="nav-item nav-subitem" type="button" data-view="scenarioClassification">2. Классификация и маршрут</button>
-              <button class="nav-item nav-subitem" type="button" data-view="scenarioReact">3. ReAct-планирование</button>
               <button class="nav-item nav-subitem" type="button" data-view="scenarioTools">4. ReAct-вызовы и матрица запуска</button>
-              <button class="nav-item nav-subitem" type="button" data-view="scenarioEscalation">5. Решение и эскалация</button>
               <button class="nav-item nav-subitem" type="button" data-view="scenarioPrompts">6. Промпты</button>
               <button class="nav-item nav-subitem" type="button" data-view="interactionChannels">Каналы взаимодействия</button>
             </div>
@@ -45,6 +42,7 @@
             <div class="nav-sublist">
               <button class="nav-item nav-subitem" type="button" data-view="knowledge">База знаний</button>
               <button class="nav-item nav-subitem" type="button" data-view="models">Модели</button>
+              <button class="nav-item nav-subitem" type="button" data-view="systemPrompts">Системные промпты</button>
               <button class="nav-item nav-subitem" type="button" data-view="security">Безопасность</button>
             </div>
           </div>
@@ -78,6 +76,6 @@
       </main>
     </div>
 
-    <script src="/admin/static/app.js?v=audit_hardening_20260612"></script>
+    <script src="/admin/static/app.js?v=scenario_limits_20260612"></script>
   </body>
 </html>

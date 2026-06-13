@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from apps.orchestrator.app.config_assistant import (
     compile_attribute_resolution_step,
-    compile_slot_autofill_profile,
 )
 from apps.orchestrator.app.config_registry import (
     ConfigStore,
@@ -92,159 +92,6 @@ def get_manager_email_tool() -> dict:
 
 
 class ConfigAssistantTest(unittest.TestCase):
-    def test_slot_autofill_compiles_input_and_output_mapping_from_instruction(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                'Вызови get_user_login. В параметр user_fio передай слот "Фамилия Имя Отчество". '
-                'Если результат единственный, заполни слот "Логин пользователя" из поля результата user_login.'
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["react_call"], "get_user_login")
-        self.assertEqual(structure["accept_policy"], "single_result")
-        self.assertNotIn("run_order", structure)
-        self.assertEqual(structure["input_mapping"], {"user_fio": "slot:user_fio"})
-        self.assertEqual(
-            structure["output_mapping"],
-            [{"result_field": "user_login", "target_slot": "user_login", "required_for_success": True}],
-        )
-
-    def test_slot_autofill_reports_required_parameter_without_source(self) -> None:
-        tool = get_user_login_tool()
-        tool["parameters_schema"]["required"] = ["employee_number"]
-        tool["parameters_schema"]["properties"] = {"employee_number": {"type": "string"}}
-
-        result = compile_slot_autofill_profile(
-            instruction='Вызови get_user_login и заполни слот "Логин пользователя" из user_login.',
-            slot_schema=password_slot_schema(),
-            tools=[tool],
-            react_call="get_user_login",
-        )
-
-        self.assertTrue(
-            any("employee_number" in error for error in result["validation_errors"]),
-            result["validation_errors"],
-        )
-
-    def test_slot_autofill_compiles_failure_actions_from_scoped_clauses(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "ReAct-вызов: get_user_login. Входы: user_fio <- slot:user_fio. "
-                "Выходы: user_login <- user_login (обязательно). "
-                "Нет результата: продолжить сценарий. "
-                "Несколько результатов: эскалировать оператору."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["input_mapping"], {"user_fio": "slot:user_fio"})
-        self.assertEqual(
-            structure["output_mapping"],
-            [{"result_field": "user_login", "target_slot": "user_login", "required_for_success": True}],
-        )
-        self.assertEqual(structure["on_no_result"], "continue")
-        self.assertEqual(structure["on_ambiguous_result"], "operator_handoff")
-
-    def test_slot_autofill_compiles_template_reference_tokens(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "Вызови ${ReAct.get_user_login}. "
-                "Передай ${slot.user_fio} в ${paramReAct.get_user_login.input.user_fio}. "
-                "Заполни ${slot.user_login} из ${paramReAct.get_user_login.output.user_login}. "
-                "Если результат единственный, используй значение."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["react_call"], "get_user_login")
-        self.assertEqual(structure["input_mapping"], {"user_fio": "slot:user_fio"})
-        self.assertEqual(
-            structure["output_mapping"],
-            [{"result_field": "user_login", "target_slot": "user_login", "required_for_success": True}],
-        )
-
-    def test_slot_autofill_reports_unknown_template_slot(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "Вызови ${ReAct.get_user_login}. "
-                "Передай ${slot.missing_user} в ${paramReAct.get_user_login.input.user_fio}. "
-                "Заполни ${slot.user_login} из ${paramReAct.get_user_login.output.user_login}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-        )
-
-        self.assertTrue(any("missing_user" in error for error in result["validation_errors"]))
-
-    def test_slot_autofill_rejects_short_template_parameter_reference(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "Вызови ${ReAct.get_user_login}. "
-                "Передай ${slot.user_fio} в ${paramReAct.input.user_fio}. "
-                "Заполни ${slot.user_login} из ${paramReAct.output.user_login}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-        )
-
-        self.assertTrue(any("короткую форму" in error for error in result["validation_errors"]))
-
-    def test_slot_autofill_compiles_no_result_operator_handoff(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                'Вызови get_user_login. В параметр user_fio передай слот "Фамилия Имя Отчество". '
-                'Выходы: user_login <- user_login. Нет результата: эскалировать оператору.'
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(result["structure"]["on_no_result"], "operator_handoff")
-
-    def test_slot_autofill_compiles_run_order_from_instruction(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "ReAct-вызов: get_user_login. Порядок запуска 4. "
-                "Входы: user_fio <- slot:user_fio. Выходы: user_login <- user_login."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(result["warnings"], [])
-        self.assertEqual(result["structure"]["run_order"], 4)
-
-    def test_slot_autofill_rejects_run_order_outside_ui_range(self) -> None:
-        result = compile_slot_autofill_profile(
-            instruction=(
-                "ReAct-вызов: get_user_login. run_order: 101. "
-                "Входы: user_fio <- slot:user_fio. Выходы: user_login <- user_login."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        self.assertEqual(result["validation_errors"], [])
-        self.assertNotIn("run_order", result["structure"])
-        self.assertTrue(any("Порядок запуска 101 вне диапазона 1..100" in warning for warning in result["warnings"]))
-
     def test_attribute_resolution_step_compiles_step_and_result_contract(self) -> None:
         result = compile_attribute_resolution_step(
             instruction=(
@@ -489,6 +336,99 @@ class ConfigAssistantTest(unittest.TestCase):
                 any("device_name" in error and "выбранной схемы" in error for error in validation["errors"]),
                 validation["errors"],
             )
+
+    def test_attribute_resolution_can_fill_directly_without_llm(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            profile = copy.deepcopy(
+                next(
+                    item
+                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
+                    if item["profile_id"] == "profile.password_reset.login_from_ad"
+                )
+            )
+            profile["use_llm_after_steps"] = False
+            slot_schema = next(
+                item
+                for item in store.active_payload("slot_schemas")["slot_schemas"]
+                if item["slot_schema_id"] == "slot.password_reset"
+            )
+            trace: list[dict] = []
+
+            result = store.simulate_attribute_resolution_profile(
+                profile=profile,
+                slot_schema=slot_schema,
+                provided={},
+                simulation_options={
+                    "allow_llm": False,
+                    "allow_readonly_integrations": True,
+                    "allow_mock_integrations": True,
+                },
+                effective_thresholds={
+                    "auto_accept_confidence": 0.85,
+                    "clarification_confidence": 0.70,
+                    "operator_handoff_confidence": 0.50,
+                    "min_extraction_confidence": 0.70,
+                },
+                execution_trace=trace,
+                slot_values={},
+            )
+
+            self.assertEqual(result["resolution_mode"], "direct_mapping")
+            self.assertIsNone(result["llm_decision"])
+            self.assertEqual(result["status"], "filled")
+            self.assertEqual(result["output_values"]["user_login"], "ivanov")
+            self.assertEqual(result["output_values"]["user_id"], "u-1001")
+
+    def test_attribute_resolution_direct_mapping_can_continue_without_value(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            profile = copy.deepcopy(
+                next(
+                    item
+                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
+                    if item["profile_id"] == "profile.password_reset.login_from_ad"
+                )
+            )
+            profile["use_llm_after_steps"] = False
+            profile["output_slots_order"] = [
+                {
+                    "slot_id": "user_login",
+                    "order": 1,
+                    "required_for_success": True,
+                    "source_hint": "missing_field",
+                    "fallback": "leave_empty",
+                }
+            ]
+            slot_schema = next(
+                item
+                for item in store.active_payload("slot_schemas")["slot_schemas"]
+                if item["slot_schema_id"] == "slot.password_reset"
+            )
+
+            result = store.simulate_attribute_resolution_profile(
+                profile=profile,
+                slot_schema=slot_schema,
+                provided={},
+                simulation_options={
+                    "allow_llm": False,
+                    "allow_readonly_integrations": True,
+                    "allow_mock_integrations": True,
+                },
+                effective_thresholds={
+                    "auto_accept_confidence": 0.85,
+                    "clarification_confidence": 0.70,
+                    "operator_handoff_confidence": 0.50,
+                    "min_extraction_confidence": 0.70,
+                },
+                execution_trace=[],
+                slot_values={},
+            )
+
+            self.assertEqual(result["resolution_mode"], "direct_mapping")
+            self.assertEqual(result["decision"], "leave_empty")
+            self.assertEqual(result["status"], "skipped")
+            self.assertEqual(result["output_values"], {})
 
     def test_operation_response_items_requires_selector_for_ambiguous_containers(self) -> None:
         response_schema = {

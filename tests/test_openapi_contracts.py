@@ -5,6 +5,7 @@ import unittest
 from apps.orchestrator.app.openapi_contracts import (
     OpenApiContractError,
     import_openapi_operations,
+    proposed_react_calls_for_operations,
     resolve_contract_source_url,
 )
 
@@ -94,7 +95,7 @@ class OpenApiContractsTest(unittest.TestCase):
         }
 
         result = import_openapi_operations(document)
-        operation = result["operations"]["findaduser"]
+        operation = result["operations"]["find_ad_user"]
 
         self.assertEqual(operation["display_name"], "Найти пользователя в AD")
         self.assertEqual(operation["method"], "POST")
@@ -102,6 +103,60 @@ class OpenApiContractsTest(unittest.TestCase):
         self.assertEqual(operation["contract_version"], "2026.06")
         self.assertEqual(operation["request_schema"]["required"], ["full_name"])
         self.assertIn("manager_email", operation["response_schema"]["properties"])
+        self.assertEqual(operation["extensions"]["openapi_operation_id"], "findAdUser")
+
+    def test_builds_prefixed_react_call_proposals_for_openapi_operations(self) -> None:
+        operations = {
+            "send_email": {
+                "display_name": "Отправить email",
+                "description": "Отправляет email через n8n.",
+                "method": "POST",
+                "path": "/webhook/email/send",
+                "request_schema": {
+                    "type": "object",
+                    "required": ["to", "subject"],
+                    "properties": {
+                        "to": {"type": "string"},
+                        "subject": {"type": "string"},
+                        "body": {"type": "string"},
+                    },
+                },
+                "response_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "message_id": {"type": "string"},
+                    },
+                },
+                "contract_version": "2026.06",
+                "contract_status": "valid",
+                "timeout_seconds": 30,
+            }
+        }
+
+        proposals = proposed_react_calls_for_operations(
+            {"endpoint_id": "n8n", "adapter_type": "n8n_webhook"},
+            operations,
+        )
+        tool = proposals["tools"]["n8n_send_email"]
+        binding = proposals["bindings"]["n8n_send_email"]
+
+        self.assertEqual(tool["tool_name"], "n8n_send_email")
+        self.assertEqual(tool["action_type"], "action")
+        self.assertEqual(tool["parameters_schema"]["required"], ["to", "subject"])
+        self.assertEqual(tool["result_schema"]["required"], ["status"])
+        self.assertEqual(binding["endpoint_id"], "n8n")
+        self.assertEqual(binding["operation_id"], "send_email")
+        self.assertEqual(binding["parameter_mapping"], {
+            "to": "react:to",
+            "subject": "react:subject",
+            "body": "react:body",
+        })
+        self.assertEqual(binding["result_mapping"], {
+            "status": "status",
+            "message_id": "message_id",
+        })
 
     def test_imports_duplicate_operation_ids_with_suffix(self) -> None:
         document = {

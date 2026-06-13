@@ -43,6 +43,14 @@ stage3-check:
 stage3-run:
 	$(PYTHON) -m uvicorn apps.orchestrator.app.main:app --host 127.0.0.1 --port $${ORCHESTRATOR_PORT:-18088}
 
+.PHONY: async-outbox-publish-once
+async-outbox-publish-once:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime publish-once --limit $${OUTBOX_PUBLISH_LIMIT:-50}
+
+.PHONY: async-tool-worker
+async-tool-worker:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime worker --topic $${TOOL_COMMAND_TOPIC:-tool.commands}
+
 .PHONY: stage3-smoke
 stage3-smoke:
 	./scripts/stage3-smoke.sh

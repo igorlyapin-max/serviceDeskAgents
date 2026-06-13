@@ -59,6 +59,10 @@
           "target_slot_id": {
             "$ref": "#/$defs/id"
           },
+          "use_llm_after_steps": {
+            "type": "boolean",
+            "default": true
+          },
           "enrichment_steps": {
             "type": "array",
             "items": {

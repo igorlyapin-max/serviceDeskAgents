@@ -14,13 +14,15 @@ from pydantic import BaseModel, Field
 
 from .action_gates import ActionGateConflict, ActionGateNotFound, utc_now
 from .cases import CaseNotFound
-from .config_assistant import compile_attribute_resolution_step, compile_slot_autofill_profile
+from .config_assistant import compile_attribute_resolution_step
 from .config_registry import (
     CONFIG_DOMAINS,
     ConfigDraftNotFound,
     ConfigRegistryError,
     ConfigStore,
     ConfigVersionNotFound,
+    endpoint_operation_usage_refs,
+    tool_usage_refs,
 )
 from .contracts import ContractValidationError
 from .debug_runtime import DebugRuntime, DebugRuntimeError
@@ -146,14 +148,6 @@ class AdminOpenApiContractPreviewRequest(BaseModel):
     endpoint_id: str | None = Field(default=None)
     endpoint: dict[str, Any] | None = Field(default=None)
     contract_source: dict[str, Any] | None = Field(default=None)
-
-
-class AdminSlotAutofillCompileRequest(BaseModel):
-    operator_id: str = Field(default="admin-1")
-    instruction: str = Field(default="", max_length=4000)
-    slot_schema_id: str = Field()
-    react_call: str | None = Field(default=None)
-    target_slots: list[str] | None = Field(default=None)
 
 
 class AdminAttributeResolutionStepCompileRequest(BaseModel):
@@ -293,6 +287,7 @@ workflow = TicketWorkflow()
 config_store = ConfigStore(workflow.contracts)
 workflow.attach_config_store(config_store)
 processing_store = ProcessingStore(workflow.case_store)
+workflow.attach_processing_store(processing_store)
 debug_runtime = DebugRuntime(workflow, config_store, processing_store)
 workflow.capture_recorder = debug_runtime
 workflow.integration_dispatcher.capture_recorder = debug_runtime
@@ -2691,6 +2686,57 @@ def admin_integration_endpoint_catalog(
     return workflow.contracts.integration_endpoint_catalog
 
 
+def openapi_import_impact_warnings(
+    *,
+    endpoint: dict[str, Any],
+    result: dict[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    endpoint_id = endpoint.get("endpoint_id")
+    imported_operations = result.get("operations") or {}
+    proposed_tools = (result.get("proposed_react_calls") or {}).get("tools") or {}
+    active_tools = config_store.active_payload("tools")
+    active_workflows = config_store.active_payload("n8n_workflows")
+    active_matrix = config_store.active_payload("tool_launch_matrix")
+    active_resolution = config_store.active_payload("attribute_resolution_profiles")
+    active_channels = config_store.active_payload("interaction_channels")
+    active_tool_by_name = {
+        tool.get("tool_name"): tool
+        for tool in active_tools.get("tools", [])
+    }
+
+    for operation_id, imported_operation in imported_operations.items():
+        current_operation = (endpoint.get("operations") or {}).get(operation_id)
+        if current_operation and current_operation != imported_operation:
+            refs = endpoint_operation_usage_refs(endpoint_id, operation_id, active_tools, active_workflows)
+            if refs:
+                warnings.append(
+                    f"Операция {endpoint_id}/{operation_id} уже используется ({', '.join(refs)}) "
+                    "и будет обновлена из OpenAPI; проверьте связанные ReAct-вызовы и сценарии."
+                )
+
+    for operation_id in sorted(set((endpoint.get("operations") or {}).keys()) - set(imported_operations.keys())):
+        refs = endpoint_operation_usage_refs(endpoint_id, operation_id, active_tools, active_workflows)
+        if refs:
+            warnings.append(
+                f"OpenAPI больше не содержит используемую операцию {endpoint_id}/{operation_id}; "
+                f"UI сохранит ее при импорте, потому что есть связи: {', '.join(refs)}."
+            )
+
+    for tool_name, proposed_tool in proposed_tools.items():
+        current_tool = active_tool_by_name.get(tool_name)
+        if current_tool and current_tool != proposed_tool:
+            refs = tool_usage_refs(tool_name, active_matrix, active_resolution, active_channels)
+            if refs:
+                warnings.append(
+                    f"ReAct-вызов {tool_name} уже используется ({', '.join(refs)}) "
+                    "и будет обновлен из OpenAPI; это может потребовать проверки матриц запуска и профилей разрешения."
+                )
+            else:
+                warnings.append(f"ReAct-вызов {tool_name} уже существует и будет обновлен из OpenAPI.")
+    return warnings
+
+
 @app.post("/admin/integration-endpoints/openapi/preview")
 def admin_integration_endpoint_openapi_preview(
     payload: AdminOpenApiContractPreviewRequest,
@@ -2726,6 +2772,10 @@ def admin_integration_endpoint_openapi_preview(
         endpoint["contract_source"] = payload.contract_source
     try:
         result = preview_openapi_contract(endpoint, endpoint.get("contract_source") or {})
+        impact_warnings = openapi_import_impact_warnings(endpoint=endpoint, result=result)
+        result["impact_warnings"] = impact_warnings
+        if impact_warnings:
+            result["warnings"] = [*(result.get("warnings") or []), *impact_warnings]
     except OpenApiContractError as error:
         audit_error(
             context,
@@ -3008,46 +3058,6 @@ def assistant_slot_schema(
     if not slot_schema:
         raise ConfigRegistryError(f"Схема слотов не найдена: {resolved_slot_schema_id or 'не указана'}")
     return slot_schema
-
-
-@app.post("/admin/config-assistant/slot-autofill/compile")
-def admin_config_assistant_slot_autofill_compile(
-    request: AdminSlotAutofillCompileRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(context_or_raise),
-) -> dict[str, Any]:
-    permission = require_config_permission(
-        context,
-        http_request,
-        domain="slot_autofill_profiles",
-        mode="manage",
-        action="admin.config_assistant.slot_autofill.compile",
-    )
-    try:
-        result = compile_slot_autofill_profile(
-            instruction=request.instruction,
-            slot_schema=assistant_slot_schema(slot_schema_id=request.slot_schema_id),
-            tools=config_store.active_payload("tools").get("tools", []),
-            react_call=request.react_call,
-            target_slots=request.target_slots,
-        )
-    except ConfigRegistryError as error:
-        raise config_error_response(error) from error
-    audit_success(
-        context,
-        http_request,
-        action="admin.config_assistant.slot_autofill.compile",
-        resource_type="config_assistant",
-        resource_id=request.slot_schema_id,
-        permission=permission,
-        details={
-            "operator_id": request.operator_id,
-            "react_call": result.get("references", {}).get("react_call"),
-            "validation_error_count": len(result.get("validation_errors", [])),
-            "warning_count": len(result.get("warnings", [])),
-        },
-    )
-    return result
 
 
 @app.post("/admin/config-assistant/attribute-resolution-step/compile")

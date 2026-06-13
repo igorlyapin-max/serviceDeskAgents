@@ -169,9 +169,6 @@ class ContractRegistry:
             "attribute_resolution_profiles": self.contracts_root
             / "config"
             / "attribute-resolution-profiles.schema.json",
-            "slot_autofill_profiles": self.contracts_root
-            / "config"
-            / "slot-autofill-profiles.schema.json",
             "service_scenarios": self.contracts_root
             / "config"
             / "service-scenarios.schema.json",

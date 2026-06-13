@@ -120,6 +120,17 @@
         "rate_limits": {
           "type": "object",
           "additionalProperties": true
+        },
+        "system_prompts": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "slot_resolution": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          }
         }
       }
     },

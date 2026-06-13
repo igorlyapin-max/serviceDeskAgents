@@ -895,23 +895,6 @@ label {
   justify-self: end;
 }
 
-.slot-autofill-output-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-}
-
-.slot-autofill-output-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-3);
-  min-width: 0;
-}
-
-.slot-autofill-output-row .danger {
-  align-self: start;
-  justify-self: end;
-}
-
 .contract-field-list {
   display: grid;
   gap: 10px;

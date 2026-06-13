@@ -85,7 +85,6 @@
                     "user_question",
                     "case",
                     "llm_extraction",
-                    "slot_autofill",
                     "resolution_profile",
                     "operator_manual"
                   ]
@@ -112,11 +111,6 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 600
-                },
-                "autofill_source_ref": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 240
                 },
                 "operator_hint": {
                   "type": "string",

@@ -108,12 +108,18 @@ class ToolRegistry:
             for endpoint in self.contracts.integration_endpoint_catalog["endpoints"]
         }
 
-    def resolve(self, tool_name: str) -> EndpointBinding:
+    def resolve(
+        self,
+        tool_name: str,
+        *,
+        endpoint_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> EndpointBinding:
         tool = self.tools_by_name.get(tool_name)
         if not tool:
             raise ContractValidationError("tool_catalog", [f"unknown tool_name: {tool_name}"])
 
-        binding = self._select_binding(tool)
+        binding = self._select_binding(tool, endpoint_id=endpoint_id, operation_id=operation_id)
         endpoint = self.endpoints_by_id[binding["endpoint_id"]]
         operation = endpoint["operations"][binding["operation_id"]]
         return EndpointBinding(
@@ -133,16 +139,19 @@ class ToolRegistry:
         ticket_id: str | None = None,
         approved_by_operator: bool = False,
         operator_id: str | None = None,
+        endpoint_id: str | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, Any]:
         self.contracts.require_valid("proposed_action", action)
         self.contracts.require_valid("execution_policy_result", policy_result)
 
-        binding = self.resolve(action["tool_name"])
+        binding = self.resolve(action["tool_name"], endpoint_id=endpoint_id, operation_id=operation_id)
         self._validate_action_against_tool(action, binding.tool)
         operation_parameters = self._build_operation_parameters(
             action["parameters"],
             binding.binding,
         )
+        secret_operation_parameters = self._secret_operation_parameters(binding.binding)
         self._validate_operation_parameters(
             action["tool_name"],
             binding.operation,
@@ -171,6 +180,8 @@ class ToolRegistry:
             ),
             "retry_policy": binding.tool["policy"]["retry"],
         }
+        if secret_operation_parameters:
+            invocation.setdefault("extensions", {})["secret_operation_parameters"] = secret_operation_parameters
         if case_id:
             invocation["case_id"] = case_id
         if ticket_id:
@@ -197,11 +208,31 @@ class ToolRegistry:
         if errors:
             raise ContractValidationError("tool_result", errors)
 
-    def _select_binding(self, tool: dict[str, Any]) -> dict[str, Any]:
+    def _select_binding(
+        self,
+        tool: dict[str, Any],
+        *,
+        endpoint_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
         if not tool["endpoint_bindings"]:
             raise ContractValidationError(
                 "tool_catalog",
                 [f"{tool['tool_name']} не содержит привязку endpoint/operation"],
+            )
+        if endpoint_id or operation_id:
+            for binding in tool["endpoint_bindings"]:
+                if endpoint_id and binding.get("endpoint_id") != endpoint_id:
+                    continue
+                if operation_id and binding.get("operation_id") != operation_id:
+                    continue
+                return binding
+            raise ContractValidationError(
+                "tool_catalog",
+                [
+                    f"{tool['tool_name']} не содержит binding endpoint_id={endpoint_id} "
+                    f"operation_id={operation_id}"
+                ],
             )
         return tool["endpoint_bindings"][0]
 
@@ -260,6 +291,15 @@ class ToolRegistry:
                     result[operation_parameter] = secret_value
         return result
 
+    @staticmethod
+    def _secret_operation_parameters(binding: dict[str, Any]) -> dict[str, str]:
+        result = {}
+        for operation_parameter, source_ref in (binding.get("parameter_mapping") or {}).items():
+            source, separator, source_value = str(source_ref).partition(":")
+            if separator == ":" and source == "secret" and source_value:
+                result[operation_parameter] = source_value
+        return result
+
     @classmethod
     def _validate_operation_parameters(
         cls,
@@ -300,19 +340,9 @@ class IntegrationDispatcher:
         }
 
     def dispatch(self, invocation: dict[str, Any]) -> dict[str, Any]:
-        self.contracts.require_valid("tool_invocation", invocation)
-        binding = self.registry.resolve(invocation["tool_name"])
-        binding_error = self._binding_gate(invocation, binding)
-        if binding_error:
-            return self._require_result(self._with_trace(binding_error, invocation, binding))
-
-        policy_result = self._policy_gate(invocation)
-        if policy_result:
-            return self._require_result(self._with_trace(policy_result, invocation, binding))
-
-        endpoint_result = self._endpoint_gate(invocation, binding.endpoint)
-        if endpoint_result:
-            return self._require_result(self._with_trace(endpoint_result, invocation, binding))
+        binding, preflight_result = self._preflight(invocation)
+        if preflight_result:
+            return preflight_result
 
         adapter = self.adapters.get(invocation["adapter_type"])
         if not adapter:
@@ -336,6 +366,31 @@ class IntegrationDispatcher:
         result = self._with_trace(result, invocation, binding)
         self._record_capture(invocation, binding, result)
         return self._require_result(result)
+
+    def preflight(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
+        _, result = self._preflight(invocation)
+        return result
+
+    def _preflight(self, invocation: dict[str, Any]) -> tuple[EndpointBinding, dict[str, Any] | None]:
+        self.contracts.require_valid("tool_invocation", invocation)
+        binding = self.registry.resolve(
+            invocation["tool_name"],
+            endpoint_id=invocation["endpoint_id"],
+            operation_id=invocation["operation_id"],
+        )
+        binding_error = self._binding_gate(invocation, binding)
+        if binding_error:
+            return binding, self._require_result(self._with_trace(binding_error, invocation, binding))
+
+        policy_result = self._policy_gate(invocation)
+        if policy_result:
+            return binding, self._require_result(self._with_trace(policy_result, invocation, binding))
+
+        endpoint_result = self._endpoint_gate(invocation, binding.endpoint)
+        if endpoint_result:
+            return binding, self._require_result(self._with_trace(endpoint_result, invocation, binding))
+
+        return binding, None
 
     def _binding_gate(
         self,

@@ -46,7 +46,6 @@ SLOT_CONTEXT_FIELDS = {
     "fallback_question",
     "operator_hint",
     "resolution_profile_id",
-    "autofill_source_ref",
     "examples",
 }
 
@@ -54,7 +53,6 @@ SLOT_METHOD_ALLOWED_FIELDS = {
     "user_question": {"user_question"},
     "case": {"case_source_ref"},
     "llm_extraction": {"extraction_instruction", "examples"},
-    "slot_autofill": {"autofill_source_ref"},
     "resolution_profile": {"resolution_profile_id", "fallback_question"},
     "operator_manual": {"operator_hint"},
 }
@@ -760,7 +758,9 @@ def slot_fill_method(slot: dict[str, Any]) -> str:
     return LEGACY_SLOT_SOURCE_METHODS.get(slot.get("source"), "resolution_profile")
 
 
-def normalize_slot_definition(slot: dict[str, Any]) -> None:
+def normalize_slot_definition(
+    slot: dict[str, Any],
+) -> None:
     fill_method = slot_fill_method(slot)
     legacy_question = slot.pop("question", None)
     legacy_auto_fill_ref = slot.pop("auto_fill_ref", None)
@@ -801,8 +801,6 @@ def slot_source_summary(slot: dict[str, Any]) -> dict[str, Any]:
             "extraction_instruction": slot.get("extraction_instruction"),
             "examples": slot.get("examples", []),
         }
-    if fill_method == "slot_autofill":
-        return {"autofill_source_ref": slot.get("autofill_source_ref")}
     if fill_method == "operator_manual":
         return {"operator_hint": slot.get("operator_hint")}
     if fill_method == "user_question":
@@ -1488,6 +1486,7 @@ def migrate_entity_template_refs(text: str | None, entity_step_by_name: dict[str
 def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(profile)
     result["status"] = "active"
+    result["use_llm_after_steps"] = bool(result.get("use_llm_after_steps", True))
     result.pop("allowed_scenarios", None)
     target_slot_id = result.get("target_slot_id") or result.get("output_slots", ["value"])[0]
 
@@ -1810,38 +1809,6 @@ def normalize_output_slot_order(items: list[dict[str, Any]], target_slot_id: str
     return normalized
 
 
-def normalize_slot_autofill_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    result = copy.deepcopy(profile)
-    result["status"] = "active"
-    result["enabled"] = True
-    result.setdefault("run_order", 1)
-    result.setdefault("accept_policy", "single_result")
-    result.setdefault("input_mapping", {})
-    result.setdefault("output_mapping", [])
-    result.setdefault("on_no_result", "continue")
-    result.setdefault("on_ambiguous_result", "ask_client")
-    normalized_output = []
-    seen: set[tuple[str, str]] = set()
-    for item in result.get("output_mapping", []):
-        result_field = item.get("result_field")
-        target_slot = item.get("target_slot")
-        if not result_field or not target_slot:
-            continue
-        key = (result_field, target_slot)
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized_output.append(
-            {
-                "result_field": result_field,
-                "target_slot": target_slot,
-                "required_for_success": bool(item.get("required_for_success", False)),
-            }
-        )
-    result["output_mapping"] = normalized_output
-    return result
-
-
 def default_resolution_response_contract() -> dict[str, Any]:
     return {
         "decision": "fill | ask_clarification | handoff | leave_empty",
@@ -1866,6 +1833,16 @@ def default_resolution_script_text(profile: dict[str, Any]) -> str:
         "Если данных недостаточно или кандидатов несколько, верни decision=ask_clarification и один уточняющий вопрос. "
         "Если уверенно решить нельзя после попыток, верни decision=handoff."
     )
+
+
+DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE = (
+    "Проанализируй входные слоты и результаты шагов обогащения. "
+    "Доступные ссылки на результаты: {{step_refs}}. "
+    "Заполняй только разрешенные выходные слоты: {{output_slots}}. "
+    "Если результат однозначный, верни decision=fill и filled_slots. "
+    "Если данных недостаточно или кандидатов несколько, верни decision=ask_clarification и один уточняющий вопрос. "
+    "Если уверенно решить нельзя после попыток, верни decision=handoff."
+)
 
 
 def result_container_paths_from_schema(schema: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -2034,10 +2011,6 @@ def operation_result_value(
     return value_at_path(result_item, hint)
 
 
-def is_missing_autofill_value(value: Any) -> bool:
-    return value is None or value == "" or value == []
-
-
 def simulated_llm_resolution_decision(
     *,
     profile: dict[str, Any],
@@ -2091,6 +2064,76 @@ def simulated_llm_resolution_decision(
     }
 
 
+def direct_mapping_resolution_decision(
+    *,
+    profile: dict[str, Any],
+    result_item: dict[str, Any] | None,
+    result_summary: dict[str, Any] | None = None,
+    count: int,
+    confidence: float,
+) -> dict[str, Any]:
+    human_policy = profile["human_resolution_policy"]
+    output_values = {}
+    if count == 1 and result_item:
+        for rule in profile["output_slots_order"]:
+            value = operation_result_value(result_item, rule.get("source_hint", ""), result_summary)
+            if value is not None:
+                output_values[rule["slot_id"]] = value
+    required_rules = [
+        rule
+        for rule in profile["output_slots_order"]
+        if rule.get("required_for_success")
+    ]
+    missing_required = [
+        rule
+        for rule in required_rules
+        if output_values.get(rule["slot_id"]) in (None, "")
+    ]
+    if count == 1 and not missing_required:
+        return {
+            "decision": "fill",
+            "status": "filled",
+            "filled_slots": output_values,
+            "confidence": confidence,
+            "next_question": "",
+            "reason": "Выходные слоты заполнены прямым маппингом результата ReAct-вызова.",
+        }
+    if count == 0:
+        reason = "Операция не вернула результатов."
+    elif count > 1:
+        reason = "Операция вернула несколько результатов; без LLM-правила выбрать результат нельзя."
+    elif missing_required:
+        reason = "Не заполнены обязательные выходные слоты: " + ", ".join(rule["slot_id"] for rule in missing_required) + "."
+    else:
+        reason = "Не удалось заполнить слоты прямым маппингом."
+    if any(rule.get("fallback") == "operator_handoff" for rule in missing_required):
+        return {
+            "decision": "handoff",
+            "status": "operator_handoff",
+            "filled_slots": output_values,
+            "confidence": confidence,
+            "next_question": "",
+            "reason": reason,
+        }
+    if missing_required and all(rule.get("fallback") == "leave_empty" for rule in missing_required):
+        return {
+            "decision": "leave_empty",
+            "status": "skipped",
+            "filled_slots": output_values,
+            "confidence": confidence,
+            "next_question": "",
+            "reason": f"{reason} Профиль настроен продолжить сценарий без заполнения этих слотов.",
+        }
+    return {
+        "decision": "ask_clarification",
+        "status": "question_required",
+        "filled_slots": output_values,
+        "confidence": confidence,
+        "next_question": human_policy["clarification_question"],
+        "reason": reason,
+    }
+
+
 def resolution_profile_question(profile: dict[str, Any]) -> str | None:
     human_policy = profile.get("human_resolution_policy", {})
     if human_policy.get("clarification_question"):
@@ -2110,7 +2153,6 @@ def tool_usage_refs(
     matrix_payload: dict[str, Any],
     resolution_payload: dict[str, Any],
     channels_payload: dict[str, Any],
-    slot_autofill_payload: dict[str, Any] | None = None,
 ) -> list[str]:
     refs = []
     for matrix in matrix_payload.get("matrices", []):
@@ -2120,9 +2162,6 @@ def tool_usage_refs(
     for profile in resolution_payload.get("profiles", []):
         if any(step.get("react_call") == tool_name for step in profile.get("enrichment_steps", [])):
             refs.append(f"attribute_resolution_profile:{profile.get('profile_id')}")
-    for profile in (slot_autofill_payload or {}).get("profiles", []):
-        if profile.get("react_call") == tool_name:
-            refs.append(f"slot_autofill_profile:{profile.get('profile_id')}")
     for channel in channels_payload.get("channels", []):
         for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
             if channel.get(action_key, {}).get("tool_name") == tool_name:
@@ -2496,13 +2535,6 @@ CONFIG_DOMAINS: dict[str, ConfigDomain] = {
         read_permission="workflow.read",
         manage_permission="workflow.manage",
     ),
-    "slot_autofill_profiles": ConfigDomain(
-        domain="slot_autofill_profiles",
-        title="Профили автозаполнения слотов",
-        contract_name="slot_autofill_profiles",
-        read_permission="workflow.read",
-        manage_permission="workflow.manage",
-    ),
 }
 
 
@@ -2554,8 +2586,6 @@ class ConfigStore:
             return default_interaction_channels()
         if domain == "attribute_resolution_profiles":
             return default_attribute_resolution_profiles()
-        if domain == "slot_autofill_profiles":
-            return default_slot_autofill_profiles()
         if domain == "service_scenarios":
             return default_service_scenarios()
         if domain == "slot_schemas":
@@ -2749,11 +2779,6 @@ class ConfigStore:
                 for profile in normalized.get("profiles", [])
             ]
             self._assign_attribute_resolution_slot_schema_ids(normalized["profiles"])
-        elif domain == "slot_autofill_profiles":
-            normalized["profiles"] = [
-                normalize_slot_autofill_profile(profile)
-                for profile in normalized.get("profiles", [])
-            ]
         elif domain == "slot_schemas":
             for slot_schema in normalized.get("slot_schemas", []):
                 slot_schema.pop("scenario_id", None)
@@ -2984,12 +3009,6 @@ class ConfigStore:
             self.active_payload("attribute_resolution_profiles")["profiles"],
             "profile_id",
         )
-        slot_autofill_profiles = [
-            profile
-            for profile in self.active_payload("slot_autofill_profiles").get("profiles", [])
-            if profile.get("slot_schema_id") == scenario["slot_schema_id"]
-            and profile.get("enabled", True)
-        ]
         resolution_profile_ids = []
         if slot_schema:
             resolution_profile_ids = [
@@ -3024,14 +3043,6 @@ class ConfigStore:
                     profile = profile_by_id.get(profile_id or "")
                     if not profile:
                         missing.append(f"attribute_resolution_profile:{slot['slot_id']}")
-                if slot_fill_method(slot) == "slot_autofill":
-                    mapped = any(
-                        slot["slot_id"] == item.get("target_slot")
-                        for profile in slot_autofill_profiles
-                        for item in profile.get("output_mapping", [])
-                    )
-                    if not mapped:
-                        missing.append(f"slot_autofill_profile:{slot['slot_id']}")
             for launch in launches:
                 for required_slot_id in launch.get("required_slots", []):
                     if required_slot_id not in slot_ids:
@@ -3054,7 +3065,6 @@ class ConfigStore:
             "scenario": scenario,
             "slot_schema": slot_schema,
             "attribute_resolution_profiles": scenario_profiles,
-            "slot_autofill_profiles": slot_autofill_profiles,
             "route": route,
             "orchestrator_policy": policy,
             "tool_launch_matrix": tool_launch_matrix,
@@ -3275,7 +3285,7 @@ class ConfigStore:
             ),
             node(
                 "attribute_resolution",
-                "1. Разрешение атрибутов",
+                "1. Разрешение слотов",
                 x=460,
                 y=210,
                 step_number=1,
@@ -3590,294 +3600,6 @@ class ConfigStore:
             "top_routes": candidates[:top_limit],
         }
 
-    def _slot_candidate_value(
-        self,
-        *,
-        slot_id: str,
-        provided: dict[str, Any],
-        llm_result_by_slot: dict[str, dict[str, Any]],
-        autofill_values: dict[str, dict[str, Any]],
-        thresholds_by_slot: dict[str, dict[str, float]],
-    ) -> Any:
-        if slot_id in provided:
-            return provided[slot_id]
-        if slot_id in autofill_values:
-            return autofill_values[slot_id].get("value")
-        llm_result = llm_result_by_slot.get(slot_id)
-        if llm_result:
-            threshold = thresholds_by_slot.get(slot_id, DEFAULT_CONFIDENCE_THRESHOLDS)["min_extraction_confidence"]
-            if llm_result.get("value") is not None and llm_result.get("confidence", 0.0) >= threshold:
-                return llm_result.get("value")
-        return None
-
-    def _simulate_slot_autofill_profile(
-        self,
-        *,
-        profile: dict[str, Any],
-        provided: dict[str, Any],
-        llm_result_by_slot: dict[str, dict[str, Any]],
-        autofill_values: dict[str, dict[str, Any]],
-        thresholds_by_slot: dict[str, dict[str, float]],
-        simulation_options: dict[str, Any],
-        execution_trace: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        tool_by_name = self._by_id(self.active_payload("tools")["tools"], "tool_name")
-        endpoint_by_id = self._by_id(
-            self.active_payload("integration_endpoints")["endpoints"],
-            "endpoint_id",
-        )
-        tool = tool_by_name.get(profile.get("react_call", ""))
-        binding = (tool or {}).get("endpoint_bindings", [None])[0]
-        endpoint_id = (binding or {}).get("endpoint_id")
-        operation_id = (binding or {}).get("operation_id")
-        endpoint = endpoint_by_id.get(endpoint_id or "")
-        operation = (endpoint or {}).get("operations", {}).get(operation_id or "")
-        default_result = {
-            "profile_id": profile["profile_id"],
-            "profile_name": profile["display_name"],
-            "react_call": profile.get("react_call"),
-            "status": "pending",
-            "output_values": {},
-            "filled_slots": [],
-            "missing_parameters": [],
-            "missing_required_result_fields": [],
-            "missing_required_slots": [],
-            "result_summary": None,
-            "reason": "",
-        }
-        if not tool or not binding or not endpoint or not operation:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="ReAct-вызов или его привязка к endpoint-операции не найдены.",
-                details={"react_call": profile.get("react_call"), "endpoint_id": endpoint_id, "operation_id": operation_id},
-            )
-            return {**default_result, "status": "blocked_by_configuration", "reason": "ReAct-вызов автозаполнения не настроен."}
-        if tool.get("action_type") != "read_only":
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="Автозаполнение допускает только read-only ReAct-вызовы.",
-            )
-            return {**default_result, "status": "blocked_by_configuration", "reason": "ReAct-вызов не является read-only."}
-
-        adapter_type = endpoint.get("adapter_type")
-        if adapter_type == "mock" and not simulation_options["allow_mock_integrations"]:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="skipped",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="Mock-интеграции выключены в выбранном режиме тестового прогона.",
-                details={"endpoint_id": endpoint_id, "operation_id": operation_id},
-            )
-            return {**default_result, "status": "skipped", "reason": "Mock-интеграции выключены в выбранном режиме тестового прогона."}
-        if adapter_type != "mock" and not simulation_options["allow_readonly_integrations"]:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="skipped",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="Внешние read-only интеграции выключены в выбранном режиме тестового прогона.",
-                details={"endpoint_id": endpoint_id, "operation_id": operation_id},
-            )
-            return {**default_result, "status": "skipped", "reason": "Read-only интеграции выключены в выбранном режиме тестового прогона."}
-
-        parameters: dict[str, Any] = {}
-        missing_parameters: list[str] = []
-        required_parameters = set(tool.get("parameters_schema", {}).get("required", []))
-        for parameter, source_ref in profile.get("input_mapping", {}).items():
-            source, separator, source_value = str(source_ref).partition(":")
-            if separator != ":":
-                continue
-            value: Any = None
-            if source == "slot":
-                value = self._slot_candidate_value(
-                    slot_id=source_value,
-                    provided=provided,
-                    llm_result_by_slot=llm_result_by_slot,
-                    autofill_values=autofill_values,
-                    thresholds_by_slot=thresholds_by_slot,
-                )
-            elif source in {"case", "context"}:
-                value = f"{source}:{source_value}"
-            elif source == "constant":
-                value = source_value
-            elif source == "secret":
-                value = "секрет скрыт"
-            if value in (None, "") and parameter in required_parameters:
-                missing_parameters.append(parameter)
-            elif value not in (None, ""):
-                parameters[parameter] = value
-
-        if missing_parameters:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message=f"Не заполнены обязательные параметры ReAct-вызова: {', '.join(missing_parameters)}.",
-                details={
-                    "react_call": profile.get("react_call"),
-                    "endpoint_id": endpoint_id,
-                    "operation_id": operation_id,
-                    "parameters": parameters,
-                    "missing_parameters": missing_parameters,
-                    "result": {"status": "not_executed", "reason": "Не заполнены обязательные параметры ReAct-вызова."},
-                },
-            )
-            return {
-                **default_result,
-                "status": "missing_parameters",
-                "missing_parameters": missing_parameters,
-                "reason": "Не заполнены обязательные параметры ReAct-вызова автозаполнения.",
-            }
-
-        mock_output = copy.deepcopy(operation.get("mock_output") or {})
-        if not mock_output:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="В dry-run нет mock_output для ReAct-вызова автозаполнения.",
-                details={
-                    "react_call": profile.get("react_call"),
-                    "endpoint_id": endpoint_id,
-                    "operation_id": operation_id,
-                    "parameters": parameters,
-                    "result": {"status": "not_executed", "reason": "Для endpoint-операции не задан mock_output."},
-                },
-            )
-            return {**default_result, "status": "blocked_by_configuration", "reason": "Нет mock_output для dry-run."}
-
-        candidate_count = mock_output.get("candidate_count")
-        if candidate_count is None:
-            candidate_count = 1 if mock_output else 0
-        accept_policy = profile.get("accept_policy", "single_result")
-        if accept_policy == "single_result" and candidate_count != 1:
-            reason = "Операция не вернула результатов." if candidate_count == 0 else "Операция вернула несколько результатов."
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message=reason,
-                details={
-                    "react_call": profile.get("react_call"),
-                    "endpoint_id": endpoint_id,
-                    "operation_id": operation_id,
-                    "parameters": parameters,
-                    "result": mock_output,
-                    "candidate_count": candidate_count,
-                },
-            )
-            return {
-                **default_result,
-                "status": "ambiguous" if candidate_count > 1 else "no_result",
-                "result_summary": {"candidate_count": candidate_count, "source": f"{endpoint_id}/{operation_id}"},
-                "reason": reason,
-            }
-
-        output_values = {}
-        filled_slot_values = []
-        missing_required_result_fields = []
-        for item in profile.get("output_mapping", []):
-            value = value_at_path(mock_output, item["result_field"])
-            if is_missing_autofill_value(value):
-                if item.get("required_for_success"):
-                    missing_required_result_fields.append(
-                        {
-                            "result_field": item["result_field"],
-                            "target_slot": item["target_slot"],
-                        }
-                    )
-                continue
-            else:
-                output_values[item["target_slot"]] = value
-                filled_slot_values.append(
-                    {
-                        "result_field": item["result_field"],
-                        "target_slot": item["target_slot"],
-                        "value": value,
-                    }
-                )
-        if missing_required_result_fields:
-            missing_slots = sorted({item["target_slot"] for item in missing_required_result_fields})
-            append_trace(
-                execution_trace,
-                step="1",
-                status="blocked",
-                title=f"Автозаполнение слотов: {profile['display_name']}",
-                message="Не вернулись обязательные для профиля поля результата.",
-                details={
-                    "react_call": profile.get("react_call"),
-                    "endpoint_id": endpoint_id,
-                    "operation_id": operation_id,
-                    "parameters": parameters,
-                    "result": mock_output,
-                    "output_values": output_values,
-                    "filled_slot_values": filled_slot_values,
-                    "missing_required_result_fields": missing_required_result_fields,
-                    "output_slots": sorted(output_values),
-                    "candidate_count": candidate_count,
-                },
-            )
-            return {
-                **default_result,
-                "status": "missing_required_result_field",
-                "output_values": output_values,
-                "filled_slot_values": filled_slot_values,
-                "filled_slots": sorted(output_values),
-                "missing_required_result_fields": missing_required_result_fields,
-                "missing_required_slots": missing_slots,
-                "result_summary": {"candidate_count": candidate_count, "source": f"{endpoint_id}/{operation_id}"},
-                "reason": "Не вернулись поля результата, обязательные для успешного автозаполнения профиля.",
-            }
-        filled_summary = "; ".join(
-            f"{item['target_slot']} = {compact_trace_value(item['value'])} (из {item['result_field']})"
-            for item in filled_slot_values
-        )
-        append_trace(
-            execution_trace,
-            step="1",
-            status="completed" if output_values else "blocked",
-            title=f"Автозаполнение слотов: {profile['display_name']}",
-            message=(
-                f"ReAct-вызов {profile.get('react_call')} заполнил: {filled_summary}."
-                if filled_summary
-                else f"ReAct-вызов {profile.get('react_call')} не заполнил слоты."
-            ),
-            details={
-                "react_call": profile.get("react_call"),
-                "endpoint_id": endpoint_id,
-                "operation_id": operation_id,
-                "parameters": parameters,
-                "result": mock_output,
-                "output_values": output_values,
-                "filled_slot_values": filled_slot_values,
-                "output_slots": sorted(output_values),
-                "candidate_count": candidate_count,
-            },
-        )
-        return {
-            **default_result,
-            "status": "filled" if output_values else "no_result",
-            "output_values": output_values,
-            "filled_slot_values": filled_slot_values,
-            "filled_slots": sorted(output_values),
-            "result_summary": {"candidate_count": candidate_count, "source": f"{endpoint_id}/{operation_id}"},
-            "reason": (
-                "Значения получены из детерминированного ReAct-автозаполнения."
-                if output_values
-                else "Операция не вернула значений для выбранных слотов."
-            ),
-        }
-
     def simulate_attribute_resolution_profile(
         self,
         *,
@@ -3895,6 +3617,8 @@ class ConfigStore:
         default_result = {
             "profile_id": profile["profile_id"],
             "profile_name": profile["display_name"],
+            "use_llm_after_steps": bool(profile.get("use_llm_after_steps", True)),
+            "resolution_mode": "llm_rule" if profile.get("use_llm_after_steps", True) else "direct_mapping",
             "status": "question_required" if question else "resolution_pending",
             "decision": "ask_clarification" if question else "operator_handoff",
             "attempt": 1,
@@ -4143,7 +3867,16 @@ class ConfigStore:
                 "reason": result_summary.get("reason") or "Контракт результата операции неоднозначен.",
             }
         confidence = result_confidence(result_item, {"confidence_path": "confidence"})
-        if not simulation_options["allow_llm"]:
+        if not profile.get("use_llm_after_steps", True):
+            llm_decision = None
+            resolution_decision = direct_mapping_resolution_decision(
+                profile=profile,
+                result_item=result_item,
+                result_summary=result_summary,
+                count=count,
+                confidence=confidence,
+            )
+        elif not simulation_options["allow_llm"]:
             llm_decision = {
                 "decision": "await_llm_rule",
                 "status": "llm_resolution_pending",
@@ -4152,6 +3885,7 @@ class ConfigStore:
                 "next_question": question or human_policy["clarification_question"],
                 "reason": "Режим тестового прогона не разрешает выполнение LLM-правила разрешения атрибута.",
             }
+            resolution_decision = llm_decision
         else:
             llm_decision = simulated_llm_resolution_decision(
                 profile=profile,
@@ -4161,22 +3895,25 @@ class ConfigStore:
                 confidence=confidence,
                 effective_thresholds=effective_thresholds,
             )
-        output_values = llm_decision.get("filled_slots", {})
-        status = llm_decision.get("status", "question_required")
-        decision = llm_decision.get("decision", "ask_clarification")
-        reason = llm_decision.get("reason", "")
+            resolution_decision = llm_decision
+        output_values = resolution_decision.get("filled_slots", {})
+        status = resolution_decision.get("status", "question_required")
+        decision = resolution_decision.get("decision", "ask_clarification")
+        reason = resolution_decision.get("reason", "")
+        resolution_mode = "LLM-правила" if profile.get("use_llm_after_steps", True) else "прямого маппинга"
 
         append_trace(
             execution_trace,
             step="1",
             status="completed" if status == "filled" else "blocked",
             title=f"Разрешение атрибута: {profile['display_name']}",
-            message=f"Результатов обогащения: {count}; решение LLM-правила: {decision}.",
+            message=f"Результатов обогащения: {count}; решение {resolution_mode}: {decision}.",
             details={
                 "enrichment_steps": len(enrichment_steps),
                 "last_step_id": last_step.get("step_id"),
+                "resolution_mode": default_result["resolution_mode"],
                 "confidence": confidence,
-                "result": llm_decision,
+                "result": resolution_decision,
                 "output_slots": sorted(output_values),
             },
         )
@@ -4188,8 +3925,9 @@ class ConfigStore:
             "candidate_confidence": confidence,
             "enrichment_step_results": enrichment_step_results,
             "output_values": output_values,
+            "resolution_decision": resolution_decision,
             "llm_decision": llm_decision,
-            "pending_question": llm_decision.get("next_question") or question,
+            "pending_question": resolution_decision.get("next_question") or question,
             "result_summary": {
                 **result_summary,
                 "count": count,
@@ -4313,29 +4051,6 @@ class ConfigStore:
                 profile=profile,
                 include_profile=fill_method == "resolution_profile",
             )
-        autofill_values: dict[str, dict[str, Any]] = {}
-        slot_autofill_steps = []
-        for profile in sorted(detail.get("slot_autofill_profiles", []), key=lambda item: item.get("run_order", 999)):
-            profile_result = self._simulate_slot_autofill_profile(
-                profile=profile,
-                provided=provided,
-                llm_result_by_slot=llm_result_by_slot,
-                autofill_values=autofill_values,
-                thresholds_by_slot=thresholds_by_slot,
-                simulation_options=simulation_options,
-                execution_trace=execution_trace,
-            )
-            slot_autofill_steps.append(profile_result)
-            for slot_id, value in profile_result.get("output_values", {}).items():
-                if slot_id in provided:
-                    continue
-                autofill_values[slot_id] = {
-                    "value": value,
-                    "profile_id": profile["profile_id"],
-                    "profile_name": profile["display_name"],
-                    "react_call": profile.get("react_call"),
-                    "reason": profile_result.get("reason"),
-                }
         slot_values = {}
         missing_slots = []
         resolution_steps = []
@@ -4368,19 +4083,6 @@ class ConfigStore:
                     title=f"Слот {slot_id}",
                     message="Значение предоставлено оператором.",
                 )
-            elif slot_id in autofill_values:
-                autofill_value = autofill_values[slot_id]
-                slot_values[slot_id] = {
-                    "status": "filled_by_slot_autofill",
-                    "value": autofill_value.get("value"),
-                    "fill_method": fill_method,
-                    "source": "slot_autofill",
-                    "slot_autofill_profile_id": autofill_value.get("profile_id"),
-                    "react_call": autofill_value.get("react_call"),
-                    "reason": autofill_value.get("reason"),
-                    "effective_confidence_thresholds": effective_thresholds,
-                    **slot_source_summary(slot),
-                }
             elif fill_method == "resolution_profile":
                 profile_id = profile["profile_id"] if profile else slot.get("resolution_profile_id")
                 profile_result = None
@@ -4817,7 +4519,6 @@ class ConfigStore:
             "awaiting_client_response": bool(next_question),
             "operator_escalation": operator_escalation,
             "escalation_package": escalation_package if operator_escalation_required else None,
-            "slot_autofill": slot_autofill_steps,
             "attribute_resolution": resolution_steps,
             "resolution_state": resolution_state,
             "classification": classification,
@@ -5152,8 +4853,6 @@ class ConfigStore:
             return self._validate_interaction_channels(payload)
         if domain == "attribute_resolution_profiles":
             return self._validate_attribute_resolution_profiles(payload)
-        if domain == "slot_autofill_profiles":
-            return self._validate_slot_autofill_profiles(payload)
         if domain == "model_routing":
             return self._validate_model_routing(payload)
         if domain == "service_scenarios":
@@ -5191,7 +4890,6 @@ class ConfigStore:
                     self.active_payload("tool_launch_matrix"),
                     self.active_payload("attribute_resolution_profiles"),
                     self.active_payload("interaction_channels"),
-                    self.active_payload("slot_autofill_profiles"),
                 )
                 if refs:
                     errors.append(f"{tool_name} имеет contract_status=broken и используется: {', '.join(refs)}.")
@@ -5960,69 +5658,6 @@ class ConfigStore:
                 errors.append(f"{profile_id} fallback ask_user должен содержать question.")
         return errors
 
-    def _validate_slot_autofill_profiles(self, payload: dict[str, Any]) -> list[str]:
-        errors = []
-        profiles = payload.get("profiles", [])
-        profile_ids = [profile["profile_id"] for profile in profiles]
-        for profile_id in self._duplicates(profile_ids):
-            errors.append(f"Дублируется profile_id: {profile_id}")
-
-        slot_schema_by_id = self._by_id(
-            self.active_payload("slot_schemas")["slot_schemas"],
-            "slot_schema_id",
-        )
-        tool_by_name = self._by_id(self.active_payload("tools")["tools"], "tool_name")
-        for profile in profiles:
-            profile_id = profile["profile_id"]
-            slot_schema = slot_schema_by_id.get(profile["slot_schema_id"])
-            slot_ids = {slot["slot_id"] for slot in slot_schema.get("slots", [])} if slot_schema else set()
-            if not slot_schema:
-                errors.append(f"{profile_id} ссылается на неизвестную схему слотов: {profile['slot_schema_id']}")
-
-            tool = tool_by_name.get(profile.get("react_call"))
-            if not tool:
-                errors.append(f"{profile_id} ссылается на неизвестный ReAct-вызов: {profile.get('react_call')}")
-                result_field_roots: set[str] = set()
-                required_parameters: set[str] = set()
-            else:
-                if tool.get("action_type") != "read_only":
-                    errors.append(f"{profile_id} должен использовать только read-only ReAct-вызов.")
-                if not tool.get("endpoint_bindings"):
-                    errors.append(f"{profile_id} ReAct-вызов {tool.get('tool_name')} не имеет привязки операции.")
-                result_schema = tool.get("result_schema") or {}
-                result_field_roots = set(result_schema.get("properties", {}).keys())
-                required_parameters = set(tool.get("parameters_schema", {}).get("required", []))
-
-            mapped_parameters = set(profile.get("input_mapping", {}).keys())
-            for parameter in sorted(required_parameters - mapped_parameters):
-                errors.append(f"{profile_id} input_mapping не заполняет обязательный параметр ReAct-вызова: {parameter}")
-
-            for parameter, source_ref in profile.get("input_mapping", {}).items():
-                source, separator, value = str(source_ref).partition(":")
-                if separator != ":" or source not in {"slot", "case", "context", "constant", "secret"} or not value:
-                    errors.append(
-                        f"{profile_id} input_mapping.{parameter} должен быть ссылкой "
-                        "slot:<slot_id>, case:<path>, context:<path>, constant:<value> или secret:<ref>."
-                    )
-                    continue
-                if source == "slot" and slot_schema and value not in slot_ids:
-                    errors.append(f"{profile_id} input_mapping.{parameter} ссылается на неизвестный слот: {value}")
-
-            mapped_targets = [item["target_slot"] for item in profile.get("output_mapping", [])]
-            for target_slot in self._duplicates(mapped_targets):
-                errors.append(f"{profile_id} содержит дублирующийся целевой слот: {target_slot}")
-            for item in profile.get("output_mapping", []):
-                target_slot = item["target_slot"]
-                result_field = item["result_field"]
-                if slot_schema and target_slot not in slot_ids:
-                    errors.append(f"{profile_id} заполняет отсутствующий слот схемы {profile['slot_schema_id']}: {target_slot}")
-                root_field = result_field.split(".", 1)[0]
-                if result_field_roots and root_field not in result_field_roots:
-                    errors.append(
-                        f"{profile_id} output_mapping.{target_slot} ссылается на поле вне контракта результата: {result_field}"
-                    )
-        return errors
-
     def _validate_service_scenarios(self, payload: dict[str, Any]) -> list[str]:
         errors = []
         scenarios = payload["scenarios"]
@@ -6110,11 +5745,6 @@ class ConfigStore:
                 for profile in profile_by_id.values()
                 if profile.get("slot_schema_id") == schema["slot_schema_id"]
             ]
-            active_autofill_profiles = [
-                profile
-                for profile in self.active_payload("slot_autofill_profiles").get("profiles", [])
-                if profile.get("slot_schema_id") == schema["slot_schema_id"]
-            ]
             for slot in schema["slots"]:
                 fill_method = slot_fill_method(slot)
                 profile_id = slot.get("resolution_profile_id")
@@ -6152,14 +5782,6 @@ class ConfigStore:
                             errors.append(f"{schema['slot_schema_id']} slot {slot['slot_id']} ссылается на неизвестный profile_id: {profile_id}")
                         elif slot["slot_id"] not in [item["slot_id"] for item in profile.get("output_slots_order", [])]:
                             errors.append(f"{schema['slot_schema_id']} slot {slot['slot_id']} не входит в output_slots_order профиля {profile_id}.")
-            for profile in active_autofill_profiles:
-                for mapping in profile.get("output_mapping", []):
-                    target_slot = mapping.get("target_slot")
-                    if target_slot not in slot_by_id:
-                        errors.append(
-                            f"{schema['slot_schema_id']} профиль автозаполнения {profile['profile_id']} "
-                            f"заполняет отсутствующий slot: {target_slot}"
-                        )
             for slot_id in schema["required_slots"]:
                 slot = slot_by_id.get(slot_id)
                 if not slot:
@@ -6931,13 +6553,6 @@ def default_slot_schemas() -> dict[str, Any]:
     }
 
 
-def default_slot_autofill_profiles() -> dict[str, Any]:
-    return {
-        "schema_version": "1.0",
-        "profiles": [],
-    }
-
-
 def default_attribute_resolution_profiles() -> dict[str, Any]:
     def candidate_profile(
         profile_id: str,
@@ -7016,6 +6631,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
             "description": description,
             "slot_schema_id": slot_schema_id,
             "target_slot_id": target_slot_id,
+            "use_llm_after_steps": True,
             "enrichment_steps": enrichment_steps,
             "output_slots_order": normalize_output_slot_order(output_order, target_slot_id),
             "llm_resolution_script": {
@@ -7734,6 +7350,9 @@ def default_model_routing() -> dict[str, Any]:
             "context_length": openai_context_length if active_provider == "openai" else vllm_context_length,
             "rate_limits": {
                 "requests_per_minute": 60,
+            },
+            "system_prompts": {
+                "slot_resolution": DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE,
             },
         },
         "runtime": {

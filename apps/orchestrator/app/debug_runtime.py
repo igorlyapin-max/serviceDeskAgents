@@ -1272,11 +1272,6 @@ class DebugRuntime:
         slots = detail.get("slot_schema", {}).get("slots", [])
         generation = self._build_generated_ticket_text(detail, variant=variant, rng=rng)
         expected_slots = self._expected_slots_for_item(slots, generation, rng)
-        expected_autofill = self._expected_external_slots(
-            slots,
-            expected_slots,
-            fill_methods={"slot_autofill"},
-        )
         expected_resolution = self._expected_external_slots(
             slots,
             expected_slots,
@@ -1296,7 +1291,6 @@ class DebugRuntime:
             "text": generation["text"],
             "text_slots": generation["text_slots"],
             "expected_slots": expected_slots,
-            "expected_autofill": expected_autofill,
             "expected_resolution": expected_resolution,
             "generation_source": generation["source"],
             "generation_notes": generation["notes"],
@@ -1331,7 +1325,6 @@ class DebugRuntime:
                 "mentioned_person": "Иванову Ивану Ивановичу",
             },
             "expected_slots": {},
-            "expected_autofill": {},
             "expected_resolution": {},
             "generation_source": {
                 "type": "system_out_of_scope",

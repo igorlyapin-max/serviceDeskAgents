@@ -264,6 +264,29 @@ class ExternalEventsTest(unittest.TestCase):
         receipt = self.processing_store.external_event_receipt(event["idempotency_key"])
         self.assertEqual(receipt["result"]["external_event"]["result"]["api_token"], "параметр скрыт")
 
+    def test_external_event_redacts_tokens_inside_generic_strings(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(
+            wait,
+            status="progress",
+            event_id="evt-provider-generic-secret-progress",
+            result={
+                "message": "provider returned Bearer abcdefghijklmnopqrstuvwxyz012345",
+                "url": "https://provider.example/path?token=secret-token-value",
+            },
+        )
+
+        result = self.processing_store.record_external_event(event)
+
+        stored_result = result["external_event"]["result"]
+        self.assertIn("[REDACTED_TOKEN]", stored_result["message"])
+        self.assertIn("token=[REDACTED_SECRET]", stored_result["url"])
+
     def test_external_event_source_must_match_wait_source(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],

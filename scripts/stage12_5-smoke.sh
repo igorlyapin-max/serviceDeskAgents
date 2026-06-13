@@ -82,13 +82,18 @@ for expected_view in [
     'data-view="resolution"',
     'data-view="scenarioSlots"',
     'data-view="scenarioClassification"',
-    'data-view="scenarioReact"',
     'data-view="scenarioTools"',
-    'data-view="scenarioEscalation"',
+    'data-view="systemPrompts"',
 ]:
     assert expected_view in html, expected_view
-assert "1. Разрешение атрибутов" in html, html[:300]
+for removed_view in [
+    'data-view="scenarioReact"',
+    'data-view="scenarioEscalation"',
+]:
+    assert removed_view not in html, removed_view
+assert "1. Разрешение слотов" in html, html[:300]
 assert "0. Слоты" in html, html[:300]
+assert "Системные промпты" in html, html[:300]
 assert 'data-view="scenarioPrompts"' in html, html[:300]
 assert "6. Промпты" in html, html[:300]
 assert "Реестр промптов" not in html, html[:300]
@@ -102,6 +107,7 @@ for expected_renderer in [
     "renderScenarioReact",
     "renderScenarioTools",
     "renderScenarioEscalation",
+    "renderSystemPrompts",
 ]:
     assert expected_renderer in js, expected_renderer
 assert "renderScenarioPrompts" in js, js[:300]
@@ -121,6 +127,7 @@ for expected_form in [
     "escalation-delete",
     "prompt-pack-editor",
     "prompt-pack-delete",
+    "system-prompts-editor",
 ]:
     assert expected_form in js, expected_form
 for expected_slot_text in [
@@ -142,7 +149,7 @@ for expected_slot_text in [
     "Автопринятие от",
     "Минимум извлечения",
     "Значение уже есть в текущем обращении",
-    "Профиль разрешения атрибута",
+    "Профиль разрешения слота",
     "Сценарий для выбора слотов",
     "data-resolution-slot-scenario",
     "name=\"slot_schema_id\"",
@@ -177,6 +184,12 @@ for expected_slot_text in [
     "data-slot-fill-method",
     "data-endpoint-operations-section",
     "endpoint-operations-toggle",
+    "data-openapi-preview-panel",
+    "endpoint-openapi-apply",
+    "Применить импорт",
+    "Preview импорта",
+    "Contract URL",
+    "Execution URL",
     "Нельзя удалить: сначала уберите связи",
     "Входные параметры операции",
     "Поля ответа операции",
@@ -305,7 +318,7 @@ assert all(node["readonly"] is True for node in graph["nodes"]), graph
 titles = {node["title"] for node in graph["nodes"]}
 for expected_title in [
     "0. Слоты",
-    "1. Разрешение атрибутов",
+    "1. Разрешение слотов",
     "2. Классификация и маршрут",
     "3. ReAct-планирование",
     "4. ReAct-вызовы и матрица запуска",

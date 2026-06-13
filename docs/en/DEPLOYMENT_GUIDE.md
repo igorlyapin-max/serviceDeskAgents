@@ -25,8 +25,11 @@ POSTGRES_PORT=15432
 REDIS_PORT=16379
 KAFKA_PORT=19092
 KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
+KAFKA_API_VERSION=2.8.0
+TOOL_COMMAND_TOPIC=tool.commands
 N8N_PORT=5678
 ORCHESTRATOR_PORT=18088
+ORCHESTRATOR_PUBLIC_URL=http://127.0.0.1:18088
 LITELLM_PORT=4000
 VLLM_PORT=8000
 APP_ENV=local
@@ -139,6 +142,28 @@ In production, `/readyz` also reports that SQLite state DB is MVP storage and is
 
 `/readyz` returns HTTP `503` when `status=error`. For `status=degraded`, it returns `200` by default; set `READYZ_STRICT=true` if the load balancer must remove degraded instances.
 
+## Async Kafka Runtime
+
+For long-running n8n workflows, the orchestrator does not keep the HTTP request open. It writes a command to the outbox, the publisher sends it to Kafka, and a separate worker calls the n8n webhook.
+
+Publish pending outbox messages to Kafka once:
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime publish-once --limit 50
+# or
+PYTHON=.venv/bin/python make async-outbox-publish-once
+```
+
+Run the tool command worker:
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime worker --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
+# or
+PYTHON=.venv/bin/python make async-tool-worker
+```
+
+For the local stand, the default outbound n8n runbook command topic is `tool.commands`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
+
 ## Logging and Diagnostics
 
 The primary structured logging pipeline writes JSON events to stdout and to a second sink. For the MVP, the default second sink is a JSONL file:
@@ -214,6 +239,8 @@ The runtime uses a Kafka-ready outbox and the following topics:
 
 Topics must be managed by infrastructure. Application services must not create topics at startup.
 
+`tool.commands` is the default topic for outbound async ReAct calls and n8n runbook commands. The producer reads `processing_outbox`, publishes the envelope message to this topic and marks the outbox row as `published` only after Kafka confirms delivery. The worker commits a Kafka offset only after successful command processing or after a poison message is durably written to `dead-letter`.
+
 ## Long-Running Actions and External Events
 
 The platform owns the lifecycle of long waits. For scenarios such as "a provider email was sent, check again in an hour" or "n8n is running a long workflow", the runtime creates a `wait_state` with `case_id`, `wait_id`, `correlation_id`, expected `event_type`, `deadline_at` and `origin`.
@@ -228,6 +255,8 @@ Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 ```
 
 In local/dev, the shared `INTEGRATION_CALLBACK_TOKEN` is allowed. In shared/staging/production, use source-specific variables, for example `INTEGRATION_CALLBACK_TOKEN__N8N` for `POST /external-events/n8n`.
+
+For a long-running n8n runbook, the worker passes `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key` and operation business parameters to the webhook. n8n must not close or escalate the case directly: the result is returned only through `POST /external-events/n8n`.
 
 The event body must match the envelope contract in `contracts/integrations/external-event.schema.json`. Required fields are `event_id`, `case_id`, `correlation_id`, `source`, `event_type`, `status`, `received_at` and `idempotency_key`. Allowed statuses are `progress`, `success`, `error`, `timeout` and `cancelled`.
 

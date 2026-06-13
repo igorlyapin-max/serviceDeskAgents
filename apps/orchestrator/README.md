@@ -283,7 +283,7 @@ PYTHON=.venv/bin/python make stage12_7-check
 
 Этап 13.8 заменяет технические поля `l2_conditions` и `escalation_package` на `handoff_conditions` и `handoff_package`. Консоль администратора редактирует их чекбоксами, а backend не поддерживает старые поля.
 
-Этап 13.9 заменяет техническое поле `allowed_tool_classes` на `allowed_react_action_groups`. Блок `3. ReAct-планирование` редактирует группы действий и стоп-условия чекбоксами, а backend не поддерживает старое поле.
+Этап 13.9 заменяет техническое поле `allowed_tool_classes` на `allowed_react_action_groups`. Группы действий и стоп-условия остаются backend policy, а обычный редактор сценария показывает только лимит ReAct-итераций и порог ошибок ReAct-вызовов подряд до эскалации.
 
 ## Локальные команды этапа 13
 
@@ -312,3 +312,27 @@ PYTHON=.venv/bin/python make stage13-check
 - `GET /admin/n8n/workflows`
 
 В интерфейсе администратора используйте раздел `Изменения конфигурации`.
+
+## Async n8n через Kafka
+
+Долгие n8n runbook workflow запускаются без удержания HTTP request в orchestrator:
+
+```text
+ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> POST /external-events/n8n
+```
+
+Default topic исходящих команд: `tool.commands`. Локальный Kafka/Redpanda endpoint с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
+
+Worker передает n8n полный callback package в `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source` и `idempotency_key`.
+
+Опубликовать pending outbox batch:
+
+```bash
+PYTHON=.venv/bin/python make async-outbox-publish-once
+```
+
+Запустить worker команд:
+
+```bash
+PYTHON=.venv/bin/python make async-tool-worker
+```

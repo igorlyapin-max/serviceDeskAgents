@@ -138,9 +138,7 @@ const visibleLabels = {
   required: 'обязательный',
   resolution_pending: 'ожидает разрешения',
   skipped: 'пропущено',
-  slot_autofill: 'ReAct-автозаполнение',
   started: 'запущено',
-  filled_by_slot_autofill: 'заполнено ReAct-автозаполнением',
   missing_required_result_field: 'нет обязательного поля результата',
   needs_review: 'требуется эскалация',
   extraction_pending: 'ожидает извлечения',
@@ -235,7 +233,6 @@ const fillMethodLabels = {
   user_question: 'вопрос клиенту',
   case: 'из данных обращения',
   llm_extraction: 'извлечение моделью',
-  slot_autofill: 'ReAct-автозаполнение',
   resolution_profile: 'профиль разрешения',
   operator_manual: 'ручное заполнение оператором',
 };
@@ -907,25 +904,6 @@ function formatResolutionOutputSlots(rules = []) {
     .join('; ');
 }
 
-function formatMissingAutofillResultFields(fields = []) {
-  return formatList(fields, (item) => {
-    if (typeof item === 'string') return item;
-    const resultField = item.result_field || 'поле не задано';
-    const targetSlot = item.target_slot ? ` -> ${item.target_slot}` : '';
-    return `${resultField}${targetSlot}`;
-  });
-}
-
-function formatAutofillFilledSlots(item = {}) {
-  const filled = item.filled_slot_values || [];
-  if (filled.length) {
-    return filled
-      .map((slot) => `${slot.target_slot}: ${formatTraceInlineValue(slot.value)} <- ${slot.result_field}`)
-      .join('; ');
-  }
-  return formatOutputValues(item.output_values || {});
-}
-
 function formatDurationSeconds(seconds) {
   const value = Number(seconds || 0);
   if (!value) return 'нет ожидания';
@@ -1175,16 +1153,6 @@ function renderFiveStepView(detail, simulation, options = {}) {
     escapeHtml(item.pending_question || item.fallback?.question || item.fallback?.action || 'н/д'),
     escapeHtml(formatList(item.human_resolution_policy?.handoff_package)),
   ]);
-  const slotAutofillRows = (simulation?.slot_autofill || []).map((item) => [
-    escapeHtml(item.profile_name || item.profile_id),
-    escapeHtml(item.react_call || 'н/д'),
-    badge(item.status),
-    escapeHtml(formatAutofillFilledSlots(item)),
-    escapeHtml(formatList(item.filled_slots)),
-    escapeHtml(formatMissingAutofillResultFields(item.missing_required_result_fields)),
-    escapeHtml(item.result_summary?.source || 'н/д'),
-    escapeHtml(item.reason || 'н/д'),
-  ]);
   const classification = simulation?.classification || {};
   const topRouteRows = (classification.top_routes || []).map((item) => [
     escapeHtml(item.display_name || item.route_id),
@@ -1287,7 +1255,6 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
       </div>
       ${table(['Слот', 'Приоритет', 'Тип', 'Способ заполнения', 'Статус', 'Результат слота', 'Confidence', 'Причина'], slotRows)}
-      ${slotAutofillRows.length ? table(['Профиль автозаполнения', 'ReAct-вызов', 'Статус', 'Значения', 'Заполненные слоты', 'Нет обязательных полей', 'Источник', 'Причина'], slotAutofillRows) : ''}
       ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение dry-run', 'Результаты слотов', 'Выходные слоты', 'Вопрос клиенту', 'Пакет эскалации'], resolutionRows) : ''}`,
     ),
     stepBlock(
@@ -2158,7 +2125,6 @@ function renderSimulationExpectations(item) {
   return `
     <div class="simulation-expectations">
       ${debugExpectedBlock('В тексте заявки', item.text_slots)}
-      ${debugExpectedBlock('Ожидается из автозаполнения', item.expected_autofill)}
       ${debugExpectedBlock('Ожидается из разрешения атрибутов', item.expected_resolution)}
       <div class="simulation-expected-block">
         <div class="metric-label">Итог</div>

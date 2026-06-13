@@ -11,6 +11,7 @@ from typing import Any
 
 from .action_gates import DEFAULT_STATE_DB_PATH, utc_now
 from .cases import CaseNotFound, CaseStore
+from .privacy import redact_for_llm
 
 
 KAFKA_TOPICS = [
@@ -84,6 +85,8 @@ EXTERNAL_EVENT_WAIT_STATUS = {
     "cancelled": "cancelled",
 }
 WAIT_ORIGIN_KINDS = {"react_call", "client_question", "approval", "timer", "system_policy", "unknown"}
+DEFAULT_ASYNC_TOOL_COMMAND_TOPIC = "tool.commands"
+DEFAULT_EXTERNAL_EVENT_SOURCE = "n8n"
 SENSITIVE_ORIGIN_KEYWORDS = (
     "token",
     "password",
@@ -132,6 +135,10 @@ def new_wait_id() -> str:
 
 def new_message_id() -> str:
     return f"msg-{uuid.uuid4().hex[:12]}"
+
+
+def new_command_id() -> str:
+    return f"cmd-{uuid.uuid4().hex[:12]}"
 
 
 def parse_utc(value: str | None) -> datetime | None:
@@ -416,6 +423,108 @@ class ProcessingStore:
         )
         return wait
 
+    def enqueue_async_tool_command(
+        self,
+        invocation: dict[str, Any],
+        *,
+        expected_event_type: str,
+        source: str = DEFAULT_EXTERNAL_EVENT_SOURCE,
+        topic: str | None = None,
+        deadline_seconds: int | None = None,
+        reason: str | None = None,
+        callback_base_url: str | None = None,
+    ) -> dict[str, Any]:
+        case_id = invocation.get("case_id")
+        if not case_id:
+            raise ProcessingConflict("Асинхронный ReAct-вызов требует case_id.")
+        if invocation.get("adapter_type") != "n8n_webhook":
+            raise ProcessingConflict("Асинхронный worker сейчас поддерживает только adapter_type=n8n_webhook.")
+
+        command_topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        command_idempotency_key = f"{case_id}:tool_command:{invocation['invocation_id']}"
+        existing_message = self.outbox_message_by_idempotency_key(command_idempotency_key)
+        if existing_message:
+            existing_command = existing_message.get("payload") or {}
+            return {
+                "schema_version": "1.0",
+                "wait": self.require_wait(existing_command["wait_id"]),
+                "command": existing_command,
+                "duplicate": True,
+            }
+        wait = self.open_external_wait(
+            case_id,
+            source=source,
+            event_type=expected_event_type,
+            reason=reason or f"Ожидание результата ReAct-вызова {invocation.get('tool_name')}.",
+            wait_type="external_event_wait",
+            deadline_seconds=deadline_seconds,
+            correlation_id=command_idempotency_key,
+            origin={
+                "kind": "react_call",
+                "react_call": invocation.get("tool_name"),
+                "endpoint_id": invocation.get("endpoint_id"),
+                "operation_id": invocation.get("operation_id"),
+                "parameters": invocation.get("parameters", {}),
+            },
+        )
+        callback_url = self.external_event_callback_url(source, base_url=callback_base_url)
+        command_id = new_command_id()
+        command_invocation = copy.deepcopy(invocation)
+        command_invocation.setdefault("extensions", {})
+        command_invocation["extensions"]["async_callback"] = {
+            "source": source,
+            "callback_url": callback_url,
+            "case_id": wait["case_id"],
+            "ticket_id": wait["ticket_id"],
+            "run_id": wait["run_id"],
+            "wait_id": wait["wait_id"],
+            "correlation_id": wait["correlation_id"],
+            "event_type": expected_event_type,
+            "idempotency_key": command_idempotency_key,
+        }
+        self._prepare_async_invocation_for_storage(command_invocation)
+        command = {
+            "schema_version": "1.0",
+            "command_id": command_id,
+            "command_type": "async_tool_invocation",
+            "topic": command_topic,
+            "case_id": wait["case_id"],
+            "ticket_id": wait["ticket_id"],
+            "run_id": wait["run_id"],
+            "wait_id": wait["wait_id"],
+            "correlation_id": wait["correlation_id"],
+            "source": source,
+            "expected_event_type": expected_event_type,
+            "callback_url": callback_url,
+            "idempotency_key": command_idempotency_key,
+            "invocation": command_invocation,
+        }
+        outbox_message = self._enqueue(
+            command_topic,
+            wait["case_id"],
+            "async_tool_invocation_requested",
+            command,
+            idempotency_key=command["idempotency_key"],
+        )
+        if (outbox_message.get("payload") or {}).get("wait_id") != wait["wait_id"]:
+            raise ProcessingConflict(
+                f"Команда {command['idempotency_key']} уже связана с другим ожиданием."
+            )
+        return {
+            "schema_version": "1.0",
+            "wait": wait,
+            "command": command,
+            "duplicate": False,
+        }
+
+    def external_event_callback_url(self, source: str, *, base_url: str | None = None) -> str:
+        root = (
+            base_url
+            or os.getenv("ORCHESTRATOR_PUBLIC_URL")
+            or f"http://127.0.0.1:{os.getenv('ORCHESTRATOR_PORT', '18088')}"
+        )
+        return f"{root.rstrip('/')}/external-events/{source}"
+
     def external_event_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -688,6 +797,361 @@ class ProcessingStore:
             "schema_version": "1.0",
             "messages": [json.loads(row["payload_json"]) for row in rows],
         }
+
+    def outbox_message_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select payload_json
+                from processing_outbox
+                where idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
+    def claim_outbox_batch(
+        self,
+        *,
+        worker_id: str,
+        limit: int = 50,
+        lease_seconds: int = 60,
+        topics: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = min(max(limit, 1), 500)
+        now = utc_now()
+        locked_until = add_seconds(now, lease_seconds)
+        parameters: list[Any] = [now]
+        topic_clause = ""
+        if topics:
+            placeholders = ", ".join("?" for _ in topics)
+            topic_clause = f"and topic in ({placeholders})"
+            parameters.extend(topics)
+        parameters.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                select message_id, payload_json
+                from processing_outbox
+                where (
+                    status = 'pending'
+                    or (status = 'publishing' and locked_until is not null and locked_until < ?)
+                )
+                {topic_clause}
+                order by created_at asc, message_id asc
+                limit ?
+                """,
+                parameters,
+            ).fetchall()
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                message = json.loads(row["payload_json"])
+                message["status"] = "publishing"
+                message["locked_by"] = worker_id
+                message["locked_until"] = locked_until
+                message["updated_at"] = now
+                cursor = connection.execute(
+                    """
+                    update processing_outbox
+                    set status = 'publishing',
+                        locked_by = ?,
+                        locked_until = ?,
+                        updated_at = ?,
+                        payload_json = ?
+                    where message_id = ?
+                      and (
+                        status = 'pending'
+                        or (status = 'publishing' and locked_until is not null and locked_until < ?)
+                      )
+                    """,
+                    (
+                        worker_id,
+                        locked_until,
+                        now,
+                        self._to_json(message),
+                        row["message_id"],
+                        now,
+                    ),
+                )
+                if cursor.rowcount:
+                    claimed.append(message)
+        return claimed
+
+    def mark_outbox_published(self, message_id: str, *, worker_id: str | None = None) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select payload_json
+                from processing_outbox
+                where message_id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if not row:
+                raise ProcessingNotFound(message_id)
+            message = json.loads(row["payload_json"])
+            message["status"] = "published"
+            message["published_at"] = now
+            message["updated_at"] = now
+            message.pop("locked_by", None)
+            message.pop("locked_until", None)
+            worker_clause = "and locked_by = ?" if worker_id is not None else ""
+            parameters: list[Any] = [now, now, self._to_json(message), message_id]
+            if worker_id is not None:
+                parameters.append(worker_id)
+            cursor = connection.execute(
+                f"""
+                update processing_outbox
+                set status = 'published',
+                    locked_by = null,
+                    locked_until = null,
+                    published_at = ?,
+                    updated_at = ?,
+                    payload_json = ?
+                where message_id = ?
+                  and status = 'publishing'
+                  {worker_clause}
+                """,
+                parameters,
+            )
+            if not cursor.rowcount:
+                raise ProcessingConflict(f"Outbox message {message_id} больше не принадлежит publisher {worker_id}.")
+        return message
+
+    def mark_outbox_publish_failed(self, message_id: str, error: str, *, worker_id: str | None = None) -> dict[str, Any]:
+        now = utc_now()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select attempts, payload_json
+                from processing_outbox
+                where message_id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if not row:
+                raise ProcessingNotFound(message_id)
+            attempts = int(row["attempts"] or 0) + 1
+            message = json.loads(row["payload_json"])
+            message["status"] = "pending"
+            message["attempts"] = attempts
+            message["last_error"] = error[:1000]
+            message["updated_at"] = now
+            message.pop("locked_by", None)
+            message.pop("locked_until", None)
+            worker_clause = "and locked_by = ?" if worker_id is not None else ""
+            parameters = [attempts, error[:1000], now, self._to_json(message), message_id]
+            if worker_id is not None:
+                parameters.append(worker_id)
+            cursor = connection.execute(
+                f"""
+                update processing_outbox
+                set status = 'pending',
+                    locked_by = null,
+                    locked_until = null,
+                    attempts = ?,
+                    last_error = ?,
+                    updated_at = ?,
+                    payload_json = ?
+                where message_id = ?
+                  and status = 'publishing'
+                  {worker_clause}
+                """,
+                parameters,
+            )
+            if not cursor.rowcount:
+                raise ProcessingConflict(f"Outbox message {message_id} больше не принадлежит publisher {worker_id}.")
+        return message
+
+    def record_tool_command_result(
+        self,
+        result: dict[str, Any],
+        *,
+        case_id: str,
+        idempotency_key: str,
+    ) -> None:
+        self._enqueue(
+            "tool.results",
+            case_id,
+            "tool_command_result_recorded",
+            {
+                "case_id": case_id,
+                "tool_result": result,
+            },
+            idempotency_key=idempotency_key,
+        )
+
+    def verify_tool_command(self, command: dict[str, Any]) -> None:
+        wait = self.require_wait(command["wait_id"])
+        expected = {
+            "case_id": wait["case_id"],
+            "ticket_id": wait.get("ticket_id"),
+            "run_id": wait["run_id"],
+            "wait_id": wait["wait_id"],
+            "correlation_id": wait["correlation_id"],
+            "source": wait.get("channel_id"),
+            "expected_event_type": wait.get("expected_event_type"),
+        }
+        mismatched = [
+            key
+            for key, value in expected.items()
+            if value not in (None, "") and command.get(key) != value
+        ]
+        if mismatched:
+            raise ProcessingConflict(
+                f"tool command не совпадает с wait_state: {', '.join(sorted(mismatched))}."
+            )
+        message = self.outbox_message_by_idempotency_key(command["idempotency_key"])
+        if not message:
+            raise ProcessingNotFound(command["idempotency_key"])
+        if message.get("topic") != command.get("topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC):
+            raise ProcessingConflict("tool command topic не совпадает с outbox.")
+        stored_command = message.get("payload") or {}
+        for key in ("command_id", "case_id", "wait_id", "correlation_id", "idempotency_key"):
+            if stored_command.get(key) != command.get(key):
+                raise ProcessingConflict(f"tool command {key} не совпадает с persisted outbox payload.")
+
+    def tool_command_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select receipt_json
+                from tool_command_receipts
+                where idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return json.loads(row["receipt_json"]) if row else None
+
+    def begin_tool_command(self, command: dict[str, Any], *, worker_id: str) -> dict[str, Any]:
+        self.verify_tool_command(command)
+        existing = self.tool_command_receipt(command["idempotency_key"])
+        if existing:
+            return {
+                "schema_version": "1.0",
+                "duplicate": True,
+                "status": existing["status"],
+                "receipt": existing,
+            }
+        now = utc_now()
+        receipt = {
+            "schema_version": "1.0",
+            "idempotency_key": command["idempotency_key"],
+            "command_id": command["command_id"],
+            "case_id": command["case_id"],
+            "wait_id": command["wait_id"],
+            "correlation_id": command["correlation_id"],
+            "status": "processing",
+            "worker_id": worker_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                insert or ignore into tool_command_receipts (
+                    idempotency_key, command_id, case_id, wait_id, correlation_id,
+                    status, worker_id, receipt_json, created_at, updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receipt["idempotency_key"],
+                    receipt["command_id"],
+                    receipt["case_id"],
+                    receipt["wait_id"],
+                    receipt["correlation_id"],
+                    receipt["status"],
+                    receipt["worker_id"],
+                    self._to_json(receipt),
+                    now,
+                    now,
+                ),
+            )
+        if not cursor.rowcount:
+            existing = self.tool_command_receipt(command["idempotency_key"])
+            return {
+                "schema_version": "1.0",
+                "duplicate": True,
+                "status": (existing or {}).get("status", "processing"),
+                "receipt": existing,
+            }
+        return {
+            "schema_version": "1.0",
+            "duplicate": False,
+            "status": "processing",
+            "receipt": receipt,
+        }
+
+    def complete_tool_command(
+        self,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        receipt = {
+            "schema_version": "1.0",
+            "idempotency_key": command["idempotency_key"],
+            "command_id": command["command_id"],
+            "case_id": command["case_id"],
+            "wait_id": command["wait_id"],
+            "correlation_id": command["correlation_id"],
+            "status": "completed",
+            "worker_id": worker_id,
+            "result": result,
+            "updated_at": now,
+        }
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update tool_command_receipts
+                set status = 'completed',
+                    worker_id = ?,
+                    receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                  and status = 'processing'
+                """,
+                (worker_id, self._to_json(receipt), now, command["idempotency_key"]),
+            )
+        if not cursor.rowcount:
+            existing = self.tool_command_receipt(command["idempotency_key"])
+            if existing and existing.get("status") == "completed":
+                return existing
+            raise ProcessingConflict(f"tool command receipt не найден или уже завершен: {command['idempotency_key']}")
+        return receipt
+
+    def record_tool_command_dead_letter(
+        self,
+        command: dict[str, Any],
+        error: str,
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        dead_letter = {
+            "schema_version": "1.0",
+            "source_topic": command.get("topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC),
+            "event_type": "tool_command_failed",
+            "case_id": command.get("case_id", "unknown"),
+            "wait_id": command.get("wait_id"),
+            "correlation_id": command.get("correlation_id"),
+            "command_id": command.get("command_id"),
+            "idempotency_key": command.get("idempotency_key"),
+            "worker_id": worker_id,
+            "error": error[:1000],
+            "command": self._sanitize_external_event_payload(command),
+        }
+        self._enqueue(
+            "dead-letter",
+            str(command.get("case_id") or "unknown"),
+            "tool_command_failed",
+            dead_letter,
+            idempotency_key=f"{command.get('idempotency_key') or command.get('command_id')}:dead_letter",
+        )
+        return dead_letter
 
     def case_events(self, *, case_id: str | None = None, limit: int = 100) -> dict[str, Any]:
         where = ""
@@ -1289,7 +1753,7 @@ class ProcessingStore:
         payload: dict[str, Any],
         *,
         idempotency_key: str,
-    ) -> None:
+    ) -> dict[str, Any]:
         now = utc_now()
         message = {
             "schema_version": "1.0",
@@ -1300,16 +1764,18 @@ class ProcessingStore:
             "idempotency_key": idempotency_key,
             "status": "pending",
             "created_at": now,
+            "updated_at": now,
+            "attempts": 0,
             "payload": payload,
         }
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 insert or ignore into processing_outbox (
                     message_id, topic, message_key, event_type, status,
-                    idempotency_key, payload_json, created_at
+                    idempotency_key, payload_json, created_at, updated_at, attempts
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message["message_id"],
@@ -1320,8 +1786,23 @@ class ProcessingStore:
                     idempotency_key,
                     self._to_json(message),
                     now,
+                    now,
+                    0,
                 ),
             )
+            if cursor.rowcount:
+                return message
+            row = connection.execute(
+                """
+                select payload_json
+                from processing_outbox
+                where idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        if row:
+            return json.loads(row["payload_json"])
+        raise ProcessingConflict(f"Не удалось поставить outbox message: {idempotency_key}")
 
     def _append_case_event(
         self,
@@ -1477,6 +1958,19 @@ class ProcessingStore:
         }
 
     @staticmethod
+    def _prepare_async_invocation_for_storage(invocation: dict[str, Any]) -> None:
+        extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        secret_parameters = extensions.get("secret_operation_parameters")
+        if not isinstance(secret_parameters, dict):
+            return
+        operation_parameters = invocation.get("operation_parameters")
+        if not isinstance(operation_parameters, dict):
+            return
+        for parameter in secret_parameters:
+            if parameter in operation_parameters:
+                operation_parameters[parameter] = "параметр скрыт"
+
+    @staticmethod
     def _sanitize_external_event_payload(value: Any) -> Any:
         if isinstance(value, dict):
             result: dict[str, Any] = {}
@@ -1489,6 +1983,8 @@ class ProcessingStore:
             return result
         if isinstance(value, list):
             return [ProcessingStore._sanitize_external_event_payload(item) for item in value]
+        if isinstance(value, str):
+            return redact_for_llm(value).text
         return copy.deepcopy(value)
 
     @staticmethod
@@ -1708,6 +2204,7 @@ class ProcessingStore:
                 )
                 """
             )
+            self._ensure_outbox_columns(connection)
             connection.execute("create index if not exists idx_processing_outbox_topic on processing_outbox(topic)")
             connection.execute("create index if not exists idx_processing_outbox_key on processing_outbox(message_key)")
             connection.execute("create index if not exists idx_processing_outbox_status on processing_outbox(status)")
@@ -1737,6 +2234,58 @@ class ProcessingStore:
                 on external_event_receipts(correlation_id)
                 """
             )
+            connection.execute(
+                """
+                create table if not exists tool_command_receipts (
+                    idempotency_key text primary key,
+                    command_id text not null,
+                    case_id text not null,
+                    wait_id text not null,
+                    correlation_id text not null,
+                    status text not null,
+                    worker_id text,
+                    receipt_json text not null,
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_tool_command_receipts_case_id
+                on tool_command_receipts(case_id)
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_tool_command_receipts_wait_id
+                on tool_command_receipts(wait_id)
+                """
+            )
+
+    @staticmethod
+    def _ensure_outbox_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("pragma table_info(processing_outbox)").fetchall()
+        }
+        additions = {
+            "locked_by": "alter table processing_outbox add column locked_by text",
+            "locked_until": "alter table processing_outbox add column locked_until text",
+            "attempts": "alter table processing_outbox add column attempts integer not null default 0",
+            "last_error": "alter table processing_outbox add column last_error text",
+            "updated_at": "alter table processing_outbox add column updated_at text",
+        }
+        for name, statement in additions.items():
+            if name not in columns:
+                connection.execute(statement)
+        connection.execute(
+            """
+            update processing_outbox
+            set updated_at = created_at
+            where updated_at is null
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)

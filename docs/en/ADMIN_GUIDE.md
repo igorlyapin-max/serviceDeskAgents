@@ -7,12 +7,10 @@ The administrator console is used to configure and control the AI ServiceDesk Pl
 The administrator manages:
 
 - processing scenarios;
-- slots and slot autofill;
-- attribute resolution;
+- slots and slot resolution;
 - classification and routing;
-- ReAct planning;
 - ReAct calls and launch matrix;
-- decision and escalation rules;
+- ReAct limits, decision rules and escalation through scenario settings and backend policy;
 - prompt packs;
 - knowledge base;
 - models;
@@ -48,13 +46,13 @@ Processing-flow permissions:
 The `Processing Scenarios` area configures orchestrator behavior around five steps:
 
 - `0. Slots` - data structure that must be collected;
-- `0.1 Slot Autofill` - deterministic slot filling through read-only ReAct calls;
-- `1. Attribute Resolution` - context enrichment sequence and LLM decision rule;
+- `1. Slot Resolution` - ReAct enrichment steps, direct result mapping to slots, or an LLM decision rule after the steps;
 - `2. Classification and Route` - rules, confidence and ticket route;
-- `3. ReAct Planning` - iteration limits and stop conditions;
+- `Scenarios` - scenario links, ReAct iteration limit and consecutive ReAct-call error threshold before escalation;
 - `4. ReAct Calls and Launch Matrix` - scenario-available calls and launch mode;
-- `5. Decision and Escalation` - close and operator handoff conditions;
 - `6. Prompts` - prompt pack with mandatory system prompt blocks.
+
+The system prompt for slot resolution is edited under `Settings -> System Prompts`. ReAct planning and escalation policies remain backend configuration and are applied through scenario references.
 
 Scenario changes go through draft, validation, regression and activation. Active configuration changes only after successful activation.
 
@@ -136,8 +134,7 @@ Ticket flows are generated from scenarios as the source of truth. If a scenario 
 The ticket text generator uses slot `examples` first, then scenario description and extraction instructions. Technical expected values are not inserted into the customer message. They are displayed separately:
 
 - `In ticket text` - data that is actually present in the customer message;
-- `Expected from autofill` - values that should come from ReAct/autofill;
-- `Expected from attribute resolution` - values that should be produced by a resolution profile;
+- `Expected from slot resolution` - values that should be produced by a resolution profile through direct ReAct-step result mapping or an LLM rule after the steps;
 - `Expected result` - completion, wait, escalation or out-of-scope.
 
 After start, the console shows `Agent Outcome`. This is the business verdict above the technical runtime status:

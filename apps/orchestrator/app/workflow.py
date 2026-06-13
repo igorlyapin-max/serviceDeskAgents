@@ -107,6 +107,7 @@ class TicketWorkflow:
         feedback_store: FeedbackStore | None = None,
         case_store: CaseStore | None = None,
         config_store: ConfigStore | None = None,
+        processing_store: Any | None = None,
     ):
         self.contracts = contracts or ContractRegistry()
         self.config_store = config_store
@@ -123,6 +124,7 @@ class TicketWorkflow:
         self.knowledge_retriever = knowledge_retriever or KnowledgeRetriever(self.contracts)
         self.feedback_store = feedback_store or FeedbackStore(self.contracts)
         self.case_store = case_store or CaseStore(self.contracts)
+        self.processing_store = processing_store
         if self.config_store:
             self.apply_active_config()
 
@@ -212,6 +214,7 @@ class TicketWorkflow:
         approved_by_operator: bool = False,
         operator_id: str | None = None,
     ) -> dict[str, Any]:
+        preferred_launch = self._preferred_launch_for_action(action)
         invocation = self.tool_registry.build_invocation(
             action,
             policy_result,
@@ -219,7 +222,27 @@ class TicketWorkflow:
             ticket_id=ticket_id,
             approved_by_operator=approved_by_operator,
             operator_id=operator_id,
+            endpoint_id=preferred_launch.get("endpoint_id") if preferred_launch else None,
+            operation_id=preferred_launch.get("operation_id") if preferred_launch else None,
         )
+        completion_policy = self._completion_policy_for_invocation(action, invocation, preferred_launch=preferred_launch)
+        if self._should_enqueue_async_tool(invocation, completion_policy):
+            preflight_result = self.integration_dispatcher.preflight(invocation)
+            if preflight_result:
+                return {
+                    "invocation": invocation,
+                    "tool_result": preflight_result,
+                }
+            queued = self.processing_store.enqueue_async_tool_command(
+                invocation,
+                expected_event_type=completion_policy["expected_event_type"],
+                deadline_seconds=completion_policy.get("max_wait_seconds"),
+                reason=f"Ожидание результата ReAct-вызова {invocation['tool_name']}.",
+            )
+            return {
+                "invocation": queued["command"]["invocation"],
+                "tool_result": self._async_tool_queued_result(invocation, queued, completion_policy),
+            }
         result = self.integration_dispatcher.dispatch(invocation)
         return {
             "invocation": invocation,
@@ -320,6 +343,9 @@ class TicketWorkflow:
     def attach_config_store(self, config_store: ConfigStore) -> None:
         self.config_store = config_store
         self.apply_active_config()
+
+    def attach_processing_store(self, processing_store: Any) -> None:
+        self.processing_store = processing_store
 
     def apply_active_config(self) -> None:
         if not self.config_store:
@@ -886,6 +912,93 @@ class TicketWorkflow:
                 self.contracts.require_valid("tool_result", tool_result)
             results.append(tool_result)
         return results
+
+    def _completion_policy_for_invocation(
+        self,
+        action: dict[str, Any],
+        invocation: dict[str, Any],
+        *,
+        preferred_launch: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        extensions = action.get("extensions") or {}
+        completion_policy = extensions.get("completion_policy")
+        if isinstance(completion_policy, dict):
+            return copy.deepcopy(completion_policy)
+        if preferred_launch:
+            return copy.deepcopy(preferred_launch.get("completion_policy") or {"mode": "sync"})
+        return {"mode": "sync", "max_wait_seconds": 0, "timeout_action": "resume_agent"}
+
+    def _preferred_launch_for_action(self, action: dict[str, Any]) -> dict[str, Any] | None:
+        extensions = action.get("extensions") or {}
+        endpoint_id = extensions.get("endpoint_id")
+        operation_id = extensions.get("operation_id")
+        completion_policy = extensions.get("completion_policy")
+        if endpoint_id or operation_id or isinstance(completion_policy, dict):
+            launch = {
+                "tool_name": action["tool_name"],
+                "endpoint_id": endpoint_id,
+                "operation_id": operation_id,
+                "completion_policy": copy.deepcopy(completion_policy or {"mode": "sync"}),
+            }
+            return {key: value for key, value in launch.items() if value not in (None, "", {}, [])}
+        launch_id = extensions.get("launch_id")
+        if not self.config_store:
+            return None
+        active_matrix = self.config_store.active_payload("tool_launch_matrix")
+        for matrix in active_matrix.get("matrices", []):
+            for launch in matrix.get("launches", []):
+                if launch_id and launch.get("launch_id") != launch_id:
+                    continue
+                if launch.get("tool_name") != action["tool_name"]:
+                    continue
+                if launch.get("completion_policy", {}).get("mode") == "external_event":
+                    return copy.deepcopy(launch)
+                if launch_id:
+                    return copy.deepcopy(launch)
+        return None
+
+    def _should_enqueue_async_tool(self, invocation: dict[str, Any], completion_policy: dict[str, Any]) -> bool:
+        return (
+            invocation.get("adapter_type") == "n8n_webhook"
+            and completion_policy.get("mode") == "external_event"
+            and bool(completion_policy.get("expected_event_type"))
+            and self.processing_store is not None
+        )
+
+    def _async_tool_queued_result(
+        self,
+        invocation: dict[str, Any],
+        queued: dict[str, Any],
+        completion_policy: dict[str, Any],
+    ) -> dict[str, Any]:
+        wait = queued["wait"]
+        command = queued["command"]
+        result = IntegrationDispatcher._base_result(
+            invocation,
+            "success",
+            output={
+                "runbook_status": "queued",
+                "message": "Асинхронный ReAct-вызов поставлен в очередь выполнения.",
+            },
+            extensions={
+                "mock": False,
+                "async_wait": {
+                    "wait_id": wait["wait_id"],
+                    "run_id": wait["run_id"],
+                    "correlation_id": wait["correlation_id"],
+                    "event_type": command["expected_event_type"],
+                    "callback_url": command["callback_url"],
+                    "command_id": command["command_id"],
+                    "topic": command["topic"],
+                    "completion_policy": copy.deepcopy(completion_policy),
+                },
+            },
+        )
+        binding = self.tool_registry.resolve(invocation["tool_name"])
+        result = IntegrationDispatcher._with_trace(result, invocation, binding)
+        self.contracts.require_valid("tool_result", result)
+        self.tool_registry.validate_result(result)
+        return result
 
     @staticmethod
     def _build_tool_trace(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
