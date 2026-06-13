@@ -333,6 +333,8 @@ Default topic входящих внешних результатов: `external.
 PYTHON=.venv/bin/python make async-external-event-worker
 ```
 
+Kafka consumer workers (`async-tool-worker` и `async-external-event-worker`) работают как long-running процессы. Для ручной диагностики можно добавить `--limit N` к прямому module-запуску.
+
 `completion_policy.result_transport` задает ожидаемый транспорт результата:
 
 - `http_callback` - n8n вызывает `callback_url`;

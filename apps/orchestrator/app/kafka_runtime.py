@@ -649,7 +649,7 @@ def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingSt
 def main() -> None:
     parser = argparse.ArgumentParser(description="ServiceDeskAgents Kafka async runtime")
     parser.add_argument("mode", choices=["publish-once", "worker", "external-event-worker"])
-    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--limit", type=int)
     parser.add_argument("--topic")
     args = parser.parse_args()
 
@@ -657,10 +657,11 @@ def main() -> None:
     validate_startup_environment()
     contracts, config_store, processing_store, dispatcher = build_default_runtime()
     if args.mode == "publish-once":
+        publish_limit = args.limit if args.limit is not None else 50
         result = OutboxPublisher(
             processing_store,
             JsonKafkaProducer(),
-        ).publish_batch(limit=args.limit)
+        ).publish_batch(limit=publish_limit)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
 

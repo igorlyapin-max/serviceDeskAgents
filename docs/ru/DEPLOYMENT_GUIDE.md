@@ -140,7 +140,7 @@ http://127.0.0.1:18088/metrics  # Prometheus-совместимые технич
 
 Для долгих n8n workflow оркестратор не держит HTTP-запрос открытым. Он пишет команду в outbox, publisher отправляет ее в Kafka, а отдельный worker вызывает n8n webhook.
 
-Опубликовать pending outbox сообщения в Kafka один раз:
+Опубликовать pending outbox сообщения в Kafka один раз. Это batch-команда; без явного `--limit` Makefile использует `${OUTBOX_PUBLISH_LIMIT:-50}`:
 
 ```bash
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime publish-once --limit 50
@@ -148,7 +148,7 @@ http://127.0.0.1:18088/metrics  # Prometheus-совместимые технич
 PYTHON=.venv/bin/python make async-outbox-publish-once
 ```
 
-Запустить worker команд инструментов:
+Запустить постоянный worker команд инструментов:
 
 ```bash
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime worker --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
@@ -156,7 +156,17 @@ PYTHON=.venv/bin/python make async-outbox-publish-once
 PYTHON=.venv/bin/python make async-tool-worker
 ```
 
-Для локального стенда default topic исходящих команд n8n runbook: `tool.commands`. Доступ к Kafka с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
+Запустить постоянный inbound worker результатов из Kafka:
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime external-event-worker --topic ${EXTERNAL_EVENT_TOPIC:-external.events}
+# или
+PYTHON=.venv/bin/python make async-external-event-worker
+```
+
+Для локального стенда default topic исходящих команд n8n runbook: `tool.commands`; default topic входящих external events: `external.events`. Доступ к Kafka с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
+
+`worker` и `external-event-worker` работают как long-running consumer-процессы и не завершаются по счетчику сообщений, если `--limit` не указан. Для ручной диагностики можно добавить `--limit N`, например обработать только первые 3 сообщения. В production запускайте эти процессы под supervisor, systemd или container restart policy.
 
 `/metrics` по умолчанию доступен только с loopback IP (`127.0.0.1`, `::1`). Для внешнего Prometheus укажите допустимые адреса или CIDR в `METRICS_ALLOWED_IPS`.
 

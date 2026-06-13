@@ -146,7 +146,7 @@ In production, `/readyz` also reports that SQLite state DB is MVP storage and is
 
 For long-running n8n workflows, the orchestrator does not keep the HTTP request open. It writes a command to the outbox, the publisher sends it to Kafka, and a separate worker calls the n8n webhook.
 
-Publish pending outbox messages to Kafka once:
+Publish pending outbox messages to Kafka once. This is a batch command; without an explicit `--limit`, the Makefile uses `${OUTBOX_PUBLISH_LIMIT:-50}`:
 
 ```bash
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime publish-once --limit 50
@@ -154,7 +154,7 @@ Publish pending outbox messages to Kafka once:
 PYTHON=.venv/bin/python make async-outbox-publish-once
 ```
 
-Run the tool command worker:
+Run the long-running tool command worker:
 
 ```bash
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime worker --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
@@ -162,7 +162,17 @@ Run the tool command worker:
 PYTHON=.venv/bin/python make async-tool-worker
 ```
 
-For the local stand, the default outbound n8n runbook command topic is `tool.commands`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
+Run the long-running inbound Kafka result worker:
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime external-event-worker --topic ${EXTERNAL_EVENT_TOPIC:-external.events}
+# or
+PYTHON=.venv/bin/python make async-external-event-worker
+```
+
+For the local stand, the default outbound n8n runbook command topic is `tool.commands`; the default inbound external event topic is `external.events`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
+
+`worker` and `external-event-worker` run as long-running consumer processes and do not stop after a message count unless `--limit` is provided. For manual diagnostics, add `--limit N`, for example to process only the first 3 messages. In production, run these processes under a supervisor, systemd or a container restart policy.
 
 ## Logging and Diagnostics
 

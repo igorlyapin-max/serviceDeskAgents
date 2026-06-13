@@ -44,6 +44,8 @@ Direct module forms:
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime external-event-worker --topic ${EXTERNAL_EVENT_TOPIC:-external.events}
 ```
 
+`publish-once` is a bounded batch command. `worker` and `external-event-worker` are long-running consumers by default; add `--limit N` only for manual diagnostics or tests.
+
 ## n8n Runbook Payload
 
 The async worker passes a normal n8n webhook payload with the full `invocation` plus operation parameters. Runbook workflows should read the correlation package from:
