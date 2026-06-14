@@ -960,6 +960,42 @@
           "contract_status": "valid"
         }
       }
+    },
+    {
+      "endpoint_id": "operu_it_servicedesk",
+      "adapter_type": "queue",
+      "display_name": "Kafka-канал Сервисдеск ОПЕРУ.ИТ",
+      "enabled": false,
+      "disabled_reason": "Технический профиль логического канала Сервисдеск. Topics и HMAC настраиваются администратором; AD/SAP/Kafka команды из AsyncAPI не импортируются как ReAct-вызовы.",
+      "auth": {
+        "type": "none"
+      },
+      "extensions": {
+        "transport_security": {
+          "kafka": {
+            "policy": "admin_configured",
+            "bootstrap_servers_env": "KAFKA_BOOTSTRAP_SERVERS",
+            "security_protocol_env": "KAFKA_SECURITY_PROTOCOL",
+            "supported_security_protocols": [
+              "SASL_SSL",
+              "SSL"
+            ],
+            "supported_auth": [
+              "sasl",
+              "mtls"
+            ]
+          }
+        },
+        "topic_profile": {
+          "task_topic_template": "public.ittask.serviceDesk{agent_type}.task",
+          "result_topic": "public.ittask.result",
+          "invalid_topic": "public.ittask.invalid",
+          "temp_password_topic": "public.ittask.temp_password",
+          "message_key_parameter": "task_key",
+          "hmac_required": true
+        }
+      },
+      "operations": {}
     }
   ]
 }

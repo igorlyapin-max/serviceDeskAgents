@@ -71,6 +71,27 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
                 ],
             )
 
+    def test_duplicate_channel_parameters_are_rejected_before_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            payload = store.active_payload("interaction_channels")
+            channel = next(item for item in payload["channels"] if item["channel_id"] == "service_desk")
+            existing = channel["channel_parameters"][0]
+            channel["channel_parameters"].append(
+                {
+                    **existing,
+                    "display_name": "Дубль параметра",
+                }
+            )
+
+            validation = store.validate_payload("interaction_channels", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(
+            any("дублирующийся параметр канала" in error for error in validation["errors"]),
+            validation["errors"],
+        )
+
     def test_legacy_slot_schema_timeouts_are_normalized_out(self) -> None:
         legacy_payload = default_slot_schemas()
         legacy_payload["slot_schemas"][0]["timeouts"] = {

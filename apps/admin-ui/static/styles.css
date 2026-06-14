@@ -621,8 +621,39 @@ label {
 
 .scenario-editor-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.config-draft-status {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.35;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.config-draft-status[data-type="success"] {
+  background: rgba(21, 128, 61, 0.08);
+  border-color: rgba(21, 128, 61, 0.35);
+  color: #166534;
+}
+
+.config-draft-status[data-type="error"] {
+  background: rgba(180, 35, 24, 0.08);
+  border-color: rgba(180, 35, 24, 0.35);
+  color: #b42318;
+}
+
+.config-draft-status[data-type="info"] {
+  background: rgba(8, 111, 184, 0.08);
+  border-color: rgba(8, 111, 184, 0.35);
+  color: #075985;
 }
 
 .processing-split {

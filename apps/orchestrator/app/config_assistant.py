@@ -390,6 +390,9 @@ def _template_reference_errors(
                 f"Ссылка ${{{ref}}} использует устаревший тип entity. "
                 "Используйте ${step.<step_id>.react.<react_call>.output.<field>}."
             )
+        elif parts[0] == "channel":
+            if len(parts) < 3:
+                errors.append(f"Ссылка ${{{ref}}} должна иметь формат ${{channel.<channel_id>.<parameter>}}.")
         elif parts[0] == "step":
             parsed_step = _template_step_ref(ref)
             if not parsed_step:

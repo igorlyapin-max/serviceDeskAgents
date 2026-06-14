@@ -69,6 +69,7 @@ SENSITIVE_REF_PARTS = {
     "секрет",
     "токен",
 }
+CHANNEL_SAFE_KEY_FIELDS = {"task_key", "message_key", "message_key_parameter"}
 
 
 def template_refs(text: str | None) -> list[str]:
@@ -128,6 +129,7 @@ class ExecutionReferenceContext:
     output_slot_ids: set[str] = field(default_factory=set)
     tools_by_name: dict[str, dict[str, Any]] = field(default_factory=dict)
     steps_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    channel_fields_by_id: dict[str, set[str]] = field(default_factory=dict)
     allowed_step_ids: set[str] | None = None
     case_fields: set[str] = field(default_factory=lambda: set(DEFAULT_CASE_FIELDS))
     wait_fields: set[str] = field(default_factory=lambda: set(DEFAULT_WAIT_FIELDS))
@@ -144,6 +146,7 @@ def build_execution_reference_context(
     tools: list[dict[str, Any]] | None = None,
     steps: list[dict[str, Any]] | None = None,
     allowed_steps: list[dict[str, Any]] | None = None,
+    channels: list[dict[str, Any]] | None = None,
 ) -> ExecutionReferenceContext:
     source_slots = slots if slots is not None else (slot_schema or {}).get("slots", [])
     step_items = list(steps or [])
@@ -165,8 +168,32 @@ def build_execution_reference_context(
             str(step.get("step_id") or f"step{index}"): step
             for index, step in enumerate(step_items, start=1)
         },
+        channel_fields_by_id={
+            str(channel.get("channel_id")): channel_reference_fields(channel)
+            for channel in channels or []
+            if channel.get("channel_id")
+        },
         allowed_step_ids=allowed_step_ids,
     )
+
+
+def channel_reference_fields(channel: dict[str, Any]) -> set[str]:
+    fields = {
+        "channel_id",
+        "display_name",
+        "mode",
+    }
+    technical_profile = channel.get("technical_profile")
+    if isinstance(technical_profile, dict):
+        fields.update(
+            str(key)
+            for key in technical_profile
+            if key and not _is_sensitive_ref(str(key))
+        )
+    for parameter in channel.get("channel_parameters", []):
+        if isinstance(parameter, dict) and parameter.get("parameter_id"):
+            fields.add(str(parameter["parameter_id"]))
+    return fields
 
 
 def _path_label(path: str) -> str:
@@ -250,6 +277,17 @@ def validate_template_refs(
             elif wait_field not in context.wait_fields:
                 errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестное поле ожидания: {wait_field}.")
             continue
+        if namespace == "channel":
+            channel_id = parts[1] if len(parts) > 1 else ""
+            channel_field = parts[2] if len(parts) > 2 else ""
+            channel_fields = context.channel_fields_by_id.get(channel_id)
+            if not channel_id or channel_fields is None:
+                errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестный канал: {channel_id or 'н/д'}.")
+            elif not channel_field:
+                errors.append(f"{label}: ссылка ${{{ref}}} должна указывать channel.<channel_id>.<parameter>.")
+            elif channel_field not in channel_fields:
+                errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестный параметр канала {channel_id}: {channel_field}.")
+            continue
         if namespace == "stage":
             stage_id = parts[1] if len(parts) > 1 else ""
             field_name = parts[2] if len(parts) > 2 else ""
@@ -327,6 +365,10 @@ def _is_sensitive_ref(ref: str) -> bool:
     return any(part in normalized for part in SENSITIVE_REF_PARTS)
 
 
+def _is_sensitive_channel_field(ref: str) -> bool:
+    return _is_sensitive_ref(ref) and ref not in CHANNEL_SAFE_KEY_FIELDS
+
+
 def _compact_public_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -351,11 +393,86 @@ def _lookup_path(value: Any, path: list[str]) -> Any:
     return current
 
 
+def _first_wait_correlation(planned_waits: list[dict[str, Any]]) -> str | None:
+    for wait in planned_waits:
+        if isinstance(wait, dict) and wait.get("correlation_id"):
+            return str(wait["correlation_id"])
+    return None
+
+
+def _channel_source_value(
+    source: str,
+    technical_profile: dict[str, Any],
+    planned_waits: list[dict[str, Any]],
+) -> Any:
+    source = str(source or "").strip()
+    if source.startswith("technical_profile."):
+        return _lookup_path(technical_profile, source.split(".")[1:])
+    if source == "kafka.message_key":
+        return _first_wait_correlation(planned_waits)
+    if source == "public.ittask.invalid":
+        return technical_profile.get("invalid_topic")
+    if source == "TaskTemp_PasswordMsg.personalID":
+        return None
+    if source == "TaskResultCode":
+        return None
+    if source == "TaskResultMessage":
+        return None
+    return None
+
+
+def build_channel_variable_context(
+    interaction_channel: dict[str, Any] | None,
+    planned_waits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(interaction_channel, dict):
+        return {}
+    channel_id = str(interaction_channel.get("channel_id") or "").strip()
+    if not channel_id:
+        return {}
+    technical_profile = interaction_channel.get("technical_profile") or {}
+    if not isinstance(technical_profile, dict):
+        technical_profile = {}
+
+    values: dict[str, Any] = {}
+    for field in ("channel_id", "display_name", "mode"):
+        if interaction_channel.get(field) not in (None, "", [], {}):
+            values[field] = copy.deepcopy(interaction_channel[field])
+    for field, value in technical_profile.items():
+        if value not in (None, "", [], {}) and not _is_sensitive_channel_field(str(field)):
+            values[str(field)] = copy.deepcopy(value)
+
+    correlation_id = _first_wait_correlation(planned_waits)
+    if correlation_id:
+        values.setdefault("task_key", correlation_id)
+        values.setdefault("task_number", correlation_id)
+
+    for parameter in interaction_channel.get("channel_parameters", []):
+        if not isinstance(parameter, dict):
+            continue
+        parameter_id = str(parameter.get("parameter_id") or "").strip()
+        if not parameter_id or parameter.get("secret") or _is_sensitive_channel_field(parameter_id):
+            continue
+        value = _channel_source_value(str(parameter.get("source") or ""), technical_profile, planned_waits)
+        if value not in (None, "", [], {}):
+            values[parameter_id] = copy.deepcopy(value)
+
+    return {"channel": {channel_id: values}} if values else {}
+
+
 def resolve_template_ref(ref: str, values: dict[str, Any]) -> Any:
     parts = [part for part in ref.split(".") if part]
-    if not parts or _is_sensitive_ref(ref):
+    if not parts:
         return None
     namespace = parts[0]
+    if namespace == "channel":
+        channel_id = parts[1] if len(parts) > 1 else ""
+        field_name = parts[2] if len(parts) > 2 else ""
+        if _is_sensitive_ref(ref) and field_name not in {"task_key", "message_key", "message_key_parameter"}:
+            return None
+        return _lookup_path((values.get("channel") or {}).get(channel_id), parts[2:])
+    if _is_sensitive_ref(ref):
+        return None
     if namespace in {"slot", "output"}:
         slot_id = ".".join(parts[1:])
         slot_value = (values.get(namespace) or values.get("slot") or {}).get(slot_id)
@@ -397,8 +514,9 @@ def build_simulation_variable_context(
     planned_waits: list[dict[str, Any]],
     final_decision: str,
     agent_outcome: dict[str, Any] | None = None,
+    interaction_channel: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    context = {
         "case": {
             "scenario_id": scenario_id,
             "input_text": input_text,
@@ -433,3 +551,5 @@ def build_simulation_variable_context(
         },
         "wait": copy.deepcopy(planned_waits[0] if planned_waits else {}),
     }
+    context.update(build_channel_variable_context(interaction_channel, planned_waits))
+    return context

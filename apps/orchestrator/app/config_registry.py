@@ -95,6 +95,29 @@ DEFAULT_CLIENT_WAITING_POLICY = {
 }
 
 DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC = "external.events"
+DEFAULT_SERVICEDESK_TASK_TOPIC_TEMPLATE = "public.ittask.serviceDesk{agent_type}.task"
+DEFAULT_SERVICEDESK_AGENT_TYPE = "Default"
+
+DEFAULT_CHANNEL_CAPABILITIES = {
+    "supports_client_questions": True,
+    "supports_operator_questions": True,
+    "supports_work_order_creation": True,
+    "supports_async_result": False,
+}
+
+DEFAULT_SERVICEDESK_CHANNEL_CAPABILITIES = {
+    "supports_client_questions": False,
+    "supports_operator_questions": False,
+    "supports_work_order_creation": True,
+    "supports_async_result": True,
+}
+
+DEFAULT_DEBUG_CHANNEL_CAPABILITIES = {
+    "supports_client_questions": False,
+    "supports_operator_questions": False,
+    "supports_work_order_creation": False,
+    "supports_async_result": False,
+}
 
 AGENT_OUTCOME_LABELS = {
     "success": "Завершено автоматически",
@@ -1107,6 +1130,178 @@ def normalize_channel_waiting_policy(
         ]
     result["auto_close_requires_client_confirmation"] = bool(result["auto_close_requires_client_confirmation"])
     result["pause_sla_on_client_wait"] = bool(result["pause_sla_on_client_wait"])
+    return result
+
+
+def channel_capability_defaults(channel_id: str | None, mode: str | None) -> dict[str, bool]:
+    if channel_id == "service_desk":
+        return copy.deepcopy(DEFAULT_SERVICEDESK_CHANNEL_CAPABILITIES)
+    if mode == "debug":
+        return copy.deepcopy(DEFAULT_DEBUG_CHANNEL_CAPABILITIES)
+    result = copy.deepcopy(DEFAULT_CHANNEL_CAPABILITIES)
+    result["supports_client_questions"] = mode == "online_interactive"
+    result["supports_operator_questions"] = mode == "offline_interactive"
+    result["supports_work_order_creation"] = mode == "offline_interactive"
+    result["supports_async_result"] = False
+    return result
+
+
+def normalize_channel_capabilities(
+    capabilities: dict[str, Any] | None,
+    *,
+    channel_id: str | None = None,
+    mode: str | None = None,
+) -> dict[str, bool]:
+    result = channel_capability_defaults(channel_id, mode)
+    for key in result:
+        if capabilities and key in capabilities:
+            result[key] = bool(capabilities[key])
+    return result
+
+
+def render_channel_task_topic(template: str | None, agent_type: str | None) -> str:
+    topic_template = template or DEFAULT_SERVICEDESK_TASK_TOPIC_TEMPLATE
+    return topic_template.replace("{agent_type}", agent_type or DEFAULT_SERVICEDESK_AGENT_TYPE)
+
+
+def normalize_channel_technical_profile(
+    profile: dict[str, Any] | None,
+    *,
+    channel_id: str | None = None,
+) -> dict[str, Any]:
+    result = copy.deepcopy(profile or {})
+    if channel_id == "service_desk":
+        result.setdefault("transport", "kafka")
+        result.setdefault("endpoint_id", "operu_it_servicedesk")
+        result.setdefault("agent_type", DEFAULT_SERVICEDESK_AGENT_TYPE)
+        result.setdefault("task_topic_template", DEFAULT_SERVICEDESK_TASK_TOPIC_TEMPLATE)
+        result.setdefault("result_topic", "public.ittask.result")
+        result.setdefault("invalid_topic", "public.ittask.invalid")
+        result.setdefault("temp_password_topic", "public.ittask.temp_password")
+        result.setdefault("message_key_parameter", "task_key")
+        result.setdefault("hmac_required", True)
+    else:
+        result.setdefault("transport", "none")
+    if result.get("transport") == "kafka":
+        result["task_topic"] = render_channel_task_topic(
+            result.get("task_topic_template"),
+            result.get("agent_type"),
+        )
+    else:
+        result.pop("task_topic", None)
+    return result
+
+
+def default_channel_parameters(channel_id: str | None) -> list[dict[str, Any]]:
+    if channel_id != "service_desk":
+        return []
+    return [
+        {
+            "parameter_id": "agent_type",
+            "display_name": "Тип агента",
+            "direction": "input",
+            "source": "technical_profile.agent_type",
+            "description": "Тип агента ServiceDesk, который подставляется в шаблон topic.",
+        },
+        {
+            "parameter_id": "task_topic",
+            "display_name": "Topic задачи",
+            "direction": "input",
+            "source": "technical_profile.task_topic",
+            "description": "Вычисленное имя Kafka topic для постановки задачи ServiceDesk.",
+        },
+        {
+            "parameter_id": "task_key",
+            "display_name": "Kafka key задачи",
+            "direction": "input",
+            "source": "kafka.message_key",
+            "description": "Ключ Kafka-сообщения; по контракту содержит номер задачи в ОперуИТ.",
+        },
+        {
+            "parameter_id": "task_number",
+            "display_name": "Номер задачи ОперуИТ",
+            "direction": "bidirectional",
+            "source": "kafka.message_key",
+            "description": "Номер задачи ОперуИТ, используемый для task/result/invalid correlation.",
+        },
+        {
+            "parameter_id": "result_code",
+            "display_name": "Код результата",
+            "direction": "output",
+            "source": "TaskResultCode",
+            "description": "Результат выполнения операции: Выполнено или Не выполнено.",
+        },
+        {
+            "parameter_id": "result_message",
+            "display_name": "Сообщение результата",
+            "direction": "output",
+            "source": "TaskResultMessage",
+            "description": "Сообщение о выполнении операции из ServiceDesk result topic.",
+        },
+        {
+            "parameter_id": "result_topic",
+            "display_name": "Topic результата",
+            "direction": "input",
+            "source": "technical_profile.result_topic",
+            "description": "Kafka topic входящих результатов выполнения задач.",
+        },
+        {
+            "parameter_id": "invalid_payload",
+            "display_name": "Некорректное исполнение",
+            "direction": "output",
+            "source": "public.ittask.invalid",
+            "description": "Payload из topic некорректных исполнений задач.",
+        },
+        {
+            "parameter_id": "temp_password_personal_id",
+            "display_name": "Табельный номер временного пароля",
+            "direction": "output",
+            "source": "TaskTemp_PasswordMsg.personalID",
+            "description": "Идентификатор сотрудника из события временного пароля.",
+        },
+    ]
+
+
+def normalize_channel_parameters(
+    parameters: list[dict[str, Any]] | None,
+    *,
+    channel_id: str | None = None,
+) -> list[dict[str, Any]]:
+    configured = copy.deepcopy(parameters or [])
+    defaults = {
+        parameter["parameter_id"]: parameter
+        for parameter in default_channel_parameters(channel_id)
+    }
+    result_by_id = copy.deepcopy(defaults)
+    for parameter in configured:
+        parameter_id = parameter.get("parameter_id")
+        if not parameter_id:
+            continue
+        result_by_id[parameter_id] = {
+            **result_by_id.get(parameter_id, {}),
+            **parameter,
+        }
+    return list(result_by_id.values())
+
+
+def fallback_channel_action_type(mode: str | None, capabilities: dict[str, Any] | None = None) -> str:
+    allowed = ConfigStore._channel_action_types_for_mode(mode or "", capabilities)
+    for candidate in ("save_context", "create_work_order", "create_draft", "debug_stop", "show_debug_message"):
+        if candidate in allowed:
+            return candidate
+    return sorted(allowed)[0] if allowed else "debug_stop"
+
+
+def normalize_channel_action_for_capabilities(
+    action: dict[str, Any] | None,
+    *,
+    mode: str | None = None,
+    capabilities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = action if isinstance(action, dict) else {}
+    allowed = ConfigStore._channel_action_types_for_mode(mode or "", capabilities)
+    if result.get("action_type") not in allowed:
+        result["action_type"] = fallback_channel_action_type(mode, capabilities)
     return result
 
 
@@ -3000,6 +3195,19 @@ class ConfigStore:
         elif domain == "interaction_channels":
             legacy_waiting_defaults = self._legacy_client_waiting_defaults()
             for channel in normalized.get("channels", []):
+                channel["capabilities"] = normalize_channel_capabilities(
+                    channel.get("capabilities"),
+                    channel_id=channel.get("channel_id"),
+                    mode=channel.get("mode"),
+                )
+                channel["technical_profile"] = normalize_channel_technical_profile(
+                    channel.get("technical_profile"),
+                    channel_id=channel.get("channel_id"),
+                )
+                channel["channel_parameters"] = normalize_channel_parameters(
+                    channel.get("channel_parameters"),
+                    channel_id=channel.get("channel_id"),
+                )
                 channel.pop("audit_required", None)
                 channel["waiting_policy"] = normalize_channel_waiting_policy(
                     channel.get("waiting_policy"),
@@ -3007,8 +3215,18 @@ class ConfigStore:
                 )
                 channel.setdefault("action_profiles", default_channel_action_profiles(channel))
                 for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
+                    channel[action_key] = normalize_channel_action_for_capabilities(
+                        channel.get(action_key, {}),
+                        mode=channel.get("mode"),
+                        capabilities=channel.get("capabilities"),
+                    )
                     normalize_endpoint_reference(channel.get(action_key, {}))
                 for profile in channel.get("action_profiles", []):
+                    profile["action"] = normalize_channel_action_for_capabilities(
+                        profile.get("action", {}),
+                        mode=channel.get("mode"),
+                        capabilities=channel.get("capabilities"),
+                    )
                     normalize_endpoint_reference(profile.get("action", {}))
         elif domain == "integration_endpoints":
             normalized = merge_legacy_integration_endpoints(normalized)
@@ -4790,6 +5008,7 @@ class ConfigStore:
             planned_waits=simulation_result["planned_waits"],
             final_decision=final_decision,
             agent_outcome=simulation_result["agent_outcome"],
+            interaction_channel=interaction_channel,
         )
         return simulation_result
 
@@ -5378,6 +5597,7 @@ class ConfigStore:
         if overrides is not None:
             token = _ACTIVE_PAYLOAD_OVERRIDES.set(overrides)
         try:
+            errors.extend(self._pre_validate_payload(domain, payload))
             normalized_payload = self._normalize_payload(domain, payload)
             errors.extend(self.contracts.validate(contract_name, normalized_payload))
             if not errors:
@@ -5400,6 +5620,33 @@ class ConfigStore:
                 }
             ],
         }
+
+    @staticmethod
+    def _pre_validate_payload(domain: str, payload: dict[str, Any]) -> list[str]:
+        if domain != "interaction_channels" or not isinstance(payload, dict):
+            return []
+        errors: list[str] = []
+        channels = payload.get("channels")
+        if not isinstance(channels, list):
+            return errors
+        for index, channel in enumerate(channels, start=1):
+            if not isinstance(channel, dict):
+                continue
+            channel_id = channel.get("channel_id") or f"channels[{index}]"
+            parameter_ids = [
+                str(parameter.get("parameter_id"))
+                for parameter in channel.get("channel_parameters", [])
+                if isinstance(parameter, dict) and parameter.get("parameter_id")
+            ]
+            seen: set[str] = set()
+            duplicates: set[str] = set()
+            for parameter_id in parameter_ids:
+                if parameter_id in seen:
+                    duplicates.add(parameter_id)
+                seen.add(parameter_id)
+            for parameter_id in sorted(duplicates):
+                errors.append(f"{channel_id} содержит дублирующийся параметр канала: {parameter_id}")
+        return errors
 
     def list_drafts(
         self,
@@ -6066,8 +6313,8 @@ class ConfigStore:
         }
         for channel in channels:
             channel_id = channel["channel_id"]
-            allowed_actions = self._channel_action_types_for_mode(channel["mode"])
-            allowed_no_answer = self._channel_no_answer_actions_for_mode(channel["mode"])
+            allowed_actions = self._channel_action_types_for_mode(channel["mode"], channel.get("capabilities"))
+            allowed_no_answer = self._channel_no_answer_actions_for_mode(channel["mode"], channel.get("capabilities"))
             waiting = channel["waiting_policy"]
             if waiting["on_no_answer"] not in allowed_no_answer:
                 errors.append(
@@ -6081,6 +6328,9 @@ class ConfigStore:
             profile_ids = [profile["profile_id"] for profile in channel.get("action_profiles", [])]
             for profile_id in self._duplicates(profile_ids):
                 errors.append(f"{channel_id} содержит дублирующийся action profile: {profile_id}")
+            parameter_ids = [parameter["parameter_id"] for parameter in channel.get("channel_parameters", [])]
+            for parameter_id in self._duplicates(parameter_ids):
+                errors.append(f"{channel_id} содержит дублирующийся параметр канала: {parameter_id}")
             errors.extend(self._validate_required_channel_action_profiles(channel))
             for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
                 action = channel[action_key]
@@ -6107,21 +6357,32 @@ class ConfigStore:
         return errors
 
     @staticmethod
-    def _channel_action_types_for_mode(mode: str) -> set[str]:
+    def _channel_action_types_for_mode(mode: str, capabilities: dict[str, Any] | None = None) -> set[str]:
         if mode == "online_interactive":
-            return {"ask_end_user", "create_draft", "call_specialist", "notify_on_call"}
+            actions = {"create_draft", "call_specialist", "notify_on_call"}
+            if (capabilities or {}).get("supports_client_questions", True):
+                actions.add("ask_end_user")
+            return actions
         if mode == "offline_interactive":
-            return {"ask_operator", "save_context", "create_work_order"}
+            actions = {"save_context"}
+            if (capabilities or {}).get("supports_operator_questions", True):
+                actions.add("ask_operator")
+            if (capabilities or {}).get("supports_work_order_creation", True):
+                actions.add("create_work_order")
+            return actions
         if mode == "debug":
             return {"show_debug_message", "debug_stop"}
         return {"debug_stop"}
 
     @staticmethod
-    def _channel_no_answer_actions_for_mode(mode: str) -> set[str]:
+    def _channel_no_answer_actions_for_mode(mode: str, capabilities: dict[str, Any] | None = None) -> set[str]:
         if mode == "online_interactive":
             return {"create_draft", "call_specialist"}
         if mode == "offline_interactive":
-            return {"save_context", "create_work_order"}
+            actions = {"save_context"}
+            if (capabilities or {}).get("supports_work_order_creation", True):
+                actions.add("create_work_order")
+            return actions
         if mode == "debug":
             return {"debug_stop"}
         return {"debug_stop"}
@@ -6190,6 +6451,7 @@ class ConfigStore:
             self.active_payload("integration_endpoints")["endpoints"],
             "endpoint_id",
         )
+        interaction_channels = self.active_payload("interaction_channels")["channels"]
         slot_schema_by_id = self._by_id(
             self.active_payload("slot_schemas")["slot_schemas"],
             "slot_schema_id",
@@ -6252,6 +6514,7 @@ class ConfigStore:
                 output_slots=output_slot_ids,
                 tools=list(tool_by_name.values()),
                 steps=profile.get("enrichment_steps", []),
+                channels=interaction_channels,
             )
             seen_steps: dict[str, dict[str, Any]] = {}
             last_step_tool: dict[str, Any] | None = None
@@ -6267,6 +6530,7 @@ class ConfigStore:
                         tools=list(tool_by_name.values()),
                         steps=profile.get("enrichment_steps", []),
                         allowed_steps=list(seen_steps.values()),
+                        channels=interaction_channels,
                     )
                     errors.extend(
                         validate_template_refs(
@@ -6876,6 +7140,13 @@ def default_interaction_channels() -> dict[str, Any]:
                 "display_name": "Мессенджер-бот",
                 "mode": "online_interactive",
                 "description": "Онлайн-канал с прямым диалогом с клиентом: уточняющие вопросы уходят клиенту, ожидание короткое, при незавершенном уточнении сохраняется контекст, а при эскалации подключается оператор.",
+                "capabilities": normalize_channel_capabilities(
+                    None,
+                    channel_id="messenger_bot",
+                    mode="online_interactive",
+                ),
+                "technical_profile": normalize_channel_technical_profile(None, channel_id="messenger_bot"),
+                "channel_parameters": normalize_channel_parameters(None, channel_id="messenger_bot"),
                 "question_delivery": {
                     "action_type": "ask_end_user",
                     "message_template": "{question}",
@@ -6910,10 +7181,17 @@ def default_interaction_channels() -> dict[str, Any]:
                 "channel_id": "service_desk",
                 "display_name": "Сервисдеск",
                 "mode": "offline_interactive",
-                "description": "Офлайн-интерактивный канал сервисдеска: уточняющие вопросы фиксируются в заявке, ожидание длиннее и зависит от SLA, эскалация создает наряд по назначенному правилу.",
+                "description": "Логический канал заказчика Сервисдеск. Текущий MVP использует Kafka-контракт ОПЕРУ.ИТ для постановки задач и получения результата; прямые вопросы клиенту или оператору этим контрактом пока не поддержаны.",
+                "capabilities": normalize_channel_capabilities(
+                    DEFAULT_SERVICEDESK_CHANNEL_CAPABILITIES,
+                    channel_id="service_desk",
+                    mode="offline_interactive",
+                ),
+                "technical_profile": normalize_channel_technical_profile(None, channel_id="service_desk"),
+                "channel_parameters": normalize_channel_parameters(None, channel_id="service_desk"),
                 "question_delivery": {
-                    "action_type": "ask_operator",
-                    "message_template": "{question}",
+                    "action_type": "save_context",
+                    "message_template": "Сохранить вопрос в контексте заявки: {question}",
                 },
                 "waiting_policy": {
                     "first_reminder_after_seconds": 3600,
@@ -6946,6 +7224,13 @@ def default_interaction_channels() -> dict[str, Any]:
                 "display_name": "Отладочный режим",
                 "mode": "debug",
                 "description": "Локальный режим MVP: вопросы показывает интерфейс оператора, а эскалация останавливает сценарий с диагностическим сообщением без внешнего исполнения.",
+                "capabilities": normalize_channel_capabilities(
+                    None,
+                    channel_id="debug",
+                    mode="debug",
+                ),
+                "technical_profile": normalize_channel_technical_profile(None, channel_id="debug"),
+                "channel_parameters": normalize_channel_parameters(None, channel_id="debug"),
                 "question_delivery": {
                     "action_type": "show_debug_message",
                     "message_template": "{question}",

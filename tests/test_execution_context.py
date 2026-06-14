@@ -4,6 +4,7 @@ import unittest
 
 from apps.orchestrator.app.execution_context import (
     build_execution_reference_context,
+    build_simulation_variable_context,
     render_template,
     validate_template_refs,
 )
@@ -52,6 +53,20 @@ class ExecutionContextTest(unittest.TestCase):
             output_slots=["user_login"],
             tools=react_tools(),
             steps=[{"step_id": "step1", "react_call": "get_user_login"}],
+            channels=[
+                {
+                    "channel_id": "service_desk",
+                    "display_name": "Сервисдеск",
+                    "mode": "offline_interactive",
+                    "technical_profile": {
+                        "transport": "kafka",
+                        "task_topic": "public.ittask.serviceDeskL1.task",
+                    },
+                    "channel_parameters": [
+                        {"parameter_id": "task_key", "display_name": "Ключ задачи"},
+                    ],
+                }
+            ],
         )
 
         errors = validate_template_refs(
@@ -60,6 +75,7 @@ class ExecutionContextTest(unittest.TestCase):
                 "первый результат ${step.step1.react.get_user_login.output.0.user_login}; "
                 "результат ${step.step1.react.get_user_login.output.user_login}; "
                 "case ${case.scenario_id}; wait ${wait.correlation_id}; "
+                "канал ${channel.service_desk.task_topic}; ключ ${channel.service_desk.task_key}; "
                 "этап ${stage.5.final_decision}."
             ),
             context,
@@ -103,6 +119,72 @@ class ExecutionContextTest(unittest.TestCase):
         )
 
         self.assertEqual(rendered, "Логин ivanov; секрет ; итог ready_for_react")
+
+    def test_render_template_uses_channel_values(self) -> None:
+        rendered = render_template(
+            "Topic ${channel.service_desk.task_topic}; key ${channel.service_desk.task_key}",
+            {
+                "channel": {
+                    "service_desk": {
+                        "task_topic": "public.ittask.serviceDeskL1.task",
+                        "task_key": "IT-42",
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(rendered, "Topic public.ittask.serviceDeskL1.task; key IT-42")
+
+    def test_simulation_context_exposes_channel_parameters(self) -> None:
+        context = build_simulation_variable_context(
+            scenario_id="password_reset",
+            input_text="Сбросить пароль Иванову.",
+            slot_values={},
+            resolution_state={},
+            classification={"priority": "P3"},
+            ready_tool_launches=[],
+            blocked_tool_launches=[],
+            planned_waits=[{"correlation_id": "OPERU-42"}],
+            final_decision="waiting_external_event",
+            interaction_channel={
+                "channel_id": "service_desk",
+                "display_name": "Сервисдеск",
+                "mode": "offline_interactive",
+                "technical_profile": {
+                    "transport": "kafka",
+                    "task_topic": "public.ittask.serviceDeskL1.task",
+                    "result_topic": "public.ittask.result",
+                    "api_token": "secret-token",
+                },
+                "channel_parameters": [
+                    {
+                        "parameter_id": "task_topic",
+                        "source": "technical_profile.task_topic",
+                    },
+                    {
+                        "parameter_id": "task_key",
+                        "source": "kafka.message_key",
+                    },
+                    {
+                        "parameter_id": "hidden_token",
+                        "source": "technical_profile.api_token",
+                        "secret": True,
+                    },
+                ],
+            },
+        )
+
+        rendered = render_template(
+            (
+                "Topic ${channel.service_desk.task_topic}; "
+                "key ${channel.service_desk.task_key}; "
+                "token ${channel.service_desk.hidden_token}; "
+                "api ${channel.service_desk.api_token}"
+            ),
+            context,
+        )
+
+        self.assertEqual(rendered, "Topic public.ittask.serviceDeskL1.task; key OPERU-42; token ; api ")
 
 
 if __name__ == "__main__":

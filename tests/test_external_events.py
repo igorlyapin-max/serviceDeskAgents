@@ -8,12 +8,21 @@ from apps.orchestrator.app.action_gates import utc_now
 from apps.orchestrator.app.cases import CaseStore
 from apps.orchestrator.app.config_registry import ConfigStore
 from apps.orchestrator.app.contracts import ContractRegistry, ContractValidationError
+from apps.orchestrator.app.kafka_runtime import ExternalEventWorker, KafkaCommandRecord
 from apps.orchestrator.app.processing import (
     ExternalEventIdempotencyConflict,
     ProcessingConflict,
     ProcessingNotFound,
     ProcessingStore,
 )
+
+
+class AckSpy:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self) -> None:
+        self.count += 1
 
 
 def waiting_analysis() -> dict:
@@ -93,6 +102,29 @@ class ExternalEventsTest(unittest.TestCase):
         else:
             event["result"] = result or {"provider_status": "resolved"}
         return event
+
+    def servicedesk_wait(
+        self,
+        *,
+        correlation_id: str = "OPERU-42",
+        event_type: str = "servicedesk_task_result",
+        result_topic: str = "public.ittask.result",
+        invalid_topic: str | None = None,
+    ) -> dict:
+        payload = {
+            "result_transport": "kafka_event",
+            "result_topic": result_topic,
+        }
+        if invalid_topic:
+            payload["invalid_topic"] = invalid_topic
+        return self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="service_desk",
+            event_type=event_type,
+            reason="Ожидание результата задачи из канала Сервисдеск.",
+            correlation_id=correlation_id,
+            payload=payload,
+        )
 
     def test_external_event_contract_validates_required_fields(self) -> None:
         wait = self.processing_store.open_external_wait(
@@ -378,6 +410,167 @@ class ExternalEventsTest(unittest.TestCase):
 
         with self.assertRaises(ProcessingNotFound):
             self.processing_store.record_external_event(event)
+
+    def test_servicedesk_kafka_result_uses_message_key_as_correlation(self) -> None:
+        wait = self.servicedesk_wait()
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+        record = KafkaCommandRecord(
+            value={
+                "TaskResultCode": "Выполнено",
+                "TaskResultMessage": "Задача выполнена.",
+            },
+            topic="public.ittask.result",
+            key="OPERU-42",
+            partition=0,
+            offset=7,
+        )
+
+        result = worker.process_event(
+            record,
+            received_transport="kafka_event",
+            source_topic="public.ittask.result",
+        )
+
+        self.assertEqual(result["wait"]["wait_id"], wait["wait_id"])
+        self.assertEqual(result["wait"]["status"], "completed")
+        self.assertEqual(result["external_event"]["source"], "service_desk")
+        self.assertEqual(result["wait"]["case_id"], self.case["case_id"])
+        self.assertEqual(result["external_event"]["correlation_id"], "OPERU-42")
+        self.assertEqual(result["external_event"]["result"]["result_code"], "Выполнено")
+
+    def test_servicedesk_kafka_failed_result_closes_wait_as_error(self) -> None:
+        wait = self.servicedesk_wait(correlation_id="OPERU-43")
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+
+        result = worker.process_event(
+            KafkaCommandRecord(
+                value={
+                    "TaskResultCode": "Не выполнено",
+                    "TaskResultMessage": "Исполнитель отказал.",
+                },
+                topic="public.ittask.result",
+                key="OPERU-43",
+                partition=0,
+                offset=8,
+            ),
+            received_transport="kafka_event",
+            source_topic="public.ittask.result",
+        )
+
+        self.assertEqual(result["wait"]["wait_id"], wait["wait_id"])
+        self.assertEqual(result["wait"]["status"], "failed")
+        self.assertEqual(result["external_event"]["status"], "error")
+        self.assertEqual(result["external_event"]["error"]["message"], "Исполнитель отказал.")
+
+    def test_servicedesk_invalid_topic_completes_result_wait_as_error(self) -> None:
+        wait = self.servicedesk_wait(correlation_id="OPERU-44", invalid_topic="public.ittask.invalid")
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+
+        result = worker.process_event(
+            KafkaCommandRecord(
+                value={
+                    "reason": "Неверный формат задачи.",
+                    "payload": {"task": "bad"},
+                },
+                topic="public.ittask.invalid",
+                key="OPERU-44",
+                partition=0,
+                offset=9,
+            ),
+            received_transport="kafka_event",
+            source_topic="public.ittask.invalid",
+        )
+
+        self.assertEqual(result["wait"]["wait_id"], wait["wait_id"])
+        self.assertEqual(result["wait"]["status"], "failed")
+        self.assertEqual(result["external_event"]["event_type"], "servicedesk_task_result")
+        self.assertEqual(result["external_event"]["error"]["code"], "servicedesk_invalid_task")
+
+    def test_servicedesk_unknown_result_code_goes_to_dead_letter(self) -> None:
+        self.servicedesk_wait(correlation_id="OPERU-45")
+        ack = AckSpy()
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+
+        result = worker.process_events(
+            [
+                KafkaCommandRecord(
+                    value={
+                        "TaskResultCode": "Готово",
+                        "TaskResultMessage": "Неподдерживаемый код.",
+                    },
+                    topic="public.ittask.result",
+                    key="OPERU-45",
+                    partition=0,
+                    offset=10,
+                    ack=ack,
+                )
+            ],
+            limit=1,
+        )
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        self.assertIsNotNone(self.processing_store.active_wait_by_correlation("OPERU-45"))
+
+    def test_servicedesk_duplicate_result_with_new_offset_is_idempotent(self) -> None:
+        self.servicedesk_wait(correlation_id="OPERU-46")
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+        value = {
+            "TaskResultCode": "Выполнено",
+            "TaskResultMessage": "Задача выполнена.",
+        }
+
+        first = worker.process_event(
+            KafkaCommandRecord(value=value, topic="public.ittask.result", key="OPERU-46", partition=0, offset=11),
+            received_transport="kafka_event",
+            source_topic="public.ittask.result",
+        )
+        duplicate = worker.process_event(
+            KafkaCommandRecord(value=value, topic="public.ittask.result", key="OPERU-46", partition=0, offset=12),
+            received_transport="kafka_event",
+            source_topic="public.ittask.result",
+        )
+
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["wait_id"], first["wait"]["wait_id"])
+
+    def test_servicedesk_temp_password_requires_explicit_correlation(self) -> None:
+        self.servicedesk_wait(
+            correlation_id="OPERU-47",
+            event_type="servicedesk_temp_password",
+            result_topic="public.ittask.temp_password",
+        )
+        ack = AckSpy()
+        worker = ExternalEventWorker(self.processing_store, self.config_store, self.contracts)
+
+        result = worker.process_events(
+            [
+                KafkaCommandRecord(
+                    value={
+                        "personalID": "100500",
+                        "password": "secret-temp-password",
+                    },
+                    topic="public.ittask.temp_password",
+                    key="OPERU-47",
+                    partition=0,
+                    offset=13,
+                    ack=ack,
+                )
+            ],
+            limit=1,
+        )
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["dead_lettered"], 1)
+        self.assertEqual(ack.count, 1)
+        outbox = self.processing_store.list_outbox()["messages"]
+        dead_letters = [message for message in outbox if message["topic"] == "dead-letter"]
+        self.assertTrue(dead_letters)
+        raw = dead_letters[-1]["payload"]["external_event"]["raw"]
+        self.assertEqual(raw["password"], "параметр скрыт")
+        self.assertIsNotNone(self.processing_store.active_wait_by_correlation("OPERU-47"))
 
 
 if __name__ == "__main__":

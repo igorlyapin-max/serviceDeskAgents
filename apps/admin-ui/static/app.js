@@ -39,6 +39,8 @@ const state = {
   orchestrationGraphPanY: 34,
   processingCaseId: '',
   modelRoutingBaseVersionId: '',
+  configSubmitAction: null,
+  configDrafts: {},
   referenceAutocomplete: {
     textarea: null,
     start: -1,
@@ -53,6 +55,46 @@ const state = {
     openApiImportPreview: null,
   },
 };
+
+const configDraftFormDomains = {
+  'confidence-defaults-editor': 'orchestrator_policy',
+  'interaction-channel-delete': 'interaction_channels',
+  'interaction-channel-editor': 'interaction_channels',
+  'scenario-delete': 'service_scenarios',
+  'scenario-editor': 'service_scenarios',
+  'resolution-profile-delete': 'attribute_resolution_profiles',
+  'resolution-profile-editor': 'attribute_resolution_profiles',
+  'slot-schema-delete': 'slot_schemas',
+  'slot-schema-editor': 'slot_schemas',
+  'route-delete': 'classification_routes',
+  'route-editor': 'classification_routes',
+  'policy-delete': 'orchestrator_policy',
+  'policy-editor': 'orchestrator_policy',
+  'prompt-pack-delete': 'prompt_packs',
+  'prompt-pack-editor': 'prompt_packs',
+  'integration-endpoint-delete': 'integration_endpoints',
+  'integration-endpoint-editor': 'integration_endpoints',
+  'tool-catalog-delete': 'tools',
+  'tool-catalog-editor': 'tools',
+  'operation-binding-editor': 'tools',
+  'operation-binding-create-editor': 'tools',
+  'model-routing-editor': 'model_routing',
+  'system-prompts-editor': 'model_routing',
+};
+
+const configDraftDeleteForms = new Set([
+  'interaction-channel-delete',
+  'scenario-delete',
+  'resolution-profile-delete',
+  'slot-schema-delete',
+  'route-delete',
+  'policy-delete',
+  'prompt-pack-delete',
+  'integration-endpoint-delete',
+  'tool-catalog-delete',
+]);
+
+const configDraftActions = new Set(['save', 'validate', 'activate']);
 
 const viewTitles = {
   dashboard: 'Панель обзора',
@@ -476,6 +518,135 @@ function setNotice(message, type = 'info') {
   elements.notice.dataset.type = type;
 }
 
+function currentConfigSubmitAction() {
+  return configDraftActions.has(state.configSubmitAction) ? state.configSubmitAction : 'activate';
+}
+
+function isConfigActivateAction() {
+  return currentConfigSubmitAction() === 'activate';
+}
+
+function formConfigDraftAction(form, submitter) {
+  if (!configDraftFormDomains[form?.dataset?.form]) {
+    return null;
+  }
+  const action = submitter?.dataset?.configDraftAction;
+  return configDraftActions.has(action) ? action : 'save';
+}
+
+function configMutationActionText(operation) {
+  return {
+    create: 'создан',
+    modify: 'изменен',
+    delete: 'удален',
+    bind: 'обновлена',
+    unbind: 'удалена',
+  }[operation] || 'изменен';
+}
+
+function configValidationErrors(validation) {
+  const errors = validation?.errors || [];
+  if (!errors.length) return 'ошибки не указаны';
+  return errors.join('; ');
+}
+
+function configValidationMessage(domain, validation) {
+  const message = `Валидация не пройдена: ${configValidationErrors(validation)}`;
+  if (
+    domain === 'attribute_resolution_profiles'
+    && (validation?.errors || []).some((error) =>
+      String(error || '').includes('slot_schema_id')
+      || String(error || '').includes('ссылается на слот')
+      || String(error || '').includes('выходной слот'),
+    )
+  ) {
+    return `${message}. Если слот есть только в черновике, сначала активируйте черновик схемы слотов, затем профиль разрешения.`;
+  }
+  return message;
+}
+
+function cssEscapeValue(value) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    return CSS.escape(String(value));
+  }
+  return String(value).replace(/["\\]/g, '\\$&');
+}
+
+function rememberConfigDraftStatus(domain, message, type = 'info') {
+  if (!domain) return;
+  state.configDrafts[domain] = { message, type };
+  updateConfigDraftStatusBlocks(domain);
+}
+
+function updateConfigDraftStatusBlocks(domain = null) {
+  if (!elements.viewContent) return;
+  const selector = domain
+    ? `[data-config-draft-domain="${cssEscapeValue(domain)}"]`
+    : '[data-config-draft-domain]';
+  elements.viewContent.querySelectorAll(selector).forEach((status) => {
+    const statusState = state.configDrafts[status.dataset.configDraftDomain] || {};
+    const message = statusState.message || 'Черновик еще не сохранялся.';
+    const type = statusState.type || 'muted';
+    if (status.textContent !== message) {
+      status.textContent = message;
+    }
+    if (status.dataset.type !== type) {
+      status.dataset.type = type;
+    }
+  });
+}
+
+function createConfigDraftButton(action, label, className = '') {
+  return `<button class="${escapeHtml(className)}" type="submit" data-config-draft-action="${escapeHtml(action)}">${escapeHtml(label)}</button>`;
+}
+
+function enhanceConfigDraftForms() {
+  if (!elements.viewContent) return;
+  elements.viewContent.querySelectorAll('form[data-form]').forEach((form) => {
+    const domain = configDraftFormDomains[form.dataset.form];
+    if (!domain || form.dataset.configDraftEnhanced === 'true') {
+      return;
+    }
+    const actions = form.querySelector('.scenario-editor-actions');
+    if (!actions) {
+      return;
+    }
+    const isDeleteForm = configDraftDeleteForms.has(form.dataset.form);
+    const submitButtons = Array.from(actions.querySelectorAll('button[type="submit"]'));
+    const hasSinglePlainSubmit = submitButtons.length === 1 && !submitButtons[0].name;
+    if (hasSinglePlainSubmit) {
+      submitButtons[0].dataset.configDraftAction = 'save';
+      submitButtons[0].classList.remove('primary', 'danger');
+      submitButtons[0].textContent = isDeleteForm ? 'Сохранить черновик удаления' : 'Сохранить черновик';
+    } else {
+      submitButtons.forEach((button) => {
+        if (!button.dataset.configDraftAction) {
+          button.dataset.configDraftAction = 'activate';
+        }
+      });
+      actions.insertAdjacentHTML(
+        'afterbegin',
+        createConfigDraftButton('save', isDeleteForm ? 'Сохранить черновик удаления' : 'Сохранить черновик'),
+      );
+    }
+    actions.insertAdjacentHTML(
+      'beforeend',
+      [
+        createConfigDraftButton('validate', 'Валидировать'),
+        hasSinglePlainSubmit
+          ? createConfigDraftButton('activate', isDeleteForm ? 'Активировать удаление' : 'Активировать', isDeleteForm ? 'danger' : 'primary')
+          : '',
+      ].join(''),
+    );
+    actions.insertAdjacentHTML(
+      'afterend',
+      `<div class="config-draft-status" data-config-draft-domain="${escapeHtml(domain)}" data-type="muted">Черновик еще не сохранялся.</div>`,
+    );
+    form.dataset.configDraftEnhanced = 'true';
+  });
+  updateConfigDraftStatusBlocks();
+}
+
 function setBusy(isBusy) {
   elements.refreshButton.disabled = isBusy;
   if (isBusy) {
@@ -518,6 +689,7 @@ async function loadView(view = state.activeView) {
   setBusy(true);
   try {
     await renderView(view);
+    enhanceConfigDraftForms();
     elements.apiStatus.textContent = 'Готово';
   } catch (error) {
     elements.viewContent.innerHTML = '<div class="empty">Раздел не загружен</div>';
@@ -1009,6 +1181,7 @@ async function loadScenarioContext() {
   state.lastData.resolutionProfiles = resolutionProfilesConfig.payload?.profiles || [];
   state.lastData.toolCatalog = toolsConfig.payload?.tools || [];
   state.lastData.integrationEndpoints = endpointsConfig.payload?.endpoints || [];
+  state.lastData.interactionChannels = interactionChannelsConfig.payload?.channels || [];
   return {
     overview,
     scenarios,
@@ -1122,12 +1295,14 @@ async function renderScenarioSlots() {
 }
 
 async function renderScenarioClassification() {
-  const [active, scenariosConfig] = await Promise.all([
+  const [active, scenariosConfig, channelsConfig] = await Promise.all([
     api('/admin/config/active/classification_routes'),
     api('/admin/config/active/service_scenarios'),
+    api('/admin/config/active/interaction_channels'),
   ]);
   const routes = active.payload?.routes || [];
   const scenarios = scenariosConfig.payload?.scenarios || [];
+  state.lastData.interactionChannels = channelsConfig.payload?.channels || [];
   if (!routes.some((route) => route.route_id === state.routeId)) {
     state.routeId = routes[0]?.route_id || '';
   }
@@ -1283,6 +1458,7 @@ async function renderInteractionChannels() {
   ]);
   const channels = active.payload?.channels || [];
   const scenarios = scenariosConfig.payload?.scenarios || [];
+  state.lastData.interactionChannels = channels;
   if (!channels.some((channel) => channel.channel_id === state.interactionChannelId)) {
     state.interactionChannelId = channels[0]?.channel_id || '';
   }
@@ -1313,6 +1489,9 @@ function channelCreateTemplate(source, channels) {
     display_name: '',
     mode: template.mode || 'debug',
     description: '',
+    capabilities: normalizeChannelCapabilities(template.capabilities, template.channel_id || 'debug', template.mode || 'debug'),
+    technical_profile: normalizeChannelTechnicalProfile(template.technical_profile, template.channel_id || 'debug'),
+    channel_parameters: normalizeChannelParameters(template.channel_parameters, template.channel_id || 'debug'),
     question_delivery: template.question_delivery || {
       action_type: 'show_debug_message',
       message_template: '{question}',
@@ -1334,6 +1513,99 @@ function channelCreateTemplate(source, channels) {
     action_profiles: template.action_profiles || defaultChannelActionProfiles(template.channel_id || 'debug'),
     enabled: template.enabled ?? true,
   };
+}
+
+function defaultChannelCapabilities(channelId = '', mode = '') {
+  if (channelId === 'service_desk') {
+    return {
+      supports_client_questions: false,
+      supports_operator_questions: false,
+      supports_work_order_creation: true,
+      supports_async_result: true,
+    };
+  }
+  if (mode === 'debug') {
+    return {
+      supports_client_questions: false,
+      supports_operator_questions: false,
+      supports_work_order_creation: false,
+      supports_async_result: false,
+    };
+  }
+  return {
+    supports_client_questions: mode === 'online_interactive',
+    supports_operator_questions: mode === 'offline_interactive',
+    supports_work_order_creation: mode === 'offline_interactive',
+    supports_async_result: false,
+  };
+}
+
+function normalizeChannelCapabilities(capabilities = {}, channelId = '', mode = '') {
+  const defaults = defaultChannelCapabilities(channelId, mode);
+  return Object.fromEntries(
+    Object.keys(defaults).map((key) => [key, capabilities?.[key] ?? defaults[key]]),
+  );
+}
+
+function renderChannelTaskTopic(template, agentType) {
+  return String(template || 'public.ittask.serviceDesk{agent_type}.task')
+    .replaceAll('{agent_type}', agentType || 'Default');
+}
+
+function normalizeChannelTechnicalProfile(profile = {}, channelId = '') {
+  const current = profile || {};
+  const result = channelId === 'service_desk'
+    ? {
+      transport: 'kafka',
+      endpoint_id: 'operu_it_servicedesk',
+      agent_type: 'Default',
+      task_topic_template: 'public.ittask.serviceDesk{agent_type}.task',
+      result_topic: 'public.ittask.result',
+      invalid_topic: 'public.ittask.invalid',
+      temp_password_topic: 'public.ittask.temp_password',
+      message_key_parameter: 'task_key',
+      hmac_required: true,
+      ...current,
+    }
+    : {
+      transport: 'none',
+      ...current,
+    };
+  if (result.transport === 'kafka') {
+    result.task_topic = renderChannelTaskTopic(result.task_topic_template, result.agent_type);
+  }
+  return result;
+}
+
+function defaultChannelParameters(channelId = '') {
+  if (channelId !== 'service_desk') return [];
+  return [
+    ['agent_type', 'Тип агента', 'input', 'technical_profile.agent_type', 'Тип агента ServiceDesk, который подставляется в шаблон topic.'],
+    ['task_topic', 'Topic задачи', 'input', 'technical_profile.task_topic', 'Вычисленное имя Kafka topic для постановки задачи ServiceDesk.'],
+    ['task_key', 'Kafka key задачи', 'input', 'kafka.message_key', 'Ключ Kafka-сообщения; по контракту содержит номер задачи в ОперуИТ.'],
+    ['task_number', 'Номер задачи ОперуИТ', 'bidirectional', 'kafka.message_key', 'Номер задачи ОперуИТ для task/result/invalid correlation.'],
+    ['result_code', 'Код результата', 'output', 'TaskResultCode', 'Результат выполнения операции: Выполнено или Не выполнено.'],
+    ['result_message', 'Сообщение результата', 'output', 'TaskResultMessage', 'Сообщение о выполнении операции из ServiceDesk result topic.'],
+    ['result_topic', 'Topic результата', 'input', 'technical_profile.result_topic', 'Kafka topic входящих результатов выполнения задач.'],
+    ['invalid_payload', 'Некорректное исполнение', 'output', 'public.ittask.invalid', 'Payload из topic некорректных исполнений задач.'],
+    ['temp_password_personal_id', 'Табельный номер временного пароля', 'output', 'TaskTemp_PasswordMsg.personalID', 'Идентификатор сотрудника из события временного пароля.'],
+  ].map(([parameter_id, display_name, direction, source, description]) => ({
+    parameter_id,
+    display_name,
+    direction,
+    source,
+    description,
+    secret: false,
+  }));
+}
+
+function normalizeChannelParameters(parameters = [], channelId = '') {
+  const result = new Map(defaultChannelParameters(channelId).map((parameter) => [parameter.parameter_id, parameter]));
+  for (const parameter of parameters || []) {
+    if (!parameter?.parameter_id) continue;
+    result.set(parameter.parameter_id, { ...(result.get(parameter.parameter_id) || {}), ...parameter });
+  }
+  return Array.from(result.values());
 }
 
 function normalizeChannelWaitingPolicy(waitingPolicy = {}) {
@@ -1371,6 +1643,13 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
     return '<div class="empty">Канал взаимодействия не выбран</div>';
   }
   const waitingPolicy = normalizeChannelWaitingPolicy(current.waiting_policy);
+  const capabilities = normalizeChannelCapabilities(current.capabilities, current.channel_id, current.mode);
+  const technicalProfile = normalizeChannelTechnicalProfile(current.technical_profile, current.channel_id);
+  const channelParameters = normalizeChannelParameters(current.channel_parameters, current.channel_id);
+  const noAnswerActions = channelNoAnswerActions(current.mode, capabilities);
+  const noAnswerAction = noAnswerActions.includes(waitingPolicy.on_no_answer)
+    ? waitingPolicy.on_no_answer
+    : (noAnswerActions[0] || 'debug_stop');
   return `
     <form class="scenario-editor panel" data-form="interaction-channel-editor">
       <input type="hidden" name="channel_id" value="${escapeHtml(current.channel_id)}">
@@ -1380,6 +1659,9 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
         <label>Режим<select name="mode">${optionList(['online_interactive', 'offline_interactive', 'debug'], current.mode)}</select></label>
         <label>Канал включен<select name="enabled">${booleanOptions(current.enabled)}</select></label>
       </div>
+      ${renderChannelCapabilities(capabilities)}
+      ${renderChannelTechnicalProfile(technicalProfile)}
+      ${renderChannelParameters(channelParameters)}
       <fieldset class="launch-editor">
         <legend>Уточнения у клиента</legend>
         <div class="meta">Этот блок не является эскалацией: AI задает клиенту вопрос, ждет ответ и после ответа продолжает тот же сценарий.</div>
@@ -1387,19 +1669,19 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
           <label>Первое напоминание, сек<input name="first_reminder_after_seconds" type="number" min="0" max="604800" value="${escapeHtml(waitingPolicy.first_reminder_after_seconds)}"></label>
           <label>Таймаут обсуждения, сек<input name="discussion_timeout_seconds" type="number" min="0" max="604800" value="${escapeHtml(waitingPolicy.discussion_timeout_seconds)}"></label>
           <label>Порог SLA для офлайн-канала, %<input name="sla_elapsed_percent_threshold" type="number" min="0" max="100" value="${escapeHtml(waitingPolicy.sla_elapsed_percent_threshold)}"></label>
-          <label>Если клиент не ответил<select name="on_no_answer">${activeOptionList(channelNoAnswerActions(current.mode), waitingPolicy.on_no_answer || 'debug_stop')}</select></label>
+          <label>Если клиент не ответил<select name="on_no_answer">${optionList(noAnswerActions, noAnswerAction)}</select></label>
           <label>Автозакрытие требует подтверждение клиента<select name="auto_close_requires_client_confirmation">${booleanOptions(waitingPolicy.auto_close_requires_client_confirmation)}</select></label>
           <label>Ожидание приостанавливает SLA<select name="pause_sla_on_client_wait">${booleanOptions(waitingPolicy.pause_sla_on_client_wait)}</select></label>
           <label>Автозакрытие ожидания клиента, часов<input name="client_wait_auto_close_after_hours" type="number" min="1" max="168" value="${escapeHtml(waitingPolicy.client_wait_auto_close_after_hours)}"></label>
         </div>
-        ${renderChannelActionFields('question_delivery', 'Как задать вопрос клиенту', current.question_delivery, current.mode)}
-        ${renderChannelActionFields('incomplete_discussion_action', 'Что делать с незавершенным уточнением', current.incomplete_discussion_action, current.mode)}
+        ${renderChannelActionFields('question_delivery', 'Как задать вопрос клиенту', current.question_delivery, current.mode, capabilities)}
+        ${renderChannelActionFields('incomplete_discussion_action', 'Что делать с незавершенным уточнением', current.incomplete_discussion_action, current.mode, capabilities)}
       </fieldset>
       <fieldset class="launch-editor">
         <legend>Эскалация оператору</legend>
         <div class="meta">Этот блок используется, когда AI останавливает самостоятельную обработку и передает оператору пакет контекста.</div>
-        ${renderChannelActionFields('escalation_action', 'Базовое действие эскалации оператору', current.escalation_action, current.mode)}
-        ${renderChannelActionProfiles(current.action_profiles || [], current.mode)}
+        ${renderChannelActionFields('escalation_action', 'Базовое действие эскалации оператору', current.escalation_action, current.mode, capabilities)}
+        ${renderChannelActionProfiles(current.action_profiles || [], current.mode, capabilities)}
       </fieldset>
       ${channelUsagePanel(scenarios, current.channel_id)}
       <div class="scenario-editor-actions">
@@ -1409,18 +1691,96 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
   `;
 }
 
-function renderChannelActionProfiles(profiles, mode = 'debug') {
+function renderChannelCapabilities(capabilities = {}) {
+  const choices = [
+    ['supports_client_questions', 'Вопросы клиенту'],
+    ['supports_operator_questions', 'Вопросы оператору'],
+    ['supports_work_order_creation', 'Создание наряда/задачи'],
+    ['supports_async_result', 'Асинхронный результат'],
+  ];
+  return `
+    <fieldset class="launch-editor">
+      <legend>Возможности канала</legend>
+      <div class="grid two">
+        ${choices.map(([key, label]) => `
+          <label class="checkbox-line">
+            <input type="checkbox" name="${escapeHtml(key)}" value="true" ${capabilities[key] ? 'checked' : ''}>
+            <span>${escapeHtml(label)}</span>
+          </label>
+        `).join('')}
+      </div>
+    </fieldset>
+  `;
+}
+
+function renderChannelTechnicalProfile(profile = {}) {
+  const taskTopic = renderChannelTaskTopic(profile.task_topic_template, profile.agent_type);
+  return `
+    <fieldset class="launch-editor">
+      <legend>Техническая реализация канала</legend>
+      <div class="grid two">
+        <label>Транспорт<select name="technical_transport">${optionList(['none', 'kafka'], profile.transport || 'none')}</select></label>
+        <label>Endpoint profile<input name="technical_endpoint_id" value="${escapeHtml(profile.endpoint_id || '')}" autocomplete="off"></label>
+        <label>Тип агента<input name="technical_agent_type" value="${escapeHtml(profile.agent_type || 'Default')}" autocomplete="off"></label>
+        <label>Шаблон topic задачи<input name="technical_task_topic_template" value="${escapeHtml(profile.task_topic_template || 'public.ittask.serviceDesk{agent_type}.task')}" autocomplete="off"></label>
+        <label>Вычисленный topic задачи<input name="technical_task_topic" value="${escapeHtml(taskTopic)}" readonly></label>
+        <label>Topic результата<input name="technical_result_topic" value="${escapeHtml(profile.result_topic || 'public.ittask.result')}" autocomplete="off"></label>
+        <label>Topic ошибок<input name="technical_invalid_topic" value="${escapeHtml(profile.invalid_topic || 'public.ittask.invalid')}" autocomplete="off"></label>
+        <label>Topic временных паролей<input name="technical_temp_password_topic" value="${escapeHtml(profile.temp_password_topic || 'public.ittask.temp_password')}" autocomplete="off"></label>
+        <label>Параметр Kafka key<input name="technical_message_key_parameter" value="${escapeHtml(profile.message_key_parameter || 'task_key')}" autocomplete="off"></label>
+        <label>HMAC обязателен<select name="technical_hmac_required">${booleanOptions(profile.hmac_required ?? true)}</select></label>
+      </div>
+      <div class="meta">Topic задачи доступен в сценариях и маршрутизации как ${escapeHtml('${channel.service_desk.task_topic}')}.</div>
+    </fieldset>
+  `;
+}
+
+function renderChannelParameters(parameters = []) {
+  return `
+    <details class="launch-editor">
+      <summary>Параметры канала</summary>
+      <div class="parameter-binding-list">
+        <div class="parameter-binding-header compact-three">
+          <span>Параметр</span>
+          <span>Направление</span>
+          <span>Источник и описание</span>
+        </div>
+        ${(parameters || []).map((parameter, index) => `
+          <div class="parameter-binding-row compact-three" data-channel-param-row>
+            <div>
+              <input name="channel_parameter_id_${index}" value="${escapeHtml(parameter.parameter_id || '')}" autocomplete="off">
+              <input name="channel_parameter_display_name_${index}" value="${escapeHtml(parameter.display_name || '')}" autocomplete="off">
+            </div>
+            <div>
+              <select name="channel_parameter_direction_${index}">${optionList(['input', 'output', 'bidirectional'], parameter.direction || 'input')}</select>
+              <label class="checkbox-line">
+                <input type="checkbox" name="channel_parameter_secret_${index}" value="true" ${parameter.secret ? 'checked' : ''}>
+                <span>секрет</span>
+              </label>
+            </div>
+            <div>
+              <input name="channel_parameter_source_${index}" value="${escapeHtml(parameter.source || '')}" autocomplete="off">
+              <textarea name="channel_parameter_description_${index}" rows="2">${escapeHtml(parameter.description || '')}</textarea>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </details>
+  `;
+}
+
+function renderChannelActionProfiles(profiles, mode = 'debug', capabilities = {}) {
   return `
     <div class="nested-editor">
       <div class="metric-label">Профили эскалации и таймаутов</div>
       <div class="meta">Профиль связывает логическое событие из блока "5. Решение и эскалация" с реальным действием канала.</div>
-      <div id="channelProfileCards">${(profiles || []).map((profile) => renderChannelProfileCard(profile, mode)).join('')}</div>
+      <div id="channelProfileCards">${(profiles || []).map((profile) => renderChannelProfileCard(profile, mode, capabilities)).join('')}</div>
       <button type="button" data-action="channel-profile-add">Добавить профиль</button>
     </div>
   `;
 }
 
-function renderChannelProfileCard(profile = {}, mode = 'debug') {
+function renderChannelProfileCard(profile = {}, mode = 'debug', capabilities = {}) {
   const action = profile.action || {};
   return `
     <fieldset class="launch-editor" data-channel-profile-card>
@@ -1429,7 +1789,7 @@ function renderChannelProfileCard(profile = {}, mode = 'debug') {
       <label>Название<input name="display_name" value="${escapeHtml(profile.display_name || '')}" autocomplete="off"></label>
       <div class="grid two">
         <label>Тип события<select name="event_type">${optionList(['standard_handoff', 'no_answer', 'major_incident', 'policy_blocked', 'debug_stop'], profile.event_type || 'standard_handoff')}</select></label>
-        <label>Действие канала<select name="action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop')}</select></label>
+        <label>Действие канала<select name="action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop', capabilities)}</select></label>
       </div>
       <label>Шаблон сообщения<textarea name="message_template" rows="3">${escapeHtml(action.message_template || '')}</textarea></label>
       <button class="danger" type="button" data-action="channel-profile-remove">Удалить профиль</button>
@@ -1437,24 +1797,36 @@ function renderChannelProfileCard(profile = {}, mode = 'debug') {
   `;
 }
 
-function renderChannelActionFields(prefix, title, action = {}, mode = 'debug') {
+function renderChannelActionFields(prefix, title, action = {}, mode = 'debug', capabilities = {}) {
   return `
     <fieldset class="launch-editor">
       <legend>${escapeHtml(title)}</legend>
       <div class="grid two">
-        <label>Действие канала<select name="${escapeHtml(prefix)}_action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop')}</select></label>
+        <label>Действие канала<select name="${escapeHtml(prefix)}_action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop', capabilities)}</select></label>
       </div>
       <label>Шаблон сообщения<textarea name="${escapeHtml(prefix)}_message_template" rows="3">${escapeHtml(action.message_template || '')}</textarea></label>
     </fieldset>
   `;
 }
 
-function channelActionTypes(mode = '') {
+function channelActionTypes(mode = '', capabilities = {}) {
+  const effectiveCapabilities = Object.keys(capabilities || {}).length
+    ? capabilities
+    : defaultChannelCapabilities('', mode);
   if (mode === 'online_interactive') {
-    return ['ask_end_user', 'create_draft', 'call_specialist', 'notify_on_call'];
+    return [
+      effectiveCapabilities.supports_client_questions ? 'ask_end_user' : null,
+      'create_draft',
+      'call_specialist',
+      'notify_on_call',
+    ].filter(Boolean);
   }
   if (mode === 'offline_interactive') {
-    return ['ask_operator', 'save_context', 'create_work_order'];
+    return [
+      effectiveCapabilities.supports_operator_questions ? 'ask_operator' : null,
+      'save_context',
+      effectiveCapabilities.supports_work_order_creation ? 'create_work_order' : null,
+    ].filter(Boolean);
   }
   if (mode === 'debug') {
     return ['show_debug_message', 'debug_stop'];
@@ -1462,12 +1834,15 @@ function channelActionTypes(mode = '') {
   return ['show_debug_message', 'debug_stop'];
 }
 
-function channelNoAnswerActions(mode = '') {
+function channelNoAnswerActions(mode = '', capabilities = {}) {
+  const effectiveCapabilities = Object.keys(capabilities || {}).length
+    ? capabilities
+    : defaultChannelCapabilities('', mode);
   if (mode === 'online_interactive') {
     return ['create_draft', 'call_specialist'];
   }
   if (mode === 'offline_interactive') {
-    return ['save_context', 'create_work_order'];
+    return ['save_context', effectiveCapabilities.supports_work_order_creation ? 'create_work_order' : null].filter(Boolean);
   }
   if (mode === 'debug') {
     return ['debug_stop'];
@@ -1475,8 +1850,10 @@ function channelNoAnswerActions(mode = '') {
   return ['debug_stop'];
 }
 
-function channelActionTypeOptions(mode, selected) {
-  return activeOptionList(channelActionTypes(mode), selected);
+function channelActionTypeOptions(mode, selected, capabilities = {}) {
+  const actions = channelActionTypes(mode, capabilities);
+  const effectiveSelected = actions.includes(selected) ? selected : (actions[0] || 'debug_stop');
+  return optionList(actions, effectiveSelected);
 }
 
 function defaultChannelActionProfiles(channelId) {
@@ -1614,21 +1991,34 @@ function renderScenarioEditor({
 }
 
 async function renderResolutionProfiles() {
-  const [active, slotSchemasConfig, scenariosConfig, toolsConfig, endpointsConfig, modelRoutingConfig] = await Promise.all([
+  const [
+    active,
+    slotSchemasConfig,
+    slotSchemaDraft,
+    scenariosConfig,
+    toolsConfig,
+    endpointsConfig,
+    modelRoutingConfig,
+  ] = await Promise.all([
     api('/admin/config/active/attribute_resolution_profiles'),
     api('/admin/config/active/slot_schemas'),
+    loadLatestConfigDraft('slot_schemas'),
     api('/admin/config/active/service_scenarios'),
     api('/admin/config/active/tools'),
     api('/admin/config/active/integration_endpoints'),
     api('/admin/config/active/model_routing'),
   ]);
   const profiles = active.payload?.profiles || [];
-  const slotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
+  const activeSlotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
+  const slotSchemaDraftContext = mergeDraftSlotSchemas(activeSlotSchemas, slotSchemaDraft);
+  const slotSchemas = slotSchemaDraftContext.slotSchemas;
   const scenarios = scenariosConfig.payload?.scenarios || [];
   const tools = toolsConfig.payload?.tools || [];
   const endpoints = endpointsConfig.payload?.endpoints || [];
   state.lastData.resolutionProfiles = profiles;
   state.lastData.slotSchemas = slotSchemas;
+  state.lastData.activeSlotSchemas = activeSlotSchemas;
+  state.lastData.slotSchemaDraft = slotSchemaDraftContext.draft;
   state.lastData.serviceScenarios = scenarios;
   state.lastData.toolCatalog = tools;
   state.lastData.integrationEndpoints = endpoints;
@@ -1674,6 +2064,62 @@ async function renderResolutionProfiles() {
     state.resolutionProfileId = event.target.value;
     renderResolutionProfiles().catch((error) => setNotice(error.message || String(error), 'error'));
   });
+}
+
+async function loadLatestConfigDraft(domain) {
+  const result = await api(`/admin/config/drafts?domain=${encodeURIComponent(domain)}&limit=20`);
+  return (result.drafts || []).find((draft) =>
+    draft.created_by === state.actorId
+    && draft.status !== 'activated'
+    && draft.payload,
+  ) || null;
+}
+
+function mergeDraftSlotSchemas(activeSlotSchemas = [], draft = null) {
+  if (!draft?.payload?.slot_schemas?.length) {
+    return { slotSchemas: activeSlotSchemas, draft: null };
+  }
+  const activeById = slotSchemaById(activeSlotSchemas);
+  const draftById = slotSchemaById(draft.payload.slot_schemas || []);
+  const seen = new Set();
+  const slotSchemas = (activeSlotSchemas || []).map((activeSchema) => {
+    seen.add(activeSchema.slot_schema_id);
+    const draftSchema = draftById[activeSchema.slot_schema_id];
+    return draftSchema
+      ? annotateDraftSlotSchema(draftSchema, activeById[activeSchema.slot_schema_id], draft)
+      : activeSchema;
+  });
+  for (const draftSchema of draft.payload.slot_schemas || []) {
+    if (!seen.has(draftSchema.slot_schema_id)) {
+      slotSchemas.push(annotateDraftSlotSchema(draftSchema, null, draft));
+    }
+  }
+  return { slotSchemas, draft };
+}
+
+function annotateDraftSlotSchema(draftSchema, activeSchema, draft) {
+  const activeSlotIds = new Set((activeSchema?.slots || []).map((slot) => slot.slot_id));
+  const schema = cloneJson(draftSchema);
+  schema.__draft_override = true;
+  schema.__draft_id = draft.draft_id;
+  schema.__draft_status = draft.status;
+  schema.__draft_updated_at = draft.updated_at;
+  schema.slots = (schema.slots || []).map((slot) => ({
+    ...slot,
+    __draft_source: true,
+    __draft_only: !activeSlotIds.has(slot.slot_id),
+    __draft_id: draft.draft_id,
+  }));
+  schema.stages = (schema.stages || []).map((stage) => ({
+    ...stage,
+    slots: (stage.slots || []).map((slot) => ({
+      ...slot,
+      __draft_source: true,
+      __draft_only: !activeSlotIds.has(slot.slot_id),
+      __draft_id: draft.draft_id,
+    })),
+  }));
+  return schema;
 }
 
 function resolutionProfileHowToPanel() {
@@ -1873,10 +2319,17 @@ function buildResolutionSlotContext(profile, slotSchemas, scenarios) {
     scenario_names: selectedScenario ? [selectedScenario.display_name || selectedScenario.scenario_id] : [],
     missing_scenario_names: [],
   }));
+  const draftOnlySlotIds = new Set(slots.filter((slot) => slot.__draft_only).map((slot) => slot.slot_id));
   return {
     selectedScenario,
     schema,
     slots,
+    draft: schema?.__draft_override ? {
+      draft_id: schema.__draft_id,
+      status: schema.__draft_status,
+      updated_at: schema.__draft_updated_at,
+    } : null,
+    draftOnlySlotIds,
     scenarioCount: selectedScenario ? 1 : 0,
     scenarioNames: selectedScenario ? [selectedScenario.display_name || selectedScenario.scenario_id] : [],
     usedScenarios,
@@ -1927,10 +2380,13 @@ function resolutionSlotContextPanel(slotContext) {
   const usedText = usedNames.length
     ? `Профиль уже используется в сценариях: ${usedNames.join(', ')}.`
     : 'Профиль пока не используется сценариями; список слотов ниже нужен для корректного выбора при настройке.';
+  const draftText = slotContext.draft
+    ? ` Используется черновик схемы слотов ${slotContext.draft.draft_id}; новые слоты помечены как "черновик".`
+    : '';
   return `
     <div class="slot-schema-derived">
       <div class="metric-label">Контекст слотов профиля</div>
-      <div class="meta">${escapeHtml(`Сейчас выбран сценарий "${scenarioName}", схема "${schemaName}". ${usedText}`)}</div>
+      <div class="meta">${escapeHtml(`Сейчас выбран сценарий "${scenarioName}", схема "${schemaName}". ${usedText}${draftText}`)}</div>
     </div>
   `;
 }
@@ -1998,6 +2454,33 @@ function reactScopeWarningPanel(steps = [], scenario = null) {
   `;
 }
 
+function profileDraftOnlySlotIds(profile, slotContext, outputRules = null) {
+  const draftOnly = slotContext.draftOnlySlotIds || new Set();
+  const slotIds = new Set();
+  if (profile?.target_slot_id) {
+    slotIds.add(profile.target_slot_id);
+  }
+  for (const rule of outputRules || profileOutputRules(profile) || []) {
+    if (rule.slot_id) {
+      slotIds.add(rule.slot_id);
+    }
+  }
+  return [...slotIds].filter((slotId) => draftOnly.has(slotId));
+}
+
+function resolutionDraftSlotWarningPanel(slotContext, profile, outputRules) {
+  const draftSlotIds = profileDraftOnlySlotIds(profile, slotContext, outputRules);
+  if (!draftSlotIds.length) {
+    return '';
+  }
+  return `
+    <div class="slot-schema-derived warning-panel">
+      <div class="metric-label">Слот из черновика схемы</div>
+      <div class="meta">${escapeHtml(`Слоты ${draftSlotIds.join(', ')} есть только в черновике схемы слотов. Профиль можно сохранить как черновик; для валидации и активации сначала активируйте схему слотов.`)}</div>
+    </div>
+  `;
+}
+
 function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [] }) {
   if (state.resolutionOperation === 'delete') {
     if (!profile) {
@@ -2056,6 +2539,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
       </div>
       <label>Описание<textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea></label>
       ${resolutionSlotContextPanel(slotContext)}
+      ${resolutionDraftSlotWarningPanel(slotContext, current, outputRules)}
       <div class="grid two">
         <label>Сценарий для выбора слотов
           <select name="resolution_slot_scenario_id" data-resolution-slot-scenario>${resolutionScenarioOptions(scenarios, slotContext.selectedScenario?.scenario_id || '')}</select>
@@ -2405,7 +2889,7 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
         <legend>Инструкция настройки шага</legend>
         <label>Что должен сделать шаг
           <textarea data-enrichment-configuration-instruction rows="5" placeholder="Вызови get_user_login. В параметр user_fio передай слот &quot;Фамилия Имя Отчество&quot;. Если результат не найден, эскалируй оператору.">${escapeHtml(step.configuration_instruction || '')}</textarea>
-          <span class="field-help">Помощник настройки сформирует структуру шага. Runtime использует ReAct-вызов, маппинг параметров и LLM-правило ниже, а не свободный текст напрямую.</span>
+          <span class="field-help">Помощник настройки сформирует структуру шага. Для входов ReAct-вызова используйте ${escapeHtml('${paramReAct.<вызов>.input.<параметр>}')}; подсказка появляется после набора ${escapeHtml('${')}.</span>
         </label>
         <input type="hidden" data-enrichment-generated-metadata value="${escapeHtml(jsonPretty(step.generated_structure_metadata || {}))}">
         <div class="scenario-editor-actions">
@@ -3784,6 +4268,44 @@ function referenceHelperSlotItems(slots = []) {
   }));
 }
 
+function referenceHelperChannelItems(channels = []) {
+  const items = [];
+  for (const channel of channels || []) {
+    const channelId = channel.channel_id;
+    if (!channelId) continue;
+    const technicalProfile = normalizeChannelTechnicalProfile(channel.technical_profile, channelId);
+    const parameters = normalizeChannelParameters(channel.channel_parameters, channelId);
+    const parameterIds = new Set(parameters.map((parameter) => parameter.parameter_id));
+    if (technicalProfile.agent_type && !parameterIds.has('agent_type')) {
+      parameters.unshift({
+        parameter_id: 'agent_type',
+        display_name: 'Тип агента',
+        direction: 'input',
+        source: 'technical_profile.agent_type',
+        description: 'Тип агента ServiceDesk.',
+      });
+    }
+    if (technicalProfile.task_topic && !parameterIds.has('task_topic')) {
+      parameters.unshift({
+        parameter_id: 'task_topic',
+        display_name: 'Topic задачи',
+        direction: 'input',
+        source: 'technical_profile.task_topic',
+        description: 'Вычисленный Kafka topic задачи.',
+      });
+    }
+    for (const parameter of parameters) {
+      if (!parameter.parameter_id) continue;
+      items.push({
+        token: `\${channel.${channelId}.${parameter.parameter_id}}`,
+        label: `${channel.display_name || channelId}: ${parameter.display_name || parameter.parameter_id}`,
+        detail: `${parameter.direction || 'input'} · ${parameter.source || 'channel'} · ${parameter.description || parameter.parameter_id}`,
+      });
+    }
+  }
+  return items;
+}
+
 function referenceHelperReactItems(tools = []) {
   return (tools || []).map((tool) => ({
     token: `\${ReAct.${tool.tool_name}}`,
@@ -3805,6 +4327,60 @@ function referenceHelperParameterItems(tool, kind) {
       detail: `${tool.tool_name}: ${schema.description || schema.title || name}`,
     };
   });
+}
+
+function referenceTokenReactCallName(token) {
+  const value = String(token || '').replace(/^\$\{|\}$/g, '');
+  if (value.startsWith('ReAct.')) {
+    return value.slice('ReAct.'.length);
+  }
+  if (!value.startsWith('paramReAct.')) {
+    return '';
+  }
+  const parts = value.slice('paramReAct.'.length).split('.');
+  const boundary = parts.findIndex((part) => part === 'input' || part === 'output');
+  return (boundary > 0 ? parts.slice(0, boundary) : parts).join('.');
+}
+
+function referenceTokensFromTextarea(textarea, fragment = null) {
+  const tokens = [];
+  const tokenPattern = /\$\{([^{}\s"'«»]*)/g;
+  let match = tokenPattern.exec(textarea?.value || '');
+  while (match) {
+    tokens.push(match[1]);
+    match = tokenPattern.exec(textarea?.value || '');
+  }
+  if (fragment?.query) {
+    tokens.push(fragment.query);
+  }
+  return tokens;
+}
+
+function referencedReactToolsFromTextarea(textarea, tools = [], fragment = null) {
+  const byName = new Map((tools || []).map((tool) => [tool.tool_name, tool]));
+  const result = [];
+  const seen = new Set();
+  for (const token of referenceTokensFromTextarea(textarea, fragment)) {
+    const toolName = referenceTokenReactCallName(token);
+    const tool = byName.get(toolName);
+    if (tool && !seen.has(tool.tool_name)) {
+      seen.add(tool.tool_name);
+      result.push(tool);
+    }
+  }
+  return result;
+}
+
+function referenceParameterTools(tools = [], selectedTool = null, referencedTools = []) {
+  const result = [];
+  const seen = new Set();
+  for (const tool of [...(referencedTools || []), selectedTool].filter(Boolean)) {
+    if (tool?.tool_name && !seen.has(tool.tool_name)) {
+      seen.add(tool.tool_name);
+      result.push(tool);
+    }
+  }
+  return result.length ? result : (tools || []);
 }
 
 function referenceHelperCaseItems() {
@@ -3909,17 +4485,18 @@ function referenceAutocompleteGroup(title, items) {
   return (items || []).map((item) => ({ ...item, group: title }));
 }
 
-function referenceAutocompleteItems({ slots = [], tools = [], selectedTool = null, previousSteps = [] } = {}) {
+function referenceAutocompleteItems({ slots = [], channels = [], tools = [], selectedTool = null, parameterTools = null, previousSteps = [] } = {}) {
   const selected = selectedTool?.tool_name ? selectedTool : null;
-  const parameterTools = selected ? [selected] : (tools || []);
+  const scopedParameterTools = parameterTools?.length ? parameterTools : (selected ? [selected] : (tools || []));
   return [
     ...referenceAutocompleteGroup('Данные обращения', referenceHelperCaseItems()),
     ...referenceAutocompleteGroup('Ожидание', referenceHelperWaitItems()),
     ...referenceAutocompleteGroup('Этапы', referenceHelperStageItems()),
     ...referenceAutocompleteGroup('Слоты', referenceHelperSlotItems(slots)),
+    ...referenceAutocompleteGroup('Параметры каналов', referenceHelperChannelItems(channels)),
     ...referenceAutocompleteGroup('ReAct-вызовы', referenceHelperReactItems(tools)),
-    ...referenceAutocompleteGroup('Входные параметры', parameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'input'))),
-    ...referenceAutocompleteGroup('Поля результата', parameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'output'))),
+    ...referenceAutocompleteGroup('Входные параметры', scopedParameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'input'))),
+    ...referenceAutocompleteGroup('Поля результата', scopedParameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'output'))),
     ...referenceAutocompleteGroup('Параметры шагов', referenceHelperStepItems(previousSteps)),
   ];
 }
@@ -3959,16 +4536,22 @@ function allKnownSlotsForReferences() {
   return Array.from(seen.values());
 }
 
+function allKnownChannelsForReferences() {
+  return state.lastData.interactionChannels || [];
+}
+
 function genericReferenceAutocompleteContext() {
   return {
     slots: allKnownSlotsForReferences(),
+    channels: allKnownChannelsForReferences(),
     tools: state.lastData.toolCatalog || [],
     selectedTool: null,
+    parameterTools: null,
     previousSteps: [],
   };
 }
 
-function referenceAutocompleteContextForTextarea(textarea) {
+function referenceAutocompleteContextForTextarea(textarea, fragment = null) {
   const form = textarea.closest('form');
   if (!form) return genericReferenceAutocompleteContext();
   if (textarea.matches('[data-enrichment-configuration-instruction]')) {
@@ -3979,30 +4562,42 @@ function referenceAutocompleteContextForTextarea(textarea) {
     const steps = safeEnrichmentStepsFromForm(form);
     const tools = currentResolutionToolsFromForm(form, steps);
     const selectedToolName = card?.querySelector('[data-enrichment-react-call]')?.value || '';
+    const selectedTool = findToolInCatalog(tools, selectedToolName) || null;
+    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
     return {
       slots: slotContext.slots || [],
+      channels: allKnownChannelsForReferences(),
       tools,
-      selectedTool: findToolInCatalog(tools, selectedToolName) || null,
+      selectedTool,
+      parameterTools: referenceParameterTools(tools, selectedTool, referencedTools),
       previousSteps: safeEnrichmentStepsFromForm(form, index),
     };
   }
   if (textarea.matches('[name="llm_resolution_script_text"]')) {
     const slotContext = currentResolutionSlotContextFromForm(form);
     const steps = safeEnrichmentStepsFromForm(form);
+    const tools = currentResolutionToolsFromForm(form, steps);
+    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
     return {
       slots: slotContext.slots || [],
-      tools: currentResolutionToolsFromForm(form, steps),
+      channels: allKnownChannelsForReferences(),
+      tools,
       selectedTool: null,
+      parameterTools: referenceParameterTools(tools, null, referencedTools),
       previousSteps: steps,
     };
   }
   if (textarea.matches('[name="human_resolution_message_template"]')) {
     const slotContext = currentResolutionSlotContextFromForm(form);
     const steps = safeEnrichmentStepsFromForm(form);
+    const tools = currentResolutionToolsFromForm(form, steps);
+    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
     return {
       slots: slotContext.slots || [],
-      tools: currentResolutionToolsFromForm(form, steps),
+      channels: allKnownChannelsForReferences(),
+      tools,
       selectedTool: null,
+      parameterTools: referenceParameterTools(tools, null, referencedTools),
       previousSteps: steps,
     };
   }
@@ -4086,6 +4681,7 @@ function parseBindingString(binding) {
 function slotOptionLabel(slot, slotContext) {
   const base = `${slot.display_name || slot.slot_id} (${slot.slot_id})`;
   const flags = [
+    slot.__draft_only ? 'черновик' : '',
     slot.required ? 'обязательный' : 'необязательный',
     visibleLabels[slot.fill_method] || slot.fill_method,
     visibleLabels[slot.priority_group] || slot.priority_group,
@@ -7715,8 +8311,10 @@ async function saveScenarioForm(form) {
     max_iterations: parseInt(data.get('react_max_iterations'), 10),
     consecutive_tool_errors_to_escalate: parseInt(data.get('react_consecutive_tool_errors_to_escalate'), 10),
   };
-  scenario.orchestrator_policy_id = await ensureScenarioReactPolicy(scenario, reactPolicySettings);
-  scenario.escalation_policy_id = await ensureScenarioEscalationPolicy(scenario);
+  if (isConfigActivateAction()) {
+    scenario.orchestrator_policy_id = await ensureScenarioReactPolicy(scenario, reactPolicySettings);
+    scenario.escalation_policy_id = await ensureScenarioEscalationPolicy(scenario);
+  }
   await applyScenarioMutation(state.scenarioOperation, scenario);
 }
 
@@ -7825,7 +8423,9 @@ async function saveSlotSchemaForm(form) {
   const data = new FormData(form);
   const stages = parseSlotStages(form);
   const slots = stages.flatMap((stage) => stage.slots);
-  await ensureResolutionProfilesForSlots(slots);
+  if (isConfigActivateAction()) {
+    await ensureResolutionProfilesForSlots(slots);
+  }
   const slotSchema = {
     slot_schema_id: String(data.get('slot_schema_id') || '').trim(),
     display_name: String(data.get('display_name') || '').trim(),
@@ -8103,9 +8703,12 @@ async function saveConfidenceDefaultsForm(form) {
   const active = await api('/admin/config/active/orchestrator_policy');
   const payload = JSON.parse(JSON.stringify(active.payload));
   payload.confidence_defaults = parseConfidenceThresholdsFromForm(data, 'system_confidence', { required: true });
-  const version = await activateConfigPayload('orchestrator_policy', payload, active.active_version_id);
-  setNotice(`Системные пороги уверенности сохранены. Активирована версия ${version.version_id}.`, 'success');
-  await renderScenarioReact();
+  await submitConfigPayload('orchestrator_policy', payload, active.active_version_id, {
+    successMessage: (version) => `Системные пороги уверенности сохранены. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      await renderScenarioReact();
+    },
+  });
 }
 
 async function deletePolicyForm() {
@@ -8194,6 +8797,9 @@ async function saveInteractionChannelForm(form) {
     display_name: String(data.get('display_name') || '').trim(),
     mode: String(data.get('mode') || '').trim(),
     description: String(data.get('description') || '').trim(),
+    capabilities: parseChannelCapabilities(data),
+    technical_profile: parseChannelTechnicalProfile(data),
+    channel_parameters: parseChannelParameters(form),
     question_delivery: parseChannelAction(data, 'question_delivery'),
     waiting_policy: {
       first_reminder_after_seconds: parseInt(data.get('first_reminder_after_seconds'), 10),
@@ -8210,6 +8816,62 @@ async function saveInteractionChannelForm(form) {
     enabled: parseBoolean(data.get('enabled')),
   };
   await applyInteractionChannelMutation(state.interactionChannelOperation, channel);
+}
+
+function parseChannelCapabilities(data) {
+  return {
+    supports_client_questions: data.has('supports_client_questions'),
+    supports_operator_questions: data.has('supports_operator_questions'),
+    supports_work_order_creation: data.has('supports_work_order_creation'),
+    supports_async_result: data.has('supports_async_result'),
+  };
+}
+
+function currentChannelCapabilitiesFromForm(form) {
+  return parseChannelCapabilities(new FormData(form));
+}
+
+function parseChannelTechnicalProfile(data) {
+  const profile = {
+    transport: String(data.get('technical_transport') || 'none').trim(),
+    endpoint_id: String(data.get('technical_endpoint_id') || '').trim(),
+    agent_type: String(data.get('technical_agent_type') || '').trim(),
+    task_topic_template: String(data.get('technical_task_topic_template') || '').trim(),
+    task_topic: String(data.get('technical_task_topic') || '').trim(),
+    result_topic: String(data.get('technical_result_topic') || '').trim(),
+    invalid_topic: String(data.get('technical_invalid_topic') || '').trim(),
+    temp_password_topic: String(data.get('technical_temp_password_topic') || '').trim(),
+    message_key_parameter: String(data.get('technical_message_key_parameter') || '').trim(),
+    hmac_required: parseBoolean(data.get('technical_hmac_required')),
+  };
+  if (profile.transport === 'kafka') {
+    profile.task_topic = renderChannelTaskTopic(profile.task_topic_template, profile.agent_type);
+  }
+  return Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== ''));
+}
+
+function parseChannelParameters(form) {
+  return Array.from(form.querySelectorAll('[data-channel-param-row]')).map((row, index) => {
+    const value = (name) => row.querySelector(`[name="${name}_${index}"]`)?.value?.trim() || '';
+    return {
+      parameter_id: value('channel_parameter_id'),
+      display_name: value('channel_parameter_display_name'),
+      direction: value('channel_parameter_direction') || 'input',
+      source: value('channel_parameter_source'),
+      description: value('channel_parameter_description'),
+      secret: Boolean(row.querySelector(`[name="channel_parameter_secret_${index}"]`)?.checked),
+    };
+  }).filter((parameter) => parameter.parameter_id);
+}
+
+function syncChannelTaskTopic(form) {
+  if (!form) return;
+  const agentType = form.querySelector('[name="technical_agent_type"]')?.value || '';
+  const template = form.querySelector('[name="technical_task_topic_template"]')?.value || '';
+  const target = form.querySelector('[name="technical_task_topic"]');
+  if (target) {
+    target.value = renderChannelTaskTopic(template, agentType);
+  }
 }
 
 async function deleteInteractionChannelForm() {
@@ -8282,12 +8944,15 @@ async function deletePromptPackForm() {
 
 async function saveModelRoutingForm(form) {
   const data = new FormData(form);
-  const secretUpdateCount = await saveModelSecretsFromForm(data);
+  const secretUpdateCount = isConfigActivateAction() ? await saveModelSecretsFromForm(data) : 0;
   const payload = modelPayloadFromForm(data);
-  const version = await activateConfigPayload('model_routing', payload, state.modelRoutingBaseVersionId);
   const secretText = secretUpdateCount ? ` Обновлено секретов: ${secretUpdateCount}; для LiteLLM может потребоваться перезапуск.` : '';
-  setNotice(`Настройки моделей сохранены. Активирована версия ${version.version_id}.${secretText}`, 'success');
-  await renderModels();
+  await submitConfigPayload('model_routing', payload, state.modelRoutingBaseVersionId, {
+    successMessage: (version) => `Настройки моделей сохранены. Активирована версия ${version.version_id}.${secretText}`,
+    onActivated: async () => {
+      await renderModels();
+    },
+  });
 }
 
 async function saveSystemPromptsForm(form) {
@@ -8308,9 +8973,12 @@ async function saveSystemPromptsForm(form) {
       },
     },
   };
-  const version = await activateConfigPayload('model_routing', payload, active.active_version_id);
-  setNotice(`Системные промпты сохранены. Активирована версия ${version.version_id}.`, 'success');
-  await renderSystemPrompts();
+  await submitConfigPayload('model_routing', payload, active.active_version_id, {
+    successMessage: (version) => `Системные промпты сохранены. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      await renderSystemPrompts();
+    },
+  });
 }
 
 async function saveModelSecretsFromForm(data) {
@@ -8532,6 +9200,13 @@ async function saveResolutionProfileForm(form) {
   if (Object.keys(profileThresholds).length) {
     profile.confidence_thresholds = profileThresholds;
   }
+  const draftOnlySlotIds = profileDraftOnlySlotIds(profile, slotContext, outputRules);
+  if (draftOnlySlotIds.length && currentConfigSubmitAction() !== 'save') {
+    throw new Error(
+      `Слоты ${draftOnlySlotIds.join(', ')} есть только в черновике схемы слотов. `
+      + 'Сохраните профиль как черновик или сначала активируйте схему слотов.',
+    );
+  }
   await applyResolutionProfileMutation(state.resolutionOperation, profile);
 }
 
@@ -8710,26 +9385,27 @@ async function applyResolutionProfileMutation(operation, profile) {
     if (index < 0) {
       throw new Error(`Профиль не найден: ${profile.profile_id}`);
     }
-    await unlinkResolutionProfileFromSlotSchemas(profile.profile_id);
+    if (isConfigActivateAction()) {
+      await unlinkResolutionProfileFromSlotSchemas(profile.profile_id);
+    }
     profiles.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с профилем: ${operation}`);
   }
   payload.profiles = profiles;
-  const version = await activateConfigPayload('attribute_resolution_profiles', payload, active.active_version_id);
-  if (operation === 'delete') {
-    state.resolutionProfileId = profiles[0]?.profile_id || '';
-  } else {
-    state.resolutionProfileId = profile.profile_id;
-    state.resolutionOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`Профиль ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderResolutionProfiles();
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('attribute_resolution_profiles', payload, active.active_version_id, {
+    successMessage: (version) => `Профиль ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.resolutionProfileId = profiles[0]?.profile_id || '';
+      } else {
+        state.resolutionProfileId = profile.profile_id;
+        state.resolutionOperation = 'modify';
+      }
+      await renderResolutionProfiles();
+    },
+  });
 }
 
 async function applyPromptPackMutation(operation, promptPack) {
@@ -8751,31 +9427,32 @@ async function applyPromptPackMutation(operation, promptPack) {
     if (index < 0) {
       throw new Error(`Пакет промптов не найден: ${promptPack.prompt_pack_id}`);
     }
-    await reassignScenarioReferenceBeforeDeleting(
-      'prompt_pack_id',
-      promptPack.prompt_pack_id,
-      firstRemainingItemId(packs, 'prompt_pack_id', promptPack.prompt_pack_id),
-      'пакет промптов',
-    );
+    if (isConfigActivateAction()) {
+      await reassignScenarioReferenceBeforeDeleting(
+        'prompt_pack_id',
+        promptPack.prompt_pack_id,
+        firstRemainingItemId(packs, 'prompt_pack_id', promptPack.prompt_pack_id),
+        'пакет промптов',
+      );
+    }
     packs.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с пакетом промптов: ${operation}`);
   }
   payload.packs = packs;
-  const version = await activateConfigPayload('prompt_packs', payload, active.active_version_id);
-  if (operation === 'delete') {
-    state.promptPackId = packs[0]?.prompt_pack_id || '';
-  } else {
-    state.promptPackId = promptPack.prompt_pack_id;
-    state.promptPackOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`Пакет промптов ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderScenarioPrompts();
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('prompt_packs', payload, active.active_version_id, {
+    successMessage: (version) => `Пакет промптов ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.promptPackId = packs[0]?.prompt_pack_id || '';
+      } else {
+        state.promptPackId = promptPack.prompt_pack_id;
+        state.promptPackOperation = 'modify';
+      }
+      await renderScenarioPrompts();
+    },
+  });
 }
 
 async function applyIntegrationEndpointMutation(operation, endpoint) {
@@ -8806,13 +9483,15 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
       .filter((operationId) => !endpoint.operations?.[operationId]);
     for (const operationId of removedOperations) {
       const toolUsage = integrationOperationToolUsage(endpointId, operationId, tools);
-      if (toolUsage.length) {
+      if (toolUsage.length && isConfigActivateAction()) {
         throw new Error(
           `Операция ${operationId} связана с: ${toolUsage.join('; ')}. Сначала отвяжите ReAct-вызов ИИ от операции.`,
         );
       }
-      const workflowRefs = clearOperationFromN8nWorkflows(n8nPayload, endpointId, operationId);
-      clearedWorkflowRefs.push(...workflowRefs.map((workflowName) => `${workflowName}: ${operationId}`));
+      if (isConfigActivateAction()) {
+        const workflowRefs = clearOperationFromN8nWorkflows(n8nPayload, endpointId, operationId);
+        clearedWorkflowRefs.push(...workflowRefs.map((workflowName) => `${workflowName}: ${operationId}`));
+      }
     }
     endpoints[index] = endpoint;
   } else if (operation === 'delete') {
@@ -8820,7 +9499,7 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
       throw new Error(`Подключение не найдено: ${endpointId}`);
     }
     const usage = integrationEndpointUsage(endpointId, tools, workflows);
-    if (usage.length) {
+    if (usage.length && isConfigActivateAction()) {
       throw new Error(`Подключение связано с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     endpoints.splice(index, 1);
@@ -8829,26 +9508,25 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
   }
   payload.endpoints = endpoints;
   let workflowsVersion = null;
-  if (clearedWorkflowRefs.length) {
+  if (clearedWorkflowRefs.length && isConfigActivateAction()) {
     workflowsVersion = await activateConfigPayload('n8n_workflows', n8nPayload, n8nActive.active_version_id);
   }
-  const version = await activateConfigPayload('integration_endpoints', payload, active.active_version_id);
-  if (operation === 'delete') {
-    state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
-  } else {
-    state.integrationEndpointId = endpointId;
-    state.integrationEndpointOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
+  const actionText = configMutationActionText(operation);
   const cleanupText = clearedWorkflowRefs.length
     ? ` Очищены ссылки n8n workflow: ${clearedWorkflowRefs.join(', ')}. Версия workflow: ${workflowsVersion.version_id}.`
     : '';
-  setNotice(`Подключение ${actionText}. Активирована версия ${version.version_id}.${cleanupText}`, 'success');
-  await renderIntegrations();
+  await submitConfigPayload('integration_endpoints', payload, active.active_version_id, {
+    successMessage: (version) => `Подключение ${actionText}. Активирована версия ${version.version_id}.${cleanupText}`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
+      } else {
+        state.integrationEndpointId = endpointId;
+        state.integrationEndpointOperation = 'modify';
+      }
+      await renderIntegrations();
+    },
+  });
 }
 
 async function applyToolCatalogMutation(operation, tool) {
@@ -8890,7 +9568,7 @@ async function applyToolCatalogMutation(operation, tool) {
         resolutionProfiles,
         channels,
       );
-      if (usage.length) {
+      if (usage.length && isConfigActivateAction()) {
         throw new Error(
           `Привязка операции ${binding.endpoint_id}/${binding.operation_id} связана с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`,
         );
@@ -8902,7 +9580,7 @@ async function applyToolCatalogMutation(operation, tool) {
       throw new Error(`ReAct-вызов ИИ не найден: ${toolName}`);
     }
     const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
-    if (usage.length) {
+    if (usage.length && isConfigActivateAction()) {
       throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     tools.splice(index, 1);
@@ -8910,20 +9588,19 @@ async function applyToolCatalogMutation(operation, tool) {
     throw new Error(`Неизвестная операция с ReAct-вызовом ИИ: ${operation}`);
   }
   payload.tools = tools;
-  const version = await activateConfigPayload('tools', payload, active.active_version_id);
-  if (operation === 'delete') {
-    state.toolCatalogName = tools[0]?.tool_name || '';
-  } else {
-    state.toolCatalogName = toolName;
-    state.toolCatalogOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`ReAct-вызов ИИ ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderReactCalls();
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('tools', payload, active.active_version_id, {
+    successMessage: (version) => `ReAct-вызов ИИ ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.toolCatalogName = tools[0]?.tool_name || '';
+      } else {
+        state.toolCatalogName = toolName;
+        state.toolCatalogOperation = 'modify';
+      }
+      await renderReactCalls();
+    },
+  });
 }
 
 async function applyOperationBindingMutation({
@@ -8974,7 +9651,7 @@ async function applyOperationBindingMutation({
       throw new Error('У ReAct-вызова ИИ нет текущей привязки операции.');
     }
     const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
-    if (usage.length) {
+    if (usage.length && isConfigActivateAction()) {
       throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     tool.endpoint_bindings = [];
@@ -8982,25 +9659,25 @@ async function applyOperationBindingMutation({
     throw new Error(`Неизвестная операция с привязкой операции: ${operation}`);
   }
 
-  const version = await activateConfigPayload('tools', payload, active.active_version_id);
-  if (operation === 'bind') {
-    await updateOperationBindingReferences(toolName, nextBinding);
-  }
-  state.operationBindingToolName = toolName;
-  state.operationBindingLastToolName = toolName;
-  if (operation === 'unbind') {
-    state.operationBindingEndpointId = '';
-    state.operationBindingOperationId = '';
-  } else {
-    state.operationBindingEndpointId = nextBinding.endpoint_id;
-    state.operationBindingOperationId = nextBinding.operation_id;
-  }
-  const actionText = {
-    bind: 'обновлена',
-    unbind: 'удалена',
-  }[operation];
-  setNotice(`Привязка операции ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderOperationBindings();
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('tools', payload, active.active_version_id, {
+    successMessage: (version) => `Привязка операции ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'bind') {
+        await updateOperationBindingReferences(toolName, nextBinding);
+      }
+      state.operationBindingToolName = toolName;
+      state.operationBindingLastToolName = toolName;
+      if (operation === 'unbind') {
+        state.operationBindingEndpointId = '';
+        state.operationBindingOperationId = '';
+      } else {
+        state.operationBindingEndpointId = nextBinding.endpoint_id;
+        state.operationBindingOperationId = nextBinding.operation_id;
+      }
+      await renderOperationBindings();
+    },
+  });
 }
 
 async function applyOperationBindingCreateMutation(tool) {
@@ -9015,16 +9692,19 @@ async function applyOperationBindingCreateMutation(tool) {
   }
   tools.push(tool);
   payload.tools = tools;
-  const version = await activateConfigPayload('tools', payload, active.active_version_id);
   const binding = currentToolBinding(tool);
-  state.toolCatalogName = tool.tool_name;
-  state.operationBindingToolName = tool.tool_name;
-  state.operationBindingLastToolName = tool.tool_name;
-  state.operationBindingMode = 'bind';
-  state.operationBindingEndpointId = binding.endpoint_id;
-  state.operationBindingOperationId = binding.operation_id;
-  setNotice(`ReAct-вызов ИИ создан и привязан. Активирована версия ${version.version_id}.`, 'success');
-  await renderOperationBindings();
+  await submitConfigPayload('tools', payload, active.active_version_id, {
+    successMessage: (version) => `ReAct-вызов ИИ создан и привязан. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      state.toolCatalogName = tool.tool_name;
+      state.operationBindingToolName = tool.tool_name;
+      state.operationBindingLastToolName = tool.tool_name;
+      state.operationBindingMode = 'bind';
+      state.operationBindingEndpointId = binding.endpoint_id;
+      state.operationBindingOperationId = binding.operation_id;
+      await renderOperationBindings();
+    },
+  });
 }
 
 async function updateOperationBindingReferences(toolName, binding) {
@@ -9077,47 +9757,19 @@ async function applyScenarioMutation(operation, scenario) {
     const { confidence_overrides: _confidenceOverrides, ...scenarioWithoutConfidenceOverrides } = item;
     return scenarioWithoutConfidenceOverrides;
   });
-
-  const draft = await api('/admin/config/drafts', {
-    method: 'POST',
-    body: JSON.stringify({
-      domain: 'service_scenarios',
-      payload,
-      operator_id: state.actorId,
-      base_version_id: active.active_version_id,
-    }),
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('service_scenarios', payload, active.active_version_id, {
+    successMessage: (version) => `Сценарий ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.scenarioId = payload.scenarios[0]?.scenario_id || '';
+      } else {
+        state.scenarioId = scenario.scenario_id;
+        state.scenarioOperation = 'modify';
+      }
+      await renderScenarios();
+    },
   });
-  const validated = await api(`/admin/config/drafts/${draft.draft_id}/validate`, {
-    method: 'POST',
-    body: JSON.stringify({ operator_id: state.actorId }),
-  });
-  if (validated.validation?.status !== 'valid') {
-    throw new Error(`Валидация не пройдена: ${(validated.validation?.errors || []).join('; ')}`);
-  }
-  const checked = await api(`/admin/config/drafts/${draft.draft_id}/regression`, {
-    method: 'POST',
-    body: JSON.stringify({ operator_id: state.actorId, limit: 20 }),
-  });
-  if (checked.regression?.status === 'failed') {
-    throw new Error('Регрессионная проверка не пройдена.');
-  }
-  const version = await api(`/admin/config/drafts/${draft.draft_id}/activate`, {
-    method: 'POST',
-    body: JSON.stringify({ operator_id: state.actorId }),
-  });
-  if (operation === 'delete') {
-    state.scenarioId = payload.scenarios[0]?.scenario_id || '';
-  } else {
-    state.scenarioId = scenario.scenario_id;
-    state.scenarioOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`Сценарий ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderScenarios();
 }
 
 async function applyInteractionChannelMutation(operation, channel) {
@@ -9139,26 +9791,27 @@ async function applyInteractionChannelMutation(operation, channel) {
     if (index < 0) {
       throw new Error(`Канал не найден: ${channel.channel_id}`);
     }
-    await reassignInteractionChannelBeforeDeleting(channel.channel_id, channels);
+    if (isConfigActivateAction()) {
+      await reassignInteractionChannelBeforeDeleting(channel.channel_id, channels);
+    }
     channels.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с каналом: ${operation}`);
   }
   payload.channels = channels;
-  const version = await activateConfigPayload('interaction_channels', payload, active.active_version_id);
-  if (operation === 'delete') {
-    state.interactionChannelId = channels[0]?.channel_id || '';
-  } else {
-    state.interactionChannelId = channel.channel_id;
-    state.interactionChannelOperation = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`Канал ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderInteractionChannels();
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload('interaction_channels', payload, active.active_version_id, {
+    successMessage: (version) => `Канал ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state.interactionChannelId = channels[0]?.channel_id || '';
+      } else {
+        state.interactionChannelId = channel.channel_id;
+        state.interactionChannelOperation = 'modify';
+      }
+      await renderInteractionChannels();
+    },
+  });
 }
 
 async function replaceConfigItem(domain, collectionKey, idKey, nextItem, successMessage) {
@@ -9206,7 +9859,7 @@ async function applyConfigItemMutation({
     if (index < 0) {
       throw new Error(`Запись не найдена: ${itemId}`);
     }
-    if (referenceKey) {
+    if (referenceKey && isConfigActivateAction()) {
       await reassignScenarioReferenceBeforeDeleting(
         referenceKey,
         itemId,
@@ -9219,24 +9872,23 @@ async function applyConfigItemMutation({
     throw new Error(`Неизвестная операция: ${operation}`);
   }
   payload[collectionKey] = items;
-  const version = await activateConfigPayload(domain, payload, active.active_version_id);
-  if (operation === 'delete') {
-    state[stateIdKey] = items[0]?.[idKey] || '';
-  } else {
-    state[stateIdKey] = itemId;
-    state[stateOperationKey] = 'modify';
-  }
-  const actionText = {
-    create: 'создан',
-    modify: 'изменен',
-    delete: 'удален',
-  }[operation];
-  setNotice(`${successNoun} ${actionText}. Активирована версия ${version.version_id}.`, 'success');
-  await renderView(state.activeView);
+  const actionText = configMutationActionText(operation);
+  await submitConfigPayload(domain, payload, active.active_version_id, {
+    successMessage: (version) => `${successNoun} ${actionText}. Активирована версия ${version.version_id}.`,
+    onActivated: async () => {
+      if (operation === 'delete') {
+        state[stateIdKey] = items[0]?.[idKey] || '';
+      } else {
+        state[stateIdKey] = itemId;
+        state[stateOperationKey] = 'modify';
+      }
+      await renderView(state.activeView);
+    },
+  });
 }
 
-async function activateConfigPayload(domain, payload, baseVersionId) {
-  const draft = await api('/admin/config/drafts', {
+async function createConfigDraft(domain, payload, baseVersionId) {
+  return api('/admin/config/drafts', {
     method: 'POST',
     body: JSON.stringify({
       domain,
@@ -9245,24 +9897,84 @@ async function activateConfigPayload(domain, payload, baseVersionId) {
       base_version_id: baseVersionId,
     }),
   });
-  const validated = await api(`/admin/config/drafts/${draft.draft_id}/validate`, {
+}
+
+async function validateConfigDraft(draftId) {
+  return api(`/admin/config/drafts/${draftId}/validate`, {
     method: 'POST',
     body: JSON.stringify({ operator_id: state.actorId }),
   });
-  if (validated.validation?.status !== 'valid') {
-    throw new Error(`Валидация не пройдена: ${(validated.validation?.errors || []).join('; ')}`);
-  }
-  const checked = await api(`/admin/config/drafts/${draft.draft_id}/regression`, {
+}
+
+async function regressConfigDraft(draftId) {
+  return api(`/admin/config/drafts/${draftId}/regression`, {
     method: 'POST',
     body: JSON.stringify({ operator_id: state.actorId, limit: 20 }),
   });
-  if (checked.regression?.status === 'failed') {
-    throw new Error('Регрессионная проверка не пройдена.');
-  }
-  return api(`/admin/config/drafts/${draft.draft_id}/activate`, {
+}
+
+async function activateConfigDraft(draftId) {
+  return api(`/admin/config/drafts/${draftId}/activate`, {
     method: 'POST',
     body: JSON.stringify({ operator_id: state.actorId }),
   });
+}
+
+async function submitConfigPayload(domain, payload, baseVersionId, options = {}) {
+  const action = currentConfigSubmitAction();
+  const draft = await createConfigDraft(domain, payload, baseVersionId);
+  if (action === 'save') {
+    const message = `Черновик сохранен: ${draft.draft_id}. Активная версия не изменена.`;
+    rememberConfigDraftStatus(domain, message, 'info');
+    setNotice(message, 'success');
+    return { mode: 'draft', draft };
+  }
+
+  const validated = await validateConfigDraft(draft.draft_id);
+  if (validated.validation?.status !== 'valid') {
+    const message = configValidationMessage(domain, validated.validation);
+    rememberConfigDraftStatus(domain, message, 'error');
+    setNotice(message, 'error');
+    return { mode: 'invalid', draft: validated };
+  }
+  if (action === 'validate') {
+    const message = `Черновик валиден: ${draft.draft_id}. Активная версия не изменена.`;
+    rememberConfigDraftStatus(domain, message, 'success');
+    setNotice(message, 'success');
+    return { mode: 'validated', draft: validated };
+  }
+
+  const checked = await regressConfigDraft(draft.draft_id);
+  if (checked.regression?.status === 'failed') {
+    const message = 'Регрессионная проверка не пройдена.';
+    rememberConfigDraftStatus(domain, message, 'error');
+    setNotice(message, 'error');
+    return { mode: 'regression_failed', draft: checked };
+  }
+
+  const version = await activateConfigDraft(draft.draft_id);
+  if (typeof options.onActivated === 'function') {
+    await options.onActivated(version);
+  }
+  const successMessage = typeof options.successMessage === 'function'
+    ? options.successMessage(version)
+    : `Конфигурация активирована. Версия ${version.version_id}.`;
+  rememberConfigDraftStatus(domain, successMessage, 'success');
+  setNotice(successMessage, 'success');
+  return { mode: 'activated', version, draft: checked };
+}
+
+async function activateConfigPayload(domain, payload, baseVersionId) {
+  const draft = await createConfigDraft(domain, payload, baseVersionId);
+  const validated = await validateConfigDraft(draft.draft_id);
+  if (validated.validation?.status !== 'valid') {
+    throw new Error(configValidationMessage(domain, validated.validation));
+  }
+  const checked = await regressConfigDraft(draft.draft_id);
+  if (checked.regression?.status === 'failed') {
+    throw new Error('Регрессионная проверка не пройдена.');
+  }
+  return activateConfigDraft(draft.draft_id);
 }
 
 function legacyCleanupRequestFromPanel(panel, dryRun) {
@@ -9648,13 +10360,28 @@ function activeReferenceFragment(textarea) {
   return { start, end: cursor, query };
 }
 
-function filterReferenceAutocompleteItems(items, query) {
+function referenceAutocompleteQueryVariants(query) {
   const normalized = String(query || '').toLowerCase();
+  if (!normalized) return [''];
+  const variants = [normalized];
+  if (normalized.startsWith('react.')) {
+    const tail = normalized.slice('react.'.length);
+    variants.push(`paramreact.${tail}`, tail);
+  }
+  if (normalized.startsWith('paramreact.')) {
+    variants.push(`react.${normalized.slice('paramreact.'.length)}`);
+  }
+  return Array.from(new Set(variants.filter(Boolean)));
+}
+
+function filterReferenceAutocompleteItems(items, query) {
+  const variants = referenceAutocompleteQueryVariants(query);
+  const normalized = variants[0] || '';
   const result = normalized
     ? items.filter((item) => {
       const tokenText = String(item.token || '').replace(/^\$\{|\}$/g, '').toLowerCase();
       const searchText = `${tokenText} ${item.label || ''} ${item.detail || ''} ${item.group || ''}`.toLowerCase();
-      return searchText.includes(normalized);
+      return variants.some((variant) => searchText.includes(variant));
     })
     : items;
   return result.slice(0, 80);
@@ -9697,7 +10424,7 @@ function renderReferenceAutocomplete(textarea) {
     hideReferenceAutocomplete();
     return;
   }
-  const context = referenceAutocompleteContextForTextarea(textarea);
+  const context = referenceAutocompleteContextForTextarea(textarea, fragment);
   const allItems = referenceAutocompleteItems(context || {});
   const items = filterReferenceAutocompleteItems(allItems, fragment.query);
   const popup = referenceAutocompletePopup();
@@ -10573,8 +11300,10 @@ function syncOperationBindingOperationOptions(form) {
 function addChannelProfileCard() {
   const container = document.getElementById('channelProfileCards');
   if (!container) return;
-  const mode = document.querySelector('select[name="mode"]')?.value || 'debug';
-  const defaultActionType = channelActionTypes(mode)[0] || 'debug_stop';
+  const form = container.closest('form');
+  const mode = form?.querySelector('select[name="mode"]')?.value || 'debug';
+  const capabilities = form ? currentChannelCapabilitiesFromForm(form) : {};
+  const defaultActionType = channelActionTypes(mode, capabilities)[0] || 'debug_stop';
   const existingIds = new Set(
     Array.from(container.querySelectorAll('input[name="profile_id"]')).map((input) => input.value),
   );
@@ -10593,7 +11322,7 @@ function addChannelProfileCard() {
       action_type: defaultActionType,
       message_template: 'Остановить сценарий и показать сообщение оператору.',
     },
-  }, mode).trim();
+  }, mode, capabilities).trim();
   container.appendChild(wrapper.firstElementChild);
 }
 
@@ -10974,12 +11703,20 @@ function initEvents() {
       syncEnrichmentSourceCustom(target.closest('[data-enrichment-param-row]'));
       return;
     }
+    if (target?.matches?.('[name="technical_agent_type"], [name="technical_task_topic_template"]')) {
+      syncChannelTaskTopic(target.closest('form'));
+      return;
+    }
   });
 
   document.addEventListener('input', (event) => {
     const target = event.target;
     if (isReferenceAutocompleteTextarea(target)) {
       renderReferenceAutocomplete(target);
+      return;
+    }
+    if (target?.matches?.('[name="technical_agent_type"], [name="technical_task_topic_template"]')) {
+      syncChannelTaskTopic(target.closest('form'));
       return;
     }
     if (target?.matches?.('[data-operation-contract-control], [data-operation-mock-control]')) {
@@ -10993,6 +11730,8 @@ function initEvents() {
       return;
     }
     event.preventDefault();
+    const previousConfigSubmitAction = state.configSubmitAction;
+    state.configSubmitAction = formConfigDraftAction(form, event.submitter);
     try {
       if (form.dataset.form === 'retrieval') {
         await testRetrieval(form);
@@ -11053,8 +11792,14 @@ function initEvents() {
       }
     } catch (error) {
       setNotice(error.message || String(error), 'error');
+    } finally {
+      state.configSubmitAction = previousConfigSubmitAction;
+      enhanceConfigDraftForms();
     }
   });
+
+  const viewContentObserver = new MutationObserver(() => enhanceConfigDraftForms());
+  viewContentObserver.observe(elements.viewContent, { childList: true, subtree: true });
 }
 
 initEvents();

@@ -51,6 +51,18 @@
             "minLength": 1,
             "maxLength": 1200
           },
+          "capabilities": {
+            "$ref": "#/$defs/channel_capabilities"
+          },
+          "technical_profile": {
+            "$ref": "#/$defs/channel_technical_profile"
+          },
+          "channel_parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/channel_parameter"
+            }
+          },
           "question_delivery": {
             "$ref": "#/$defs/channel_action"
           },
@@ -160,6 +172,128 @@
       "minLength": 1,
       "maxLength": 160,
       "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "channel_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supports_client_questions",
+        "supports_operator_questions",
+        "supports_work_order_creation",
+        "supports_async_result"
+      ],
+      "properties": {
+        "supports_client_questions": {
+          "type": "boolean"
+        },
+        "supports_operator_questions": {
+          "type": "boolean"
+        },
+        "supports_work_order_creation": {
+          "type": "boolean"
+        },
+        "supports_async_result": {
+          "type": "boolean"
+        }
+      }
+    },
+    "channel_technical_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport"
+      ],
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": [
+            "none",
+            "kafka"
+          ]
+        },
+        "endpoint_id": {
+          "$ref": "#/$defs/id"
+        },
+        "agent_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+        },
+        "task_topic_template": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "task_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "result_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "invalid_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "temp_password_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "message_key_parameter": {
+          "$ref": "#/$defs/id"
+        },
+        "hmac_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "channel_parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parameter_id",
+        "display_name",
+        "direction",
+        "source",
+        "description"
+      ],
+      "properties": {
+        "parameter_id": {
+          "$ref": "#/$defs/id"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "input",
+            "output",
+            "bidirectional"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "secret": {
+          "type": "boolean"
+        }
+      }
     },
     "channel_action": {
       "type": "object",

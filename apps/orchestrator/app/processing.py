@@ -2197,6 +2197,27 @@ class ProcessingStore:
         return str(value) if value else None
 
     @staticmethod
+    def _wait_result_topics(wait: dict[str, Any]) -> set[str]:
+        payload = wait.get("payload") or {}
+        origin = wait.get("origin") or {}
+        topics: set[str] = set()
+
+        def add_topic(value: Any) -> None:
+            if isinstance(value, list):
+                for item in value:
+                    add_topic(item)
+                return
+            if isinstance(value, str) and value.strip():
+                topics.add(value.strip())
+
+        for source in (payload, origin):
+            add_topic(source.get("result_topic"))
+            add_topic(source.get("invalid_topic"))
+            add_topic(source.get("result_topics"))
+            add_topic(source.get("allowed_result_topics"))
+        return topics
+
+    @staticmethod
     def _ensure_external_event_transport_matches(
         wait: dict[str, Any],
         *,
@@ -2214,10 +2235,11 @@ class ProcessingStore:
                 f"ExternalEvent получен через {received_transport}, но ожидание разрешает {expected_transport}."
             )
         if received_transport == "kafka_event":
-            expected_topic = ProcessingStore._wait_result_topic(wait)
-            if expected_topic and source_topic and source_topic != expected_topic:
+            expected_topics = ProcessingStore._wait_result_topics(wait)
+            if expected_topics and source_topic and source_topic not in expected_topics:
                 raise ProcessingConflict(
-                    f"ExternalEvent получен из topic {source_topic}, но ожидание ожидает {expected_topic}."
+                    f"ExternalEvent получен из topic {source_topic}, но ожидание ожидает "
+                    f"{', '.join(sorted(expected_topics))}."
                 )
 
     def _claim_external_event_receipt(

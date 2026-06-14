@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ class KafkaRuntimeError(RuntimeError):
 
 KAFKA_SECURITY_PROTOCOLS = {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}
 KAFKA_SASL_MECHANISMS = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"}
+SERVICEDESK_RESULT_CODES = {"Выполнено", "Не выполнено"}
 
 
 class MessageProducer(Protocol):
@@ -527,13 +529,14 @@ class ExternalEventWorker:
 
     def process_event(
         self,
-        event: dict[str, Any],
+        event: dict[str, Any] | KafkaCommandRecord,
         *,
         received_transport: str = "kafka_event",
         source_topic: str | None = None,
     ) -> dict[str, Any]:
         event = self._extract_event(event)
         event.setdefault("received_at", utc_now())
+        event = self._enrich_event_from_receipt_or_wait(event)
         self.contracts.require_valid("external_event", event)
         if not self.processing_store.external_event_receipt(event["idempotency_key"]):
             wait = self.processing_store.active_wait_by_correlation(
@@ -583,7 +586,7 @@ class ExternalEventWorker:
             try:
                 event = self._extract_event(item)
                 self.process_event(
-                    event,
+                    item,
                     received_transport="kafka_event" if isinstance(item, KafkaCommandRecord) else "internal",
                     source_topic=getattr(item, "topic", None),
                 )
@@ -635,8 +638,31 @@ class ExternalEventWorker:
             "dead_lettered": dead_lettered,
         }
 
-    @staticmethod
-    def _extract_event(item: dict[str, Any] | KafkaCommandRecord) -> dict[str, Any]:
+    def _enrich_event_from_receipt_or_wait(self, event: dict[str, Any]) -> dict[str, Any]:
+        event = copy.deepcopy(event)
+        receipt = self.processing_store.external_event_receipt(str(event.get("idempotency_key") or ""))
+        if receipt:
+            for key in ("case_id", "ticket_id", "wait_id", "correlation_id", "source", "event_type", "status"):
+                if receipt.get(key) and not event.get(key):
+                    event[key] = receipt[key]
+            return event
+
+        correlation_id = event.get("correlation_id")
+        if not correlation_id:
+            return event
+        wait = self.processing_store.active_wait_by_correlation(
+            str(correlation_id),
+            case_id=event.get("case_id"),
+        )
+        if not wait:
+            return event
+        event.setdefault("case_id", wait.get("case_id"))
+        event.setdefault("ticket_id", wait.get("ticket_id"))
+        event.setdefault("wait_id", wait.get("wait_id"))
+        return event
+
+    @classmethod
+    def _extract_event(cls, item: dict[str, Any] | KafkaCommandRecord) -> dict[str, Any]:
         value = item.value if isinstance(item, KafkaCommandRecord) else item
         value = decode_kafka_json_object(value)
         if value.get("event_type") == "external_event_received" and isinstance(value.get("payload"), dict):
@@ -645,7 +671,173 @@ class ExternalEventWorker:
                 return copy.deepcopy(payload["external_event"])
         if value.get("event_type") == "external_event" and isinstance(value.get("payload"), dict):
             return copy.deepcopy(value["payload"])
+        service_desk_event = cls._service_desk_event_from_kafka_record(item, value)
+        if service_desk_event:
+            return service_desk_event
         return copy.deepcopy(value)
+
+    @classmethod
+    def _service_desk_event_from_kafka_record(
+        cls,
+        item: dict[str, Any] | KafkaCommandRecord,
+        value: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        topic = getattr(item, "topic", None) if isinstance(item, KafkaCommandRecord) else None
+        key = getattr(item, "key", None) if isinstance(item, KafkaCommandRecord) else None
+        has_task_result = "TaskResultCode" in value
+        has_temp_password = "personalID" in value and "password" in value
+        is_invalid_topic = bool(topic and str(topic).endswith(".invalid"))
+        if not has_task_result and not has_temp_password and not is_invalid_topic:
+            return None
+
+        correlation_id = cls._service_desk_correlation_id(key, value)
+        record_ref = cls._record_reference(item, value)
+        metadata = {
+            "adapter": "operu_it_servicedesk",
+            "source_topic": topic,
+            "message_key": key,
+        }
+        metadata = {name: item for name, item in metadata.items() if item is not None}
+        business_ref = cls._service_desk_business_reference(
+            "task-result",
+            correlation_id,
+            value,
+        )
+        event: dict[str, Any] = {
+            "schema_version": "1.0",
+            "event_id": f"servicedesk-{business_ref}",
+            "correlation_id": correlation_id,
+            "source": "service_desk",
+            "event_type": "servicedesk_task_result",
+            "status": "success",
+            "received_at": utc_now(),
+            "idempotency_key": f"servicedesk:{business_ref}",
+            "metadata": metadata,
+        }
+
+        for field in ("case_id", "ticket_id", "wait_id"):
+            if value.get(field):
+                event[field] = value[field]
+
+        if has_temp_password:
+            explicit_correlation_id = cls._service_desk_explicit_correlation_id(value)
+            if not explicit_correlation_id:
+                raise KafkaRuntimeError(
+                    "ServiceDesk temp_password требует явный correlation_id, task_number, TaskNumber или task_key."
+                )
+            business_ref = cls._service_desk_business_reference(
+                "temp-password",
+                explicit_correlation_id,
+                {"personalID": value.get("personalID"), "source_topic": topic},
+            )
+            event["event_id"] = f"servicedesk-{business_ref}"
+            event["correlation_id"] = explicit_correlation_id
+            event["idempotency_key"] = f"servicedesk:{business_ref}"
+            event["event_type"] = "servicedesk_temp_password"
+            event["result"] = {
+                "personal_id": value.get("personalID"),
+                "password": value.get("password"),
+                "task_key": explicit_correlation_id,
+                "source_topic": topic,
+            }
+            return event
+
+        if is_invalid_topic and not has_task_result:
+            business_ref = cls._service_desk_business_reference(
+                "task-invalid",
+                correlation_id,
+                value,
+            )
+            event["event_id"] = f"servicedesk-{business_ref}"
+            event["idempotency_key"] = f"servicedesk:{business_ref}"
+            event["event_type"] = "servicedesk_task_result"
+            event["status"] = "error"
+            event["result"] = {
+                "task_key": correlation_id,
+                "task_number": correlation_id,
+                "invalid_payload": copy.deepcopy(value),
+                "source_topic": topic,
+            }
+            event["error"] = {
+                "code": "servicedesk_invalid_task",
+                "message": "Сервисдеск вернул сообщение в invalid topic.",
+            }
+            return event
+
+        result_code = str(value.get("TaskResultCode") or "").strip()
+        result_message = str(value.get("TaskResultMessage") or "").strip()
+        if result_code not in SERVICEDESK_RESULT_CODES:
+            raise KafkaRuntimeError(
+                "ServiceDesk TaskResultCode должен быть одним из: Выполнено, Не выполнено."
+            )
+        event["status"] = "success" if result_code == "Выполнено" else "error"
+        event["result"] = {
+            "result_code": result_code,
+            "result_message": result_message,
+            "task_key": correlation_id,
+            "task_number": correlation_id,
+            "source_topic": topic,
+        }
+        if event["status"] == "error":
+            event["error"] = {
+                "code": "servicedesk_task_failed",
+                "message": result_message or result_code or "Сервисдеск вернул неуспешный результат.",
+            }
+        return event
+
+    @staticmethod
+    def _service_desk_correlation_id(key: str | None, value: dict[str, Any]) -> str:
+        candidates = (
+            key,
+            value.get("correlation_id"),
+            value.get("CorrelationId"),
+            value.get("task_number"),
+            value.get("TaskNumber"),
+            value.get("task_key"),
+        )
+        for candidate in candidates:
+            if candidate:
+                return str(candidate)
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return f"servicedesk-{hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:16]}"
+
+    @staticmethod
+    def _service_desk_explicit_correlation_id(value: dict[str, Any]) -> str | None:
+        for candidate in (
+            value.get("correlation_id"),
+            value.get("CorrelationId"),
+            value.get("task_number"),
+            value.get("TaskNumber"),
+            value.get("task_key"),
+        ):
+            if candidate:
+                return str(candidate)
+        return None
+
+    @classmethod
+    def _service_desk_business_reference(
+        cls,
+        event_kind: str,
+        correlation_id: str,
+        payload: dict[str, Any],
+    ) -> str:
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        return cls._safe_event_token(f"{event_kind}-{correlation_id}-{digest}")
+
+    @staticmethod
+    def _record_reference(item: dict[str, Any] | KafkaCommandRecord, value: dict[str, Any]) -> str:
+        if isinstance(item, KafkaCommandRecord) and item.topic is not None and item.offset is not None:
+            parts = [str(item.topic), str(item.partition if item.partition is not None else "p"), str(item.offset)]
+            return "-".join(ExternalEventWorker._safe_event_token(part) for part in parts)
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        return f"payload-{digest}"
+
+    @staticmethod
+    def _safe_event_token(value: str) -> str:
+        token = "".join(char if char.isalnum() or char in "_.:-" else "-" for char in str(value))
+        return token[:120] or "unknown"
 
     @staticmethod
     def _commit_record(item: dict[str, Any] | KafkaCommandRecord) -> None:
