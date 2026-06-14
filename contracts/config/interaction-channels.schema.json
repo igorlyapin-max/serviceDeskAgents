@@ -14,7 +14,6 @@
     },
     "channels": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -114,7 +113,6 @@
           },
           "action_profiles": {
             "type": "array",
-            "minItems": 1,
             "items": {
               "type": "object",
               "additionalProperties": false,

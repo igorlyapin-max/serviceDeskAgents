@@ -2922,6 +2922,7 @@ class ConfigStore:
                 scenario.pop("tool_launch_matrix_id", None)
                 scenario.setdefault("default_channel_id", "debug")
                 scenario.setdefault("allowed_channel_ids", ["messenger_bot", "service_desk", "debug"])
+                scenario.setdefault("allowed_react_call_names", [])
                 scenario.setdefault("audit_required", True)
                 scenario.setdefault("log_required", True)
         elif domain == "tools":
@@ -5623,8 +5624,11 @@ class ConfigStore:
                 if not isinstance(http_security, dict) or not http_security:
                     errors.append(f"{endpoint['endpoint_id']} n8n_webhook должен содержать transport_security.http.")
                 else:
-                    if http_security.get("policy") != "admin_configured":
-                        errors.append(f"{endpoint['endpoint_id']} transport_security.http.policy должен быть admin_configured.")
+                    if http_security.get("policy") not in {"admin_configured", "credential_configured"}:
+                        errors.append(
+                            f"{endpoint['endpoint_id']} transport_security.http.policy должен быть "
+                            "admin_configured или credential_configured."
+                        )
                     if http_security.get("production_recommended_scheme") != "https":
                         errors.append(
                             f"{endpoint['endpoint_id']} transport_security.http.production_recommended_scheme "
@@ -5633,8 +5637,11 @@ class ConfigStore:
                 if not isinstance(kafka_security, dict) or not kafka_security:
                     errors.append(f"{endpoint['endpoint_id']} n8n_webhook должен содержать transport_security.kafka.")
                 else:
-                    if kafka_security.get("policy") != "admin_configured":
-                        errors.append(f"{endpoint['endpoint_id']} transport_security.kafka.policy должен быть admin_configured.")
+                    if kafka_security.get("policy") not in {"admin_configured", "credential_configured"}:
+                        errors.append(
+                            f"{endpoint['endpoint_id']} transport_security.kafka.policy должен быть "
+                            "admin_configured или credential_configured."
+                        )
                     protocols = set(kafka_security.get("supported_security_protocols") or [])
                     if not {"SASL_SSL", "SSL"}.issubset(protocols):
                         errors.append(
@@ -5965,15 +5972,13 @@ class ConfigStore:
         providers = payload.get("providers", {})
         active_provider_id = payload.get("active_provider")
         provider_ids = set(providers)
-        if active_provider_id and active_provider_id not in provider_ids:
+        if active_provider_id and provider_ids and active_provider_id not in provider_ids:
             errors.append(f"active_provider неизвестен: {active_provider_id}")
         enabled_providers = [
             provider
             for provider in providers.values()
             if provider.get("enabled")
         ]
-        if not enabled_providers:
-            errors.append("Должно быть включено хотя бы одно подключение модели.")
         aliases = [
             provider.get("model_alias")
             for provider in enabled_providers
@@ -5987,10 +5992,10 @@ class ConfigStore:
             if provider.get("model_alias")
         }
         default_alias = payload["default_model_alias"]
-        if default_alias not in provider_aliases:
+        if provider_aliases and default_alias not in provider_aliases:
             errors.append("default_model_alias должен совпадать с alias включенного backend.")
         active_provider = providers.get(active_provider_id or "")
-        if active_provider and not active_provider.get("enabled"):
+        if enabled_providers and active_provider and not active_provider.get("enabled"):
             errors.append("active_provider должен ссылаться на включенный backend.")
         for provider_id, provider in providers.items():
             if provider.get("provider_type") not in {"vllm_cpu", "openai", "litellm"}:
@@ -6124,19 +6129,16 @@ class ConfigStore:
     @staticmethod
     def _validate_required_channel_action_profiles(channel: dict[str, Any]) -> list[str]:
         errors = []
-        required_event_types = {"standard_handoff", "no_answer", "major_incident", "policy_blocked"}
+        reserved_event_types = {"standard_handoff", "no_answer", "major_incident", "policy_blocked"}
         event_counts: dict[str, int] = {}
         for profile in channel.get("action_profiles", []):
             event_type = profile["event_type"]
             event_counts[event_type] = event_counts.get(event_type, 0) + 1
-        for event_type in sorted(required_event_types):
-            count = event_counts.get(event_type, 0)
-            if count == 0:
-                errors.append(f"{channel['channel_id']} не содержит обязательный action profile event_type={event_type}.")
-            elif count > 1:
+        for event_type in sorted(reserved_event_types):
+            if event_counts.get(event_type, 0) > 1:
                 errors.append(f"{channel['channel_id']} содержит несколько action profile для event_type={event_type}.")
         for event_type, count in event_counts.items():
-            if event_type not in required_event_types and count > 1:
+            if event_type not in reserved_event_types and count > 1:
                 errors.append(f"{channel['channel_id']} содержит несколько action profile для event_type={event_type}.")
         return errors
 
@@ -6222,9 +6224,6 @@ class ConfigStore:
             orders = [slot["order"] for slot in profile.get("output_slots_order", [])]
             for order in self._duplicates(orders):
                 errors.append(f"{profile_id} содержит дублирующийся порядок выходного слота: {order}")
-            if output_slot_ids and not any(slot.get("required_for_success") for slot in profile.get("output_slots_order", [])):
-                errors.append(f"{profile_id} должен иметь хотя бы один обязательный выходной слот.")
-
             confidence_thresholds = profile.get("confidence_thresholds", {})
             base_threshold = profile.get("confidence_threshold")
             auto_fill_threshold = confidence_thresholds.get("auto_fill", base_threshold if base_threshold is not None else 0.0)
@@ -6457,6 +6456,7 @@ class ConfigStore:
         )
         channel_by_id = self._by_id(self.active_payload("interaction_channels")["channels"], "channel_id")
         channel_ids = set(channel_by_id)
+        tool_names = set(self._by_id(self.active_payload("tools")["tools"], "tool_name"))
         for scenario in scenarios:
             scenario_id = scenario["scenario_id"]
             if scenario["slot_schema_id"] not in slot_schema_ids:
@@ -6490,6 +6490,9 @@ class ConfigStore:
                     errors.append(f"{scenario_id} ссылается на неизвестный allowed_channel_id: {channel_id}")
             if default_channel_id not in allowed_channel_ids:
                 errors.append(f"{scenario_id} default_channel_id должен входить в allowed_channel_ids.")
+            for tool_name in scenario.get("allowed_react_call_names", []):
+                if tool_name not in tool_names:
+                    errors.append(f"{scenario_id} ссылается на неизвестный ReAct-вызов: {tool_name}")
         return errors
 
     def _validate_slot_schemas(self, payload: dict[str, Any]) -> list[str]:
@@ -6514,9 +6517,10 @@ class ConfigStore:
                 errors.append(f"{schema['slot_schema_id']} содержит дублирующийся order этапа: {stage_order}")
             for stage in stages:
                 stage_profile_id = stage.get("resolution_profile_id")
-                if not stage.get("slots") and not stage_profile_id:
+                if not (stage.get("slots") or []) and not stage_profile_id:
                     errors.append(
-                        f"{schema['slot_schema_id']} stage {stage['stage_id']} должен содержать slots или resolution_profile_id."
+                        f"{schema['slot_schema_id']} stage {stage['stage_id']} должен содержать slots "
+                        "или resolution_profile_id."
                     )
                 if stage_profile_id:
                     profile = profile_by_id.get(stage_profile_id)
@@ -6632,9 +6636,6 @@ class ConfigStore:
             if confidence["llm_min"] > confidence["rules_min"]:
                 errors.append(f"{route['route_id']} llm_min не должен быть выше rules_min.")
             rules = route.get("rules", {}).get("rule_items", [])
-            positive_rules = [rule for rule in rules if rule.get("polarity") == "positive"]
-            if not positive_rules:
-                errors.append(f"{route['route_id']} должен содержать хотя бы одно позитивное правило классификации.")
             seen_rules: set[tuple[str, str, str]] = set()
             for index, rule in enumerate(rules, start=1):
                 rule_key = (
@@ -6666,10 +6667,6 @@ class ConfigStore:
         for policy in payload["policies"]:
             if policy["consecutive_tool_errors_to_escalate"] > policy["max_iterations"]:
                 errors.append(f"{policy['policy_id']} лимит ошибок ReAct-вызовов не может быть выше max_iterations.")
-            if not policy["allowed_react_action_groups"]:
-                errors.append(f"{policy['policy_id']} должен содержать хотя бы одну группу действий ReAct.")
-            if not policy["stop_conditions"]:
-                errors.append(f"{policy['policy_id']} должен содержать хотя бы одно стоп-условие.")
         return errors
 
     def _validate_prompt_packs(self, payload: dict[str, Any]) -> list[str]:
@@ -6701,15 +6698,7 @@ class ConfigStore:
         policy_ids = [policy["policy_id"] for policy in payload["policies"]]
         for policy_id in self._duplicates(policy_ids):
             errors.append(f"Дублируется escalation policy_id: {policy_id}")
-        required_package = {
-            "slots",
-            "user_notification",
-        }
         for policy in payload["policies"]:
-            package = set(policy["handoff_package"])
-            missing = required_package - package
-            if missing:
-                errors.append(f"{policy['policy_id']} handoff package должен содержать: {', '.join(sorted(missing))}")
             if policy["major_incident"]["affected_users_threshold"] < 10:
                 errors.append(f"{policy['policy_id']} Major Incident threshold должен быть не меньше 10.")
         return errors
@@ -6868,6 +6857,7 @@ def default_service_scenarios() -> dict[str, Any]:
                 "escalation_policy_id": f"escalation.{item['scenario_id']}",
                 "default_channel_id": "debug",
                 "allowed_channel_ids": ["messenger_bot", "service_desk", "debug"],
+                "allowed_react_call_names": [],
                 "audit_required": True,
                 "log_required": True,
                 "tags": ["mvp"],

@@ -166,6 +166,7 @@ class AdminOpenApiContractPreviewRequest(BaseModel):
     endpoint_id: str | None = Field(default=None)
     endpoint: dict[str, Any] | None = Field(default=None)
     contract_source: dict[str, Any] | None = Field(default=None)
+    lang: str | None = Field(default=None)
 
 
 class AdminAttributeResolutionStepCompileRequest(BaseModel):
@@ -2787,6 +2788,8 @@ def admin_integration_endpoint_openapi_preview(
         )
     if payload.contract_source:
         endpoint["contract_source"] = payload.contract_source
+    if payload.lang:
+        endpoint.setdefault("contract_source", {})["lang"] = payload.lang
     try:
         result = preview_openapi_contract(endpoint, endpoint.get("contract_source") or {})
         impact_warnings = openapi_import_impact_warnings(endpoint=endpoint, result=result)
@@ -2823,6 +2826,7 @@ def admin_integration_endpoint_openapi_preview(
             "operation_count": len(result.get("operations", {})),
             "warning_count": len(result.get("warnings", [])),
             "source_url": result.get("source_url"),
+            "contract_language": result.get("contract_language"),
         },
     )
     return result
@@ -3077,6 +3081,18 @@ def assistant_slot_schema(
     return slot_schema
 
 
+def assistant_tools_for_scenario(scenario_id: str | None = None) -> list[dict[str, Any]]:
+    tools = config_store.active_payload("tools").get("tools", [])
+    if not scenario_id:
+        return tools
+    scenarios = config_store.active_payload("service_scenarios").get("scenarios", [])
+    scenario = next((item for item in scenarios if item.get("scenario_id") == scenario_id), None)
+    allowed_names = set((scenario or {}).get("allowed_react_call_names") or [])
+    if not allowed_names:
+        return tools
+    return [tool for tool in tools if tool.get("tool_name") in allowed_names]
+
+
 @app.post("/admin/config-assistant/attribute-resolution-step/compile")
 def admin_config_assistant_attribute_resolution_step_compile(
     request: AdminAttributeResolutionStepCompileRequest,
@@ -3098,7 +3114,7 @@ def admin_config_assistant_attribute_resolution_step_compile(
         result = compile_attribute_resolution_step(
             instruction=request.instruction,
             slot_schema=slot_schema,
-            tools=config_store.active_payload("tools").get("tools", []),
+            tools=assistant_tools_for_scenario(request.scenario_id),
             react_call=request.react_call,
             step_name=request.step_name,
             previous_steps=request.previous_steps,

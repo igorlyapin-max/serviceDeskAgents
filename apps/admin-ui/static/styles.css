@@ -660,6 +660,11 @@ label {
   background: rgba(180, 35, 24, 0.08);
 }
 
+.slot-schema-derived.warning-panel {
+  border-color: rgba(181, 118, 20, 0.45);
+  background: rgba(181, 118, 20, 0.08);
+}
+
 .slot-card-list {
   display: grid;
   gap: 12px;

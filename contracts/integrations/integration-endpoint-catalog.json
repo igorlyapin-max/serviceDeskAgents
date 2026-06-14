@@ -475,7 +475,8 @@
         "type": "openapi_3_1",
         "enabled": true,
         "method": "GET",
-        "url": "contracts/openapi.json"
+        "url": "contracts/openapi.json",
+        "lang": "ru"
       },
       "extensions": {
         "transport_security": {

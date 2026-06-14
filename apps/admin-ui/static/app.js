@@ -1,3 +1,5 @@
+const adminInterfaceLanguage = 'ru';
+
 const state = {
   activeView: 'dashboard',
   actorId: 'admin-1',
@@ -57,12 +59,12 @@ const viewTitles = {
   processing: 'Поток обработки',
   scenarios: 'Сценарии',
   orchestrationGraph: 'Граф оркестрации',
-  scenarioSlots: '0. Слоты',
-  scenarioClassification: '2. Классификация и маршрут',
+  scenarioSlots: 'Слоты',
+  scenarioClassification: 'Классификация и маршрут',
   scenarioReact: '3. ReAct-планирование',
-  scenarioPrompts: '6. Промпты',
+  scenarioPrompts: 'Промпты',
   interactionChannels: 'Каналы взаимодействия',
-  resolution: '1. Разрешение слотов',
+  resolution: 'Разрешение слотов',
   knowledge: 'База знаний',
   systemPrompts: 'Системные промпты',
   integrations: 'Интеграции',
@@ -580,6 +582,8 @@ async function renderScenarios() {
     policies: context.policies,
     promptPacks: context.promptPacks,
     interactionChannels: context.interactionChannels,
+    tools: context.tools,
+    endpoints: context.endpoints,
   });
   elements.viewContent.innerHTML = [
     section(
@@ -981,6 +985,8 @@ async function loadScenarioContext() {
     promptPacksConfig,
     interactionChannelsConfig,
     resolutionProfilesConfig,
+    toolsConfig,
+    endpointsConfig,
   ] = await Promise.all([
     api('/admin/scenarios'),
     api('/admin/config/active/service_scenarios'),
@@ -990,6 +996,8 @@ async function loadScenarioContext() {
     api('/admin/config/active/prompt_packs'),
     api('/admin/config/active/interaction_channels'),
     api('/admin/config/active/attribute_resolution_profiles'),
+    api('/admin/config/active/tools'),
+    api('/admin/config/active/integration_endpoints'),
   ]);
   const scenarios = overview.scenarios || [];
   if (!scenarios.some((scenario) => scenario.scenario_id === state.scenarioId)) {
@@ -999,6 +1007,8 @@ async function loadScenarioContext() {
     ? await api(`/admin/scenarios/${encodeURIComponent(state.scenarioId)}`)
     : null;
   state.lastData.resolutionProfiles = resolutionProfilesConfig.payload?.profiles || [];
+  state.lastData.toolCatalog = toolsConfig.payload?.tools || [];
+  state.lastData.integrationEndpoints = endpointsConfig.payload?.endpoints || [];
   return {
     overview,
     scenarios,
@@ -1010,6 +1020,8 @@ async function loadScenarioContext() {
     promptPacks: promptPacksConfig.payload?.packs || [],
     interactionChannels: interactionChannelsConfig.payload?.channels || [],
     resolutionProfiles: resolutionProfilesConfig.payload?.profiles || [],
+    tools: toolsConfig.payload?.tools || [],
+    endpoints: endpointsConfig.payload?.endpoints || [],
   };
 }
 
@@ -1060,17 +1072,10 @@ function usedByScenarios(scenarios, referenceKey, referenceId) {
 }
 
 function usagePanel(scenarios, referenceKey, referenceId) {
-  const used = usedByScenarios(scenarios, referenceKey, referenceId);
-  const names = used.map((scenario) => scenario.display_name || scenario.scenario_id);
-  const text = names.length
-    ? `Используется в сценариях: ${names.join(', ')}. Для удаления сначала измените или удалите эти сценарии.`
-    : 'Не используется в сценариях. Блок можно удалить.';
-  return `
-    <div class="slot-schema-derived">
-      <div class="metric-label">Где используется</div>
-      <div class="meta">${escapeHtml(text)}</div>
-    </div>
-  `;
+  void scenarios;
+  void referenceKey;
+  void referenceId;
+  return '';
 }
 
 async function renderScenarioSlots() {
@@ -1092,7 +1097,7 @@ async function renderScenarioSlots() {
   const selected = slotSchemas.find((slotSchema) => slotSchema.slot_schema_id === state.slotSchemaId) || null;
   elements.viewContent.innerHTML = [
     section(
-      '0. Слоты',
+      'Слоты',
       `${blockCatalogControls({
         selectId: 'slotSchemaSelect',
         label: 'Схема слотов',
@@ -1129,7 +1134,7 @@ async function renderScenarioClassification() {
   const selected = routes.find((route) => route.route_id === state.routeId) || null;
   elements.viewContent.innerHTML = [
     section(
-      '2. Классификация и маршрут',
+      'Классификация и маршрут',
       `${blockCatalogControls({
         selectId: 'routeSelect',
         label: 'Маршрут',
@@ -1252,7 +1257,7 @@ async function renderScenarioPrompts() {
   });
   elements.viewContent.innerHTML = [
     section(
-      '6. Промпты: обязательные блоки',
+      'Промпты: обязательные блоки',
       `<div class="toolbar compact">
         <label>Пакет промптов<select id="promptPackSelect">${packOptions}</select></label>
       </div>
@@ -1500,19 +1505,9 @@ function defaultChannelActionProfiles(channelId) {
 }
 
 function channelUsagePanel(scenarios, channelId) {
-  const used = (scenarios || []).filter((scenario) =>
-    scenario.default_channel_id === channelId || (scenario.allowed_channel_ids || []).includes(channelId),
-  );
-  const names = used.map((scenario) => scenario.display_name || scenario.scenario_id);
-  const text = names.length
-    ? `Используется в сценариях: ${names.join(', ')}. Для удаления сначала измените или удалите эти сценарии.`
-    : 'Не используется в сценариях. Канал можно удалить.';
-  return `
-    <div class="slot-schema-derived">
-      <div class="metric-label">Где используется</div>
-      <div class="meta">${escapeHtml(text)}</div>
-    </div>
-  `;
+  void scenarios;
+  void channelId;
+  return '';
 }
 
 function renderScenarioEditor({
@@ -1523,6 +1518,8 @@ function renderScenarioEditor({
   policies,
   promptPacks,
   interactionChannels = [],
+  tools = [],
+  endpoints = [],
 }) {
   if (state.scenarioOperation === 'delete') {
     if (!detail?.scenario) {
@@ -1566,7 +1563,7 @@ function renderScenarioEditor({
         <label>Маршрут классификации<select name="classification_route_id">${referenceOptions(routes, 'route_id', scenario.classification_route_id, 'display_name')}</select></label>
         <label>Пакет промптов
           <select name="prompt_pack_id">${referenceOptions(promptPacks, 'prompt_pack_id', scenario.prompt_pack_id, (pack) => promptPackLabel(pack))}</select>
-          <span class="field-help">Связь сценария с пакетом. Содержимое обязательных блоков редактируется в меню "Сценарии обработки -> 6. Промпты".</span>
+          <span class="field-help">Связь сценария с пакетом. Содержимое обязательных блоков редактируется в меню "Сценарии обработки -> Промпты".</span>
         </label>
         <label>Канал по умолчанию
           <select name="default_channel_id">${referenceOptions(interactionChannels, 'channel_id', scenario.default_channel_id || 'debug', 'display_name')}</select>
@@ -1602,6 +1599,12 @@ function renderScenarioEditor({
           </label>
         </div>
         <div class="meta">Настройка применяется ко всем ReAct-вызовам, профилям разрешения атрибутов и эскалациям внутри сценария.</div>
+      </details>
+      <details class="launch-editor">
+        <summary>Разрешенные ReAct-вызовы</summary>
+        <div class="meta">Выберите типы endpoint, чтобы быстро отметить ReAct-вызовы ниже. Итоговый список сохраняется в сценарии.</div>
+        ${reactCallEndpointTypeCheckboxes(endpoints)}
+        ${reactCallScopeCheckboxes(tools, scenario.allowed_react_call_names || [], endpoints)}
       </details>
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.scenarioOperation === 'create' ? 'Создать сценарий' : 'Сохранить изменения'}</button>
@@ -1679,7 +1682,7 @@ function resolutionProfileHowToPanel() {
       <div class="metric-label">Как подключить профиль к сценарию</div>
       <div class="meta">
         Здесь профиль только создается или модифицируется. Чтобы он начал заполнять слот, откройте
-        "Сценарии обработки -> 0. Слоты", раскройте нужный слот, выберите "Как получить значение слота = профиль разрешения"
+        "Сценарии обработки -> Слоты", раскройте нужный слот, выберите "Как получить значение слота = профиль разрешения"
         и затем выберите этот профиль в поле "Профиль разрешения слота". Если слота еще нет, можно создать профиль по ключу будущего
         слота или сохранить слот без выбранного профиля: будет создан черновик профиля.
       </div>
@@ -1688,30 +1691,10 @@ function resolutionProfileHowToPanel() {
 }
 
 function resolutionProfileUsagePanel(slotSchemas, scenarios, profileId) {
-  const usedSchemas = (slotSchemas || []).filter((schema) =>
-    (schema.slots || []).some((slot) => slot.resolution_profile_id === profileId)
-    || slotSchemaStagesForEditor(schema).some((stage) => stage.resolution_profile_id === profileId),
-  );
-  const schemaIds = new Set(usedSchemas.map((schema) => schema.slot_schema_id));
-  const usedScenarios = (scenarios || []).filter((scenario) => schemaIds.has(scenario.slot_schema_id));
-  const schemaNames = usedSchemas.map((schema) => schema.display_name || schema.slot_schema_id);
-  const scenarioNames = usedScenarios.map((scenario) => scenario.display_name || scenario.scenario_id);
-  const parts = [];
-  if (schemaNames.length) {
-    parts.push(`используется в схемах слотов: ${schemaNames.join(', ')}`);
-  }
-  if (scenarioNames.length) {
-    parts.push(`затрагивает сценарии: ${scenarioNames.join(', ')}`);
-  }
-  const text = parts.length
-    ? `${parts.join('; ')}. Для удаления сначала уберите профиль из схем слотов.`
-    : 'Не используется в схемах слотов и сценариях. Профиль можно удалить.';
-  return `
-    <div class="slot-schema-derived">
-      <div class="metric-label">Где используется</div>
-      <div class="meta">${escapeHtml(text)}</div>
-    </div>
-  `;
+  void slotSchemas;
+  void scenarios;
+  void profileId;
+  return '';
 }
 
 function profileCleanupSlotIds(profile, slotSchema) {
@@ -1983,10 +1966,36 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
 
 function toolsForScenario(tools = [], scenarios = [], scenario = null, referencedToolNames = []) {
   void scenarios;
-  void scenario;
+  const allowed = new Set((scenario?.allowed_react_call_names || []).filter(Boolean));
   const referenced = new Set((referencedToolNames || []).filter(Boolean));
-  const result = (tools || []).filter((tool) => !referenced.size || referenced.has(tool.tool_name) || tool.status !== 'disabled');
-  return result.length ? result : tools;
+  return (tools || []).filter((tool) => {
+    const toolName = tool.tool_name;
+    if (!toolName) return false;
+    if (referenced.has(toolName)) return true;
+    if (tool.status === 'disabled') return false;
+    if (!allowed.size) return true;
+    return allowed.has(toolName);
+  });
+}
+
+function outOfScopeReactCallNames(steps = [], scenario = null) {
+  const allowed = new Set((scenario?.allowed_react_call_names || []).filter(Boolean));
+  if (!allowed.size) return [];
+  return Array.from(new Set((steps || [])
+    .map((step) => step.react_call)
+    .filter((reactCall) => reactCall && !allowed.has(reactCall))));
+}
+
+function reactScopeWarningPanel(steps = [], scenario = null) {
+  const outOfScope = outOfScopeReactCallNames(steps, scenario);
+  if (!outOfScope.length) return '';
+  const scenarioName = scenario?.display_name || scenario?.scenario_id || 'выбранном сценарии';
+  return `
+    <div class="slot-schema-derived warning-panel">
+      <div class="metric-label">ReAct-вызовы вне списка сценария</div>
+      <div class="meta">${escapeHtml(`В профиле уже используются вызовы, которые не выбраны в сценарии "${scenarioName}": ${outOfScope.join(', ')}. Они оставлены в форме для исправления или осознанного добавления в сценарий.`)}</div>
+    </div>
+  `;
 }
 
 function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], scenarios = [], tools = [], endpoints = [] }) {
@@ -2062,6 +2071,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <span>Использовать LLM после шагов</span>
         </label>
       </div>
+      ${reactScopeWarningPanel(enrichmentSteps, slotContext.selectedScenario)}
       <fieldset class="launch-editor enrichment-builder">
         <legend>Обогащение контекста</legend>
         <div class="meta">Шаги выполняются сверху вниз. Результат каждого ReAct-вызова доступен следующим шагам и LLM-правилу через ссылку вида step.</div>
@@ -2879,6 +2889,118 @@ function multiReferenceOptions(items, idKey, selectedValues, labelKey) {
     .join('');
 }
 
+function reactCallBindingSummary(tool) {
+  const bindings = tool?.endpoint_bindings || [];
+  if (!bindings.length) {
+    return 'привязка к endpoint не настроена';
+  }
+  return bindings
+    .map((binding) => `${binding.endpoint_id || 'endpoint?'} / ${binding.operation_id || 'operation?'}`)
+    .join(', ');
+}
+
+function endpointTypeLabel(adapterType) {
+  if (adapterType === 'n8n_webhook') return 'n8n';
+  if (adapterType === 'mock') return 'mock';
+  return adapterType || 'unknown';
+}
+
+function endpointTypeDescription(adapterType) {
+  if (adapterType === 'n8n_webhook') return 'Интеграционные endpoint n8n';
+  if (adapterType === 'mock') return 'Тестовые mock endpoint';
+  return 'Endpoint type';
+}
+
+function scenarioReactEndpointTypes(endpoints = []) {
+  const supported = ['mock', 'n8n_webhook'];
+  const available = new Set((endpoints || [])
+    .map((endpoint) => endpoint.adapter_type)
+    .filter((adapterType) => supported.includes(adapterType)));
+  return supported.filter((adapterType) => available.has(adapterType));
+}
+
+function endpointAdapterTypeById(endpoints = []) {
+  return Object.fromEntries((endpoints || []).map((endpoint) => [endpoint.endpoint_id, endpoint.adapter_type]));
+}
+
+function reactCallAdapterTypes(tool, endpoints = []) {
+  const byEndpointId = endpointAdapterTypeById(endpoints);
+  return Array.from(new Set((tool?.endpoint_bindings || [])
+    .map((binding) => byEndpointId[binding.endpoint_id])
+    .filter(Boolean)));
+}
+
+function reactCallEndpointTypeCheckboxes(endpoints = []) {
+  const types = scenarioReactEndpointTypes(endpoints);
+  if (!types.length) {
+    return '<div class="empty">Нет endpoint типов для предфильтра.</div>';
+  }
+  return `
+    <div class="choice-grid" data-scenario-react-endpoint-types>
+      ${types.map((adapterType) => {
+        const inputId = `scenario_endpoint_type_${adapterType}`;
+        return `
+          <label class="choice-card" for="${escapeHtml(inputId)}">
+            <input id="${escapeHtml(inputId)}" name="scenario_react_endpoint_type" type="checkbox" value="${escapeHtml(adapterType)}" data-scenario-react-endpoint-type checked>
+            <span>
+              <strong>${escapeHtml(endpointTypeLabel(adapterType))}</strong>
+              <small>${escapeHtml(endpointTypeDescription(adapterType))}</small>
+            </span>
+          </label>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function reactCallScopeCheckboxes(tools, selectedValues, endpoints = []) {
+  const allToolNames = (tools || []).map((tool) => tool?.tool_name).filter(Boolean);
+  const selected = new Set((selectedValues || []).length ? selectedValues : allToolNames);
+  const cards = (tools || [])
+    .filter((tool) => tool?.tool_name)
+    .map((tool) => {
+      const value = tool.tool_name;
+      const title = tool.display_name || tool.description || tool.tool_name;
+      const inputId = `scenario_react_call_${value}`;
+      const adapterTypes = reactCallAdapterTypes(tool, endpoints);
+      return `
+        <label class="choice-card" for="${escapeHtml(inputId)}">
+          <input id="${escapeHtml(inputId)}" name="allowed_react_call_names" type="checkbox" value="${escapeHtml(value)}" data-scenario-react-call data-endpoint-adapter-types="${escapeHtml(adapterTypes.join(' '))}" ${selected.has(value) ? 'checked' : ''}>
+          <span>
+            <strong>${escapeHtml(title)} (${escapeHtml(tool.tool_name)})</strong>
+            <small>${escapeHtml(`${reactCallBindingSummary(tool)}${adapterTypes.length ? `; типы: ${adapterTypes.map(endpointTypeLabel).join(', ')}` : ''}`)}</small>
+          </span>
+        </label>
+      `;
+    })
+    .join('');
+  return cards
+    ? `<div class="choice-grid">${cards}</div>`
+    : '<div class="empty">Каталог ReAct-вызовов пуст</div>';
+}
+
+function syncScenarioReactCallsByEndpointTypes(form) {
+  const typeControls = Array.from(form?.querySelectorAll('[data-scenario-react-endpoint-type]') || []);
+  const reactControls = Array.from(form?.querySelectorAll('[data-scenario-react-call]') || []);
+  if (!typeControls.length || !reactControls.length) return;
+  let selectedTypes = typeControls
+    .filter((control) => control.checked)
+    .map((control) => control.value);
+  if (!selectedTypes.length) {
+    typeControls.forEach((control) => {
+      control.checked = true;
+    });
+    selectedTypes = typeControls.map((control) => control.value);
+  }
+  const selectedTypeSet = new Set(selectedTypes);
+  reactControls.forEach((control) => {
+    const adapterTypes = String(control.dataset.endpointAdapterTypes || '')
+      .split(/\s+/)
+      .filter(Boolean);
+    control.checked = adapterTypes.some((adapterType) => selectedTypeSet.has(adapterType));
+  });
+}
+
 function scenarioDisplayName(scenarios, scenarioId) {
   return (scenarios || []).find((scenario) => scenario.scenario_id === scenarioId)?.display_name || 'Выбранный сценарий';
 }
@@ -2980,6 +3102,7 @@ function scenarioCreateTemplate(source, serviceScenarios, policies = []) {
     escalation_policy_id: defaultEscalationPolicyId(scenarioId),
     default_channel_id: template.default_channel_id || 'debug',
     allowed_channel_ids: template.allowed_channel_ids || ['messenger_bot', 'service_desk', 'debug'],
+    allowed_react_call_names: template.allowed_react_call_names || [],
     audit_required: template.audit_required ?? true,
     log_required: template.log_required ?? true,
     tags: template.tags || [],
@@ -3187,7 +3310,7 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
       </div>`
     : `<div class="slot-schema-derived">
         <div class="metric-label">Профиль разрешения не выбран</div>
-        <div class="meta">Если готового профиля еще нет, оставьте поле профиля пустым и сохраните слот: система создаст черновик профиля для этого слота. Затем настройте его в меню "1. Разрешение слотов".</div>
+        <div class="meta">Если готового профиля еще нет, оставьте поле профиля пустым и сохраните слот: система создаст черновик профиля для этого слота. Затем настройте его в меню "Разрешение слотов".</div>
       </div>`;
   const openAttribute = open ? ' open' : '';
   return `
@@ -3266,13 +3389,13 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
         </div>
         <details class="slot-method-section" data-fill-method-advanced="llm_extraction" ${fillMethod === 'llm_extraction' ? '' : 'hidden'}>
           <summary>${escapeHtml(slotConfidenceSummary)}</summary>
-          <div class="meta">Обычно используются системные пороги из "6. Промпты". Меняйте только для исключений конкретного слота.</div>
+          <div class="meta">Обычно используются системные пороги из "Промпты". Меняйте только для исключений конкретного слота.</div>
           ${renderConfidenceOverrideControls({
             prefix: 'slot_confidence',
             overrides: slot.confidence_overrides || {},
             baseThresholds: confidenceDefaults,
             enabledText: 'Слот использует собственные пороги для LLM-извлечения.',
-            disabledText: 'Переопределение выключено. Сейчас используются системные настройки из "6. Промпты".',
+            disabledText: 'Переопределение выключено. Сейчас используются системные настройки из "Промпты".',
           })}
         </details>
       </div>
@@ -4885,6 +5008,7 @@ function defaultOpenApiContractSource() {
     enabled: true,
     method: 'GET',
     url: 'contracts/openapi.json',
+    lang: adminInterfaceLanguage,
   };
 }
 
@@ -4979,6 +5103,7 @@ function renderEndpointContractSourceEditor(endpoint = {}) {
         <label>Использовать OpenAPI<select name="contract_source_enabled">${booleanOptions(source.enabled !== false)}</select></label>
         <label>Метод<select name="contract_source_method">${optionList(['GET'], source.method || 'GET')}</select></label>
         <label>URL контракта<input name="contract_source_url" value="${escapeHtml(source.url || '')}" autocomplete="off" placeholder="contracts/openapi.json"></label>
+        <input type="hidden" name="contract_source_lang" value="${escapeHtml(adminInterfaceLanguage)}">
       </div>
       <div class="scenario-editor-actions">
         <button type="button" data-action="endpoint-openapi-preview">Загрузить операции из OpenAPI</button>
@@ -5046,6 +5171,30 @@ function renderTransportSecurityPreview(transportSecurity = {}) {
   `;
 }
 
+function renderOpenApiLocalizationDiagnostics(diagnostics = {}) {
+  const localization = diagnostics.localization || {};
+  if (!Object.keys(localization).length) {
+    return '';
+  }
+  const control = localization.control_metadata || {};
+  const rows = [
+    ['Запрошенный язык', escapeHtml(localization.requested_language || 'н/д')],
+    ['x-localization', localization.has_x_localization ? 'есть' : 'нет'],
+    ['Default locale', escapeHtml(localization.default_locale || 'н/д')],
+    ['Supported locales', escapeHtml(csvList(localization.supported_locales, []).join(', ') || 'н/д')],
+    ['Query parameter', escapeHtml(localization.query_parameter || 'н/д')],
+    ['info.title', escapeHtml(control.info_title || 'н/д')],
+    ['email/send summary', escapeHtml(control.email_send_summary || 'н/д')],
+  ];
+  return `
+    <div class="slot-schema-derived">
+      <div class="metric-label">Диагностика локали OpenAPI</div>
+      <div class="meta">Preview показывает фактическую локализацию, которую отдал source endpoint; UI не переводит контракт и не меняет технические ключи.</div>
+      ${table(['Поле', 'Значение'], rows)}
+    </div>
+  `;
+}
+
 function renderOpenApiImportPreview(endpointId) {
   const preview = openApiPreviewForEndpoint(endpointId);
   if (!preview) {
@@ -5072,9 +5221,10 @@ function renderOpenApiImportPreview(endpointId) {
   return `
     <div class="slot-schema-derived">
       <div class="metric-label">Preview импорта</div>
-      <div class="meta">Источник: ${escapeHtml(result.source_url || 'н/д')}. Изменения будут применены только после нажатия кнопки.</div>
+      <div class="meta">Источник: ${escapeHtml(result.source_url || 'н/д')}. Язык: ${escapeHtml(result.contract_language || adminInterfaceLanguage)}. Изменения будут применены только после нажатия кнопки.</div>
       ${warnings.length ? `<ul class="usage-list">${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>` : '<div class="meta">Критичных предупреждений нет.</div>'}
     </div>
+    ${renderOpenApiLocalizationDiagnostics(result.contract_diagnostics)}
     ${renderTransportSecurityPreview(result.transport_security)}
     ${table(['Операция', 'Название', 'Вызов', 'Статус'], operationRows)}
     ${table(['ReAct-вызов ИИ', 'Тип', 'Привязка', 'Статус'], toolRows)}
@@ -5085,15 +5235,10 @@ function renderOpenApiImportPreview(endpointId) {
 }
 
 function usageListPanel(title, refs, emptyText) {
-  const items = refs || [];
-  return `
-    <div class="slot-schema-derived">
-      <div class="metric-label">${escapeHtml(title)}</div>
-      ${items.length
-        ? `<ul class="usage-list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
-        : `<div class="meta">${escapeHtml(emptyText)}</div>`}
-    </div>
-  `;
+  void title;
+  void refs;
+  void emptyText;
+  return '';
 }
 
 function integrationEndpointUsage(endpointId, tools, workflows) {
@@ -5117,6 +5262,13 @@ function integrationEndpointUsage(endpointId, tools, workflows) {
 }
 
 function integrationOperationUsage(endpointId, operationId, tools, workflows) {
+  return [
+    ...integrationOperationToolUsage(endpointId, operationId, tools),
+    ...integrationOperationWorkflowUsage(endpointId, operationId, workflows),
+  ];
+}
+
+function integrationOperationToolUsage(endpointId, operationId, tools) {
   const refs = [];
   for (const tool of tools || []) {
     for (const binding of tool.endpoint_bindings || []) {
@@ -5125,6 +5277,11 @@ function integrationOperationUsage(endpointId, operationId, tools, workflows) {
       }
     }
   }
+  return refs;
+}
+
+function integrationOperationWorkflowUsage(endpointId, operationId, workflows) {
+  const refs = [];
   for (const workflow of workflows || []) {
     if (workflow.endpoint_id === endpointId && (workflow.operations || []).includes(operationId)) {
       refs.push(`n8n workflow "${workflow.display_name || workflow.workflow_id}"`);
@@ -5133,11 +5290,22 @@ function integrationOperationUsage(endpointId, operationId, tools, workflows) {
   return refs;
 }
 
-function operationDeleteDisabledReason(usage) {
-  if (!usage?.length) {
-    return 'Операцию можно удалить.';
+function clearOperationFromN8nWorkflows(workflowsPayload, endpointId, operationId) {
+  const cleared = [];
+  for (const workflow of workflowsPayload?.workflows || []) {
+    const operations = workflow.operations || [];
+    if (workflow.endpoint_id !== endpointId || !operations.includes(operationId)) {
+      continue;
+    }
+    workflow.operations = operations.filter((item) => item !== operationId);
+    cleared.push(workflow.display_name || workflow.workflow_id);
   }
-  return `Нельзя удалить: сначала уберите связи: ${usage.join('; ')}.`;
+  return cleared;
+}
+
+function operationDeleteDisabledReason(usage) {
+  void usage;
+  return 'Операцию можно удалить.';
 }
 
 function endpointCreateTemplate(source, endpoints) {
@@ -5177,15 +5345,15 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
     if (!endpoint?.endpoint_id) {
       return '<div class="empty">Нет выбранного подключения для удаления</div>';
     }
-    const usage = integrationEndpointUsage(endpoint.endpoint_id, tools, workflows);
+    void tools;
+    void workflows;
     return `
       <form class="scenario-editor panel" data-form="integration-endpoint-delete">
         <div>
           <div class="metric-label">Удаляемое подключение</div>
           <div class="scenario-title">${escapeHtml(endpointLabel(endpoint))}</div>
         </div>
-        ${usageListPanel('Где используется', usage, 'Не используется. Подключение можно удалить.')}
-        <button class="danger" type="submit" ${usage.length ? 'disabled' : ''}>Удалить подключение</button>
+        <button class="danger" type="submit">Удалить подключение</button>
       </form>
     `;
   }
@@ -5226,6 +5394,7 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
       </div>
       ${renderEndpointContractSourceEditor(current)}
       ${renderEndpointTransportSecurityEditor(current)}
+      ${renderMockOperationImportPanel(current, endpoints)}
       <details class="launch-editor endpoint-operations-toggle" data-endpoint-operations-section>
         <summary class="endpoint-operations-summary">
           <div class="slot-card-summary-main">
@@ -5237,11 +5406,76 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
         <div id="endpointOperationCards" class="slot-card-list">${operationCards}</div>
         <button type="button" data-action="endpoint-operation-add">Добавить операцию</button>
       </details>
-      ${usageListPanel('Где используется', integrationEndpointUsage(current.endpoint_id, tools, workflows), 'Не используется. Подключение можно удалить.')}
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.integrationEndpointOperation === 'create' ? 'Создать подключение' : 'Сохранить подключение'}</button>
       </div>
     </form>
+  `;
+}
+
+function mockOperationImportSourceEndpoints(currentEndpoint = {}, endpoints = []) {
+  return (endpoints || [])
+    .filter((endpoint) =>
+      endpoint?.endpoint_id
+      && endpoint.endpoint_id !== currentEndpoint.endpoint_id
+      && Object.keys(endpoint.operations || {}).length,
+    )
+    .sort((left, right) => endpointLabel(left).localeCompare(endpointLabel(right), 'ru'));
+}
+
+function mockOperationImportSourceOptions(currentEndpoint = {}, endpoints = []) {
+  const sources = mockOperationImportSourceEndpoints(currentEndpoint, endpoints);
+  if (!sources.length) {
+    return '<option value="">Нет endpoints с операциями</option>';
+  }
+  return sources
+    .map((endpoint, index) =>
+      `<option value="${escapeHtml(endpoint.endpoint_id)}" ${index === 0 ? 'selected' : ''}>${escapeHtml(endpointLabel(endpoint))}</option>`,
+    )
+    .join('');
+}
+
+function renderMockOperationImportRows(currentEndpoint = {}, endpoints = []) {
+  const sources = mockOperationImportSourceEndpoints(currentEndpoint, endpoints);
+  if (!sources.length) {
+    return '<div class="empty" data-mock-import-empty>Нет других endpoints с операциями для импорта.</div>';
+  }
+  return sources.map((endpoint, sourceIndex) => {
+    const rows = Object.entries(endpoint.operations || {}).map(([operationId, operation]) => `
+      <label class="choice-card" data-mock-import-operation-row data-source-endpoint-id="${escapeHtml(endpoint.endpoint_id)}" ${sourceIndex === 0 ? '' : 'hidden'}>
+        <input name="mock_import_operation_id" type="checkbox" value="${escapeHtml(operationId)}" data-mock-import-operation>
+        <span>
+          <strong>${escapeHtml(operationLabel(operationId, operation))}</strong>
+          <small>${escapeHtml(`${operation.method || 'POST'} ${operation.path || ''}`)} · ${escapeHtml(visibleLabels[operation.contract_status] || operation.contract_status || 'draft')}</small>
+        </span>
+      </label>
+    `).join('');
+    return rows;
+  }).join('');
+}
+
+function renderMockOperationImportPanel(currentEndpoint = {}, endpoints = []) {
+  if (currentEndpoint.adapter_type !== 'mock') {
+    return '';
+  }
+  return `
+    <details class="launch-editor">
+      <summary>Импорт операций из endpoint</summary>
+      <div class="meta">Выберите сохраненный endpoint и отметьте операции, которые нужно добавить в текущий mock. Импорт меняет только форму; сохранение выполняется кнопкой подключения.</div>
+      <div class="grid two">
+        <label>Источник endpoint
+          <select name="mock_import_source_endpoint_id" data-mock-import-source>
+            ${mockOperationImportSourceOptions(currentEndpoint, endpoints)}
+          </select>
+        </label>
+      </div>
+      <div class="choice-grid" data-mock-import-operation-list>
+        ${renderMockOperationImportRows(currentEndpoint, endpoints)}
+      </div>
+      <div class="scenario-editor-actions">
+        <button type="button" data-action="endpoint-mock-import-operations">Импортировать выбранные</button>
+      </div>
+    </details>
   `;
 }
 
@@ -5472,8 +5706,9 @@ function renderOperationJsonCheckpoint(operation = {}, adapterType = 'mock') {
 }
 
 function renderEndpointOperationCard({ endpointId, adapterType = 'mock', operationId, operation = {}, tools = [], workflows = [], open = false }) {
-  const usage = integrationOperationUsage(endpointId, operationId, tools, workflows);
-  const deleteReason = operationDeleteDisabledReason(usage);
+  void tools;
+  void workflows;
+  const deleteReason = operationDeleteDisabledReason([]);
   const requestSchema = operation.request_schema || defaultOperationRequestSchema();
   const responseSchema = operation.response_schema || defaultOperationResponseSchema();
   return `
@@ -5481,9 +5716,9 @@ function renderEndpointOperationCard({ endpointId, adapterType = 'mock', operati
       <summary class="slot-card-summary">
         <div class="slot-card-summary-main">
           <strong>${escapeHtml(operation.display_name || operationId || 'Новая операция')}</strong>
-          <span>${escapeHtml(operationId || 'operation_id')} · ${escapeHtml(operation.method || 'POST')} ${escapeHtml(operation.path || '')}${usage.length ? ` · используется: ${escapeHtml(usage.join('; '))}` : ''}</span>
+          <span>${escapeHtml(operationId || 'operation_id')} · ${escapeHtml(operation.method || 'POST')} ${escapeHtml(operation.path || '')}</span>
         </div>
-        <button class="danger slot-delete-button" type="button" data-action="endpoint-operation-remove" title="${escapeHtml(deleteReason)}" ${usage.length ? 'disabled' : ''}>Удалить</button>
+        <button class="danger slot-delete-button" type="button" data-action="endpoint-operation-remove" title="${escapeHtml(deleteReason)}">Удалить</button>
       </summary>
       <div class="slot-card-body">
         <div class="grid two">
@@ -5504,7 +5739,6 @@ function renderEndpointOperationCard({ endpointId, adapterType = 'mock', operati
         ${renderAsyncEventContractsEditor(operation.async_event_contracts || {})}
         ${renderOperationMockEditor(adapterType, responseSchema, operation.mock_output || {})}
         ${renderOperationJsonCheckpoint(operation, adapterType)}
-        ${usageListPanel('Где используется операция', usage, 'Не используется. Операцию можно удалить.')}
       </div>
     </details>
   `;
@@ -5545,15 +5779,16 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
     if (!tool?.tool_name) {
       return '<div class="empty">Нет выбранного ReAct-вызова ИИ для удаления</div>';
     }
-    const usage = toolUsage(tool.tool_name, matrices, resolutionProfiles, channels);
+    void matrices;
+    void resolutionProfiles;
+    void channels;
     return `
       <form class="scenario-editor panel" data-form="tool-catalog-delete">
         <div>
           <div class="metric-label">Удаляемый ReAct-вызов ИИ</div>
           <div class="scenario-title">${escapeHtml(tool.tool_name)}</div>
         </div>
-        ${usageListPanel('Где используется', usage, 'Не используется. ReAct-вызов ИИ можно удалить.')}
-        <button class="danger" type="submit" ${usage.length ? 'disabled' : ''}>Удалить ReAct-вызов ИИ</button>
+        <button class="danger" type="submit">Удалить ReAct-вызов ИИ</button>
       </form>
     `;
   }
@@ -5593,7 +5828,6 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
         <label>JSON Schema параметров<textarea name="parameters_schema" rows="8">${escapeHtml(jsonPretty(current.parameters_schema || { type: 'object', additionalProperties: true }))}</textarea></label>
         <label>JSON Schema результата<textarea name="result_schema" rows="8">${escapeHtml(jsonPretty(current.result_schema || { type: 'object', additionalProperties: true }))}</textarea></label>
       </fieldset>
-      ${usageListPanel('Где используется', toolUsage(current.tool_name, matrices, resolutionProfiles, channels), 'Не используется. ReAct-вызов ИИ можно удалить.')}
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.toolCatalogOperation === 'create' ? 'Создать ReAct-вызов ИИ' : 'Сохранить ReAct-вызов ИИ'}</button>
       </div>
@@ -5642,7 +5876,7 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
   const bindingModel = operationBindingEditorModel(tool, selectedOperation, currentBinding, selectedEndpointId, selectedOperationId);
   const compatibility = operationBindingCompatibility(bindingModel.tool, selectedOperation, bindingModel.binding);
   const unbindReason = operationBindingUnbindDisabledReason(currentBinding, usage);
-  const unbindDisabled = !currentBinding || usage.length;
+  const unbindDisabled = !currentBinding;
   return `
     <form class="scenario-editor panel" data-form="operation-binding-editor">
       <div class="slot-schema-derived">
@@ -5672,7 +5906,6 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
         ${renderOperationResultVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       ${operationBindingCompatibilityPanel(compatibility)}
-      ${usageListPanel('Где используется ReAct-вызов ИИ', usage, 'Не используется. Привязку можно отвязать.')}
       <div class="field-help">${escapeHtml(unbindReason)}</div>
       <div class="scenario-editor-actions">
         <button class="primary" type="submit" name="operation_binding_action" value="bind" ${!selectedEndpointId || !selectedOperationId ? 'disabled' : ''}>Привязать</button>
@@ -6169,11 +6402,9 @@ function toolUsage(toolName, matrices, resolutionProfiles, channels) {
 }
 
 function operationBindingUnbindDisabledReason(currentBinding, usage) {
+  void usage;
   if (!currentBinding) {
     return 'У ReAct-вызова ИИ нет текущей привязки операции.';
-  }
-  if (usage?.length) {
-    return `Нельзя отвязать: сначала уберите связи: ${usage.join('; ')}.`;
   }
   return 'Привязку можно отвязать.';
 }
@@ -6482,7 +6713,7 @@ async function renderSystemPrompts() {
       `<form class="scenario-editor panel" data-form="system-prompts-editor">
         <div class="slot-schema-derived">
           <div class="metric-label">Разрешение слотов</div>
-          <div class="meta">Шаблон применяется к новым или пустым LLM-правилам в "1. Разрешение слотов". Уже сохраненные профили хранят свой итоговый prompt для воспроизводимости.</div>
+          <div class="meta">Шаблон применяется к новым или пустым LLM-правилам в "Разрешение слотов". Уже сохраненные профили хранят свой итоговый prompt для воспроизводимости.</div>
         </div>
         <label>Prompt slot resolution
           <textarea name="slot_resolution_prompt" rows="9">${escapeHtml(slotResolutionPromptTemplate(config))}</textarea>
@@ -6740,12 +6971,38 @@ function endpointContractSourceFromFormData(data, adapterType) {
     enabled,
     method: String(data.get('contract_source_method') || 'GET').trim() || 'GET',
     url: sourceUrl,
+    lang: String(data.get('contract_source_lang') || adminInterfaceLanguage).trim() || adminInterfaceLanguage,
   };
+}
+
+function normalizedOpenApiContractSource(source = {}) {
+  return {
+    type: String(source.type || 'openapi_3_1').trim() || 'openapi_3_1',
+    enabled: source.enabled !== false,
+    method: String(source.method || 'GET').trim().toUpperCase() || 'GET',
+    url: String(source.url || '').trim(),
+    lang: String(source.lang || adminInterfaceLanguage).trim() || adminInterfaceLanguage,
+  };
+}
+
+function openApiPreviewMatchesEndpoint(preview, endpoint) {
+  if (!preview?.contract_source || !endpoint?.contract_source) {
+    return false;
+  }
+  return JSON.stringify(normalizedOpenApiContractSource(preview.contract_source))
+    === JSON.stringify(normalizedOpenApiContractSource(endpoint.contract_source));
 }
 
 function currentIntegrationEndpointById(endpointId) {
   return (state.lastData.integrationEndpoints || [])
     .find((endpoint) => endpoint.endpoint_id === endpointId);
+}
+
+function endpointTransportPolicyFromForm(data, name, fallback = 'admin_configured') {
+  const policy = String(data.get(name) || fallback || 'admin_configured').trim();
+  return ['admin_configured', 'credential_configured'].includes(policy)
+    ? policy
+    : 'admin_configured';
 }
 
 function endpointTransportSecurityFromFormData(data, adapterType, currentEndpoint = {}) {
@@ -6754,7 +7011,7 @@ function endpointTransportSecurityFromFormData(data, adapterType, currentEndpoin
   }
   const defaults = endpointTransportSecurity(currentEndpoint);
   const http = {
-    policy: 'admin_configured',
+    policy: endpointTransportPolicyFromForm(data, 'transport_http_policy', defaults.http.policy),
     base_url_env: String(data.get('transport_http_base_url_env') || defaults.http.base_url_env || '').trim(),
     callback_base_url_env: String(data.get('transport_http_callback_base_url_env') || defaults.http.callback_base_url_env || '').trim(),
     production_recommended_scheme: 'https',
@@ -6762,7 +7019,7 @@ function endpointTransportSecurityFromFormData(data, adapterType, currentEndpoin
     token_env: String(data.get('transport_http_token_env') || defaults.http.token_env || '').trim(),
   };
   const kafka = {
-    policy: 'admin_configured',
+    policy: endpointTransportPolicyFromForm(data, 'transport_kafka_policy', defaults.kafka.policy),
     bootstrap_servers_env: String(data.get('transport_kafka_bootstrap_servers_env') || defaults.kafka.bootstrap_servers_env || '').trim(),
     security_protocol_env: String(data.get('transport_kafka_security_protocol_env') || defaults.kafka.security_protocol_env || '').trim(),
     supported_security_protocols: csvList(
@@ -7066,10 +7323,177 @@ function parseEndpointOperationCards(form, adapterType) {
     }
     operations[operationId] = operation;
   }
-  if (!Object.keys(operations).length) {
-    throw new Error('Подключение должно содержать хотя бы одну операцию.');
-  }
   return operations;
+}
+
+function schemaPlaceholderValue(schema = {}) {
+  if (schema.const !== undefined) {
+    return cloneJson(schema.const);
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length) {
+    return cloneJson(schema.enum[0]);
+  }
+  if (Array.isArray(schema.anyOf) && schema.anyOf.length) {
+    return schemaPlaceholderValue(schema.anyOf[0]);
+  }
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length) {
+    return schemaPlaceholderValue(schema.oneOf[0]);
+  }
+  const type = Array.isArray(schema.type)
+    ? schema.type.find((item) => item !== 'null') || schema.type[0]
+    : schema.type;
+  if (type === 'integer') return 1;
+  if (type === 'number') return 1;
+  if (type === 'boolean') return true;
+  if (type === 'array') {
+    return [schemaPlaceholderValue(schema.items || {})];
+  }
+  if (type === 'object' || schema.properties) {
+    const result = {};
+    for (const [fieldName, property] of Object.entries(schema.properties || {})) {
+      result[fieldName] = schemaPlaceholderValue(property);
+    }
+    return result;
+  }
+  return 'test_value';
+}
+
+function mockOutputPlaceholderFromSchema(schema = {}) {
+  const placeholder = schemaPlaceholderValue(schema || defaultOperationResponseSchema());
+  return placeholder && !Array.isArray(placeholder) && typeof placeholder === 'object'
+    ? placeholder
+    : { result: placeholder };
+}
+
+function operationMockOutputForImport(operation = {}) {
+  const responseSchema = operation.response_schema || defaultOperationResponseSchema();
+  if (operation.mock_output !== undefined) {
+    const currentMockOutput = cloneJson(operation.mock_output || {});
+    try {
+      validateMockOutputAgainstResponseSchema(currentMockOutput, responseSchema);
+      return currentMockOutput;
+    } catch {
+      return mockOutputPlaceholderFromSchema(responseSchema);
+    }
+  }
+  return mockOutputPlaceholderFromSchema(responseSchema);
+}
+
+function cloneOperationForMockImport(operation = {}) {
+  const imported = {
+    display_name: operation.display_name || 'Импортированная операция',
+    description: operation.description || 'Операция импортирована из другого endpoint.',
+    method: operation.method || 'POST',
+    path: operation.path || '/mock/imported',
+    request_schema: cloneJson(operation.request_schema || defaultOperationRequestSchema()),
+    response_schema: cloneJson(operation.response_schema || defaultOperationResponseSchema()),
+    async_event_contracts: cloneJson(operation.async_event_contracts || {}),
+    contract_version: operation.contract_version || '1.0',
+    contract_status: operation.contract_status || 'draft',
+    timeout_seconds: operation.timeout_seconds || 10,
+    mock_output: operationMockOutputForImport(operation),
+  };
+  if (operation.extensions) {
+    imported.extensions = cloneJson(operation.extensions);
+  }
+  return imported;
+}
+
+function syncMockImportOperationRows(form) {
+  const sourceId = form?.querySelector('[data-mock-import-source]')?.value || '';
+  form?.querySelectorAll('[data-mock-import-operation-row]').forEach((row) => {
+    const visible = row.dataset.sourceEndpointId === sourceId;
+    row.hidden = !visible;
+    const checkbox = row.querySelector('[data-mock-import-operation]');
+    if (!visible && checkbox) {
+      checkbox.checked = false;
+    }
+  });
+}
+
+function operationCardById(container, operationId) {
+  return Array.from(container.querySelectorAll('[data-endpoint-operation-card]'))
+    .find((card) => card.querySelector('[name="operation_id"]')?.value?.trim() === operationId);
+}
+
+function operationCardElement({ endpointId, operationId, operation }) {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderEndpointOperationCard({
+    endpointId,
+    adapterType: 'mock',
+    operationId,
+    operation,
+    tools: state.lastData.toolCatalog || [],
+    workflows: state.lastData.n8nWorkflows || [],
+    open: true,
+  }).trim();
+  return wrapper.firstElementChild;
+}
+
+function importSelectedOperationsIntoMockEndpoint(target) {
+  const form = target.closest('form');
+  if (!form) return;
+  const adapterType = form.querySelector('[name="adapter_type"]')?.value || '';
+  if (adapterType !== 'mock') {
+    throw new Error('Импорт операций из других endpoints доступен только для mock endpoint.');
+  }
+  const endpointId = form.querySelector('[name="endpoint_id"]')?.value?.trim() || '';
+  const sourceEndpointId = form.querySelector('[data-mock-import-source]')?.value || '';
+  const sourceEndpoint = (state.lastData.integrationEndpoints || [])
+    .find((endpoint) => endpoint.endpoint_id === sourceEndpointId);
+  if (!sourceEndpoint) {
+    throw new Error('Выберите endpoint-источник для импорта операций.');
+  }
+  const selectedOperationIds = Array.from(
+    form.querySelectorAll('[data-mock-import-operation-row]:not([hidden]) [data-mock-import-operation]:checked'),
+  )
+    .map((input) => input.value)
+    .filter(Boolean);
+  if (!selectedOperationIds.length) {
+    throw new Error('Выберите хотя бы одну операцию для импорта.');
+  }
+  const container = form.querySelector('#endpointOperationCards');
+  if (!container) {
+    throw new Error('Блок операций подключения не найден.');
+  }
+  const conflicts = selectedOperationIds.filter((operationId) => operationCardById(container, operationId));
+  const replaceConflicts = !conflicts.length || window.confirm(
+    `Операции уже есть в mock endpoint: ${conflicts.join(', ')}.\nЗаменить их импортированными версиями? Отмена пропустит эти операции.`,
+  );
+  const imported = [];
+  const skipped = [];
+  for (const operationId of selectedOperationIds) {
+    const sourceOperation = sourceEndpoint.operations?.[operationId];
+    if (!sourceOperation) {
+      skipped.push(operationId);
+      continue;
+    }
+    const existingCard = operationCardById(container, operationId);
+    if (existingCard && !replaceConflicts) {
+      skipped.push(operationId);
+      continue;
+    }
+    const card = operationCardElement({
+      endpointId,
+      operationId,
+      operation: cloneOperationForMockImport(sourceOperation),
+    });
+    if (existingCard) {
+      existingCard.replaceWith(card);
+    } else {
+      container.appendChild(card);
+    }
+    updateEndpointOperationJsonPreview(card);
+    imported.push(operationId);
+  }
+  if (!imported.length) {
+    throw new Error('Операции не импортированы.');
+  }
+  form.querySelectorAll('[data-mock-import-operation]').forEach((input) => {
+    input.checked = false;
+  });
+  const skippedText = skipped.length ? ` Пропущено: ${skipped.join(', ')}.` : '';
+  setNotice(`Импортировано операций в mock endpoint: ${imported.join(', ')}.${skippedText} Нажмите "Сохранить подключение", чтобы применить изменения.`, 'success');
 }
 
 async function saveToolCatalogForm(form) {
@@ -7282,6 +7706,7 @@ async function saveScenarioForm(form) {
     escalation_policy_id: data.get('escalation_policy_id'),
     default_channel_id: data.get('default_channel_id'),
     allowed_channel_ids: selectedValues(form.elements.allowed_channel_ids),
+    allowed_react_call_names: selectedScenarioReactCallValues(form),
     audit_required: data.get('audit_required') === 'true',
     log_required: data.get('log_required') === 'true',
     tags: parseExistingScenarioTags(data.get('existing_tags')),
@@ -7345,7 +7770,7 @@ function resolutionProfileBootstrapTemplate(slot, profiles) {
     profile_id: profileId,
     display_name: `Разрешение: ${slotName}`,
     status: 'active',
-    description: `Черновик профиля разрешения для слота ${slot.slot_id}. Настройте шаги обогащения и режим LLM в разделе "1. Разрешение слотов".`,
+    description: `Черновик профиля разрешения для слота ${slot.slot_id}. Настройте шаги обогащения и режим LLM в разделе "Разрешение слотов".`,
     target_slot_id: slot.slot_id,
     use_llm_after_steps: true,
     enrichment_steps: [],
@@ -7468,9 +7893,6 @@ function parseSlotStages(form) {
     }
     return stage;
   });
-  if (!stages.length) {
-    throw new Error('Схема слотов должна содержать хотя бы один этап.');
-  }
   const emptyStage = stages.find((stage) => !stage.stage_id || !stage.display_name || !stage.order);
   if (emptyStage) {
     throw new Error('Каждый этап должен иметь ключ, название и порядок.');
@@ -7490,10 +7912,6 @@ function parseSlotStages(form) {
     .find((order, index, all) => all.indexOf(order) !== index);
   if (duplicateStageOrder) {
     throw new Error(`Порядок этапа дублируется: ${duplicateStageOrder}.`);
-  }
-  const emptyWithoutProfile = stages.find((stage) => !stage.slots.length && !stage.resolution_profile_id);
-  if (emptyWithoutProfile) {
-    throw new Error(`Этап ${emptyWithoutProfile.stage_id} должен содержать слоты или профиль разрешения этапа.`);
   }
   const duplicateSlotId = slotsFromStages(stages)
     .map((slot) => slot.slot_id)
@@ -7637,9 +8055,6 @@ function parseClassificationRules(form) {
       explanation: card.querySelector('[name="rule_explanation"]')?.value?.trim() || `Признак классификации: ${text}`,
     });
   });
-  if (!rules.length) {
-    throw new Error('Маршрут должен содержать хотя бы одно правило классификации.');
-  }
   return rules;
 }
 
@@ -8142,6 +8557,7 @@ function compactScenarioPayload(scenario) {
     allowed_channel_ids: scenario.allowed_channel_ids?.length
       ? scenario.allowed_channel_ids
       : [String(scenario.default_channel_id || '').trim()].filter(Boolean),
+    allowed_react_call_names: scenario.allowed_react_call_names || [],
     audit_required: Boolean(scenario.audit_required),
     log_required: Boolean(scenario.log_required),
   };
@@ -8149,6 +8565,130 @@ function compactScenarioPayload(scenario) {
     result.tags = scenario.tags;
   }
   return result;
+}
+
+function firstRemainingItemId(items, idKey, removedId) {
+  return (items || []).find((item) => item[idKey] !== removedId)?.[idKey] || '';
+}
+
+async function reassignScenarioReferenceBeforeDeleting(referenceKey, removedId, replacementId, noun) {
+  const scenariosActive = await api('/admin/config/active/service_scenarios');
+  const payload = JSON.parse(JSON.stringify(scenariosActive.payload));
+  let changed = false;
+  for (const scenario of payload.scenarios || []) {
+    if (scenario[referenceKey] !== removedId) {
+      continue;
+    }
+    if (!replacementId) {
+      throw new Error(`Нельзя удалить последний ${noun}: он выбран в сценарии "${scenario.display_name || scenario.scenario_id}".`);
+    }
+    scenario[referenceKey] = replacementId;
+    changed = true;
+  }
+  if (changed) {
+    await activateConfigPayload('service_scenarios', payload, scenariosActive.active_version_id);
+  }
+}
+
+async function reassignInteractionChannelBeforeDeleting(channelId, channels) {
+  const replacementId = firstRemainingItemId(channels, 'channel_id', channelId);
+  const scenariosActive = await api('/admin/config/active/service_scenarios');
+  const payload = JSON.parse(JSON.stringify(scenariosActive.payload));
+  let changed = false;
+  for (const scenario of payload.scenarios || []) {
+    const allowed = scenario.allowed_channel_ids || [];
+    const referencesChannel = scenario.default_channel_id === channelId || allowed.includes(channelId);
+    if (!referencesChannel) {
+      continue;
+    }
+    if (!replacementId) {
+      throw new Error(`Нельзя удалить последний канал: он выбран в сценарии "${scenario.display_name || scenario.scenario_id}".`);
+    }
+    if (scenario.default_channel_id === channelId) {
+      scenario.default_channel_id = replacementId;
+    }
+    const nextAllowed = allowed.filter((item) => item !== channelId);
+    if (!nextAllowed.includes(scenario.default_channel_id)) {
+      nextAllowed.push(scenario.default_channel_id);
+    }
+    scenario.allowed_channel_ids = Array.from(new Set(nextAllowed));
+    changed = true;
+  }
+  if (changed) {
+    await activateConfigPayload('service_scenarios', payload, scenariosActive.active_version_id);
+  }
+}
+
+function cleanupSlotResolutionProfileReference(slot, profileId) {
+  if (slot?.resolution_profile_id !== profileId) {
+    return false;
+  }
+  const hint = slot.operator_hint
+    || slot.fallback_question
+    || slot.user_question
+    || `Заполните "${slot.display_name || slot.slot_id}" вручную после удаления профиля разрешения.`;
+  slot.fill_method = 'operator_manual';
+  slot.operator_hint = hint;
+  delete slot.resolution_profile_id;
+  delete slot.user_question;
+  delete slot.case_source_ref;
+  delete slot.extraction_instruction;
+  delete slot.fallback_question;
+  delete slot.examples;
+  return true;
+}
+
+function refreshSlotSchemaDerivedFields(slotSchema) {
+  const slots = (slotSchema.stages || []).flatMap((stage) => stage.slots || []);
+  slotSchema.slots = slots.map((slot) => ({ ...slot }));
+  slotSchema.required_slots = slots.filter((slot) => slot.required).map((slot) => slot.slot_id);
+  slotSchema.auto_fill_slots = slots
+    .filter((slot) => !['user_question', 'operator_manual'].includes(slot.fill_method))
+    .map((slot) => slot.slot_id);
+  slotSchema.question_order = slots
+    .filter((slot) => ['user_question', 'resolution_profile', 'operator_manual'].includes(slot.fill_method))
+    .map((slot) => slot.slot_id);
+}
+
+async function unlinkResolutionProfileFromSlotSchemas(profileId) {
+  const active = await api('/admin/config/active/slot_schemas');
+  const payload = JSON.parse(JSON.stringify(active.payload));
+  let changed = false;
+  for (const slotSchema of payload.slot_schemas || []) {
+    const stages = slotSchema.stages?.length
+      ? slotSchema.stages
+      : [{
+        stage_id: 'stage.default',
+        display_name: 'Слоты',
+        order: 1,
+        slots: slotSchema.slots || [],
+      }];
+    slotSchema.stages = stages;
+    const keptStages = [];
+    for (const stage of stages) {
+      if (stage.resolution_profile_id === profileId) {
+        delete stage.resolution_profile_id;
+        changed = true;
+      }
+      for (const slot of stage.slots || []) {
+        changed = cleanupSlotResolutionProfileReference(slot, profileId) || changed;
+      }
+      if ((stage.slots || []).length || stage.resolution_profile_id) {
+        keptStages.push(stage);
+      } else {
+        changed = true;
+      }
+    }
+    slotSchema.stages = keptStages;
+    for (const slot of slotSchema.slots || []) {
+      changed = cleanupSlotResolutionProfileReference(slot, profileId) || changed;
+    }
+    refreshSlotSchemaDerivedFields(slotSchema);
+  }
+  if (!changed) {
+    return null;
+  }
+  return activateConfigPayload('slot_schemas', payload, active.active_version_id);
 }
 
 async function applyResolutionProfileMutation(operation, profile) {
@@ -8170,25 +8710,7 @@ async function applyResolutionProfileMutation(operation, profile) {
     if (index < 0) {
       throw new Error(`Профиль не найден: ${profile.profile_id}`);
     }
-    const [slotSchemasActive, scenariosActive] = await Promise.all([
-      api('/admin/config/active/slot_schemas'),
-      api('/admin/config/active/service_scenarios'),
-    ]);
-    const usedSchemas = (slotSchemasActive.payload?.slot_schemas || []).filter((schema) =>
-      (schema.slots || []).some((slot) => slot.resolution_profile_id === profile.profile_id)
-      || slotSchemaStagesForEditor(schema).some((stage) => stage.resolution_profile_id === profile.profile_id),
-    );
-    if (usedSchemas.length) {
-      const schemaIds = new Set(usedSchemas.map((schema) => schema.slot_schema_id));
-      const scenarioNames = (scenariosActive.payload?.scenarios || [])
-        .filter((scenario) => schemaIds.has(scenario.slot_schema_id))
-        .map((scenario) => scenario.display_name || scenario.scenario_id);
-      const schemaNames = usedSchemas.map((schema) => schema.display_name || schema.slot_schema_id);
-      const details = scenarioNames.length
-        ? `Сценарии: ${scenarioNames.join(', ')}.`
-        : `Схемы слотов: ${schemaNames.join(', ')}.`;
-      throw new Error(`Профиль используется. ${details} Используйте блок "Очистка legacy-связок слотов и профилей".`);
-    }
+    await unlinkResolutionProfileFromSlotSchemas(profile.profile_id);
     profiles.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с профилем: ${operation}`);
@@ -8229,13 +8751,12 @@ async function applyPromptPackMutation(operation, promptPack) {
     if (index < 0) {
       throw new Error(`Пакет промптов не найден: ${promptPack.prompt_pack_id}`);
     }
-    const scenariosActive = await api('/admin/config/active/service_scenarios');
-    const referencedBy = (scenariosActive.payload?.scenarios || [])
-      .filter((scenario) => scenario.prompt_pack_id === promptPack.prompt_pack_id)
-      .map((scenario) => scenario.display_name || scenario.scenario_id);
-    if (referencedBy.length) {
-      throw new Error(`Пакет выбран в сценариях: ${referencedBy.join(', ')}.`);
-    }
+    await reassignScenarioReferenceBeforeDeleting(
+      'prompt_pack_id',
+      promptPack.prompt_pack_id,
+      firstRemainingItemId(packs, 'prompt_pack_id', promptPack.prompt_pack_id),
+      'пакет промптов',
+    );
     packs.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с пакетом промптов: ${operation}`);
@@ -8264,11 +8785,13 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
     api('/admin/config/active/n8n_workflows'),
   ]);
   const payload = JSON.parse(JSON.stringify(active.payload));
+  const n8nPayload = JSON.parse(JSON.stringify(n8nActive.payload || { schema_version: '1.0', workflows: [] }));
   const endpoints = payload.endpoints || [];
   const endpointId = endpoint.endpoint_id;
   const index = endpoints.findIndex((item) => item.endpoint_id === endpointId);
   const tools = toolsActive.payload?.tools || [];
-  const workflows = n8nActive.payload?.workflows || [];
+  const workflows = n8nPayload.workflows || [];
+  const clearedWorkflowRefs = [];
   if (operation === 'create') {
     if (index >= 0) {
       throw new Error(`Подключение уже существует: ${endpointId}`);
@@ -8282,12 +8805,14 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
     const removedOperations = Object.keys(current.operations || {})
       .filter((operationId) => !endpoint.operations?.[operationId]);
     for (const operationId of removedOperations) {
-      const usage = integrationOperationUsage(endpointId, operationId, tools, workflows);
-      if (usage.length) {
+      const toolUsage = integrationOperationToolUsage(endpointId, operationId, tools);
+      if (toolUsage.length) {
         throw new Error(
-          `Операция ${operationId} используется: ${usage.join('; ')}. Сначала уберите связи.`,
+          `Операция ${operationId} связана с: ${toolUsage.join('; ')}. Сначала отвяжите ReAct-вызов ИИ от операции.`,
         );
       }
+      const workflowRefs = clearOperationFromN8nWorkflows(n8nPayload, endpointId, operationId);
+      clearedWorkflowRefs.push(...workflowRefs.map((workflowName) => `${workflowName}: ${operationId}`));
     }
     endpoints[index] = endpoint;
   } else if (operation === 'delete') {
@@ -8296,13 +8821,17 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
     }
     const usage = integrationEndpointUsage(endpointId, tools, workflows);
     if (usage.length) {
-      throw new Error(`Подключение используется: ${usage.join('; ')}. Сначала уберите связи.`);
+      throw new Error(`Подключение связано с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     endpoints.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с подключением: ${operation}`);
   }
   payload.endpoints = endpoints;
+  let workflowsVersion = null;
+  if (clearedWorkflowRefs.length) {
+    workflowsVersion = await activateConfigPayload('n8n_workflows', n8nPayload, n8nActive.active_version_id);
+  }
   const version = await activateConfigPayload('integration_endpoints', payload, active.active_version_id);
   if (operation === 'delete') {
     state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
@@ -8315,7 +8844,10 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
     modify: 'изменен',
     delete: 'удален',
   }[operation];
-  setNotice(`Подключение ${actionText}. Активирована версия ${version.version_id}.`, 'success');
+  const cleanupText = clearedWorkflowRefs.length
+    ? ` Очищены ссылки n8n workflow: ${clearedWorkflowRefs.join(', ')}. Версия workflow: ${workflowsVersion.version_id}.`
+    : '';
+  setNotice(`Подключение ${actionText}. Активирована версия ${version.version_id}.${cleanupText}`, 'success');
   await renderIntegrations();
 }
 
@@ -8360,7 +8892,7 @@ async function applyToolCatalogMutation(operation, tool) {
       );
       if (usage.length) {
         throw new Error(
-          `Привязка операции ${binding.endpoint_id}/${binding.operation_id} используется: ${usage.join('; ')}. Сначала уберите связи.`,
+          `Привязка операции ${binding.endpoint_id}/${binding.operation_id} связана с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`,
         );
       }
     }
@@ -8371,7 +8903,7 @@ async function applyToolCatalogMutation(operation, tool) {
     }
     const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
     if (usage.length) {
-      throw new Error(`ReAct-вызов ИИ используется: ${usage.join('; ')}. Сначала уберите связи.`);
+      throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     tools.splice(index, 1);
   } else {
@@ -8443,7 +8975,7 @@ async function applyOperationBindingMutation({
     }
     const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
     if (usage.length) {
-      throw new Error(`ReAct-вызов ИИ используется: ${usage.join('; ')}. Сначала уберите связи перед отвязкой операции.`);
+      throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
     }
     tool.endpoint_bindings = [];
   } else {
@@ -8607,15 +9139,7 @@ async function applyInteractionChannelMutation(operation, channel) {
     if (index < 0) {
       throw new Error(`Канал не найден: ${channel.channel_id}`);
     }
-    const scenariosActive = await api('/admin/config/active/service_scenarios');
-    const referencedBy = (scenariosActive.payload?.scenarios || [])
-      .filter((scenario) =>
-        scenario.default_channel_id === channel.channel_id || (scenario.allowed_channel_ids || []).includes(channel.channel_id),
-      )
-      .map((scenario) => scenario.display_name || scenario.scenario_id);
-    if (referencedBy.length) {
-      throw new Error(`Канал используется в сценариях: ${referencedBy.join(', ')}. Сначала измените или удалите эти сценарии.`);
-    }
+    await reassignInteractionChannelBeforeDeleting(channel.channel_id, channels);
     channels.splice(index, 1);
   } else {
     throw new Error(`Неизвестная операция с каналом: ${operation}`);
@@ -8683,13 +9207,12 @@ async function applyConfigItemMutation({
       throw new Error(`Запись не найдена: ${itemId}`);
     }
     if (referenceKey) {
-      const scenariosActive = await api('/admin/config/active/service_scenarios');
-      const referencedBy = (scenariosActive.payload?.scenarios || [])
-        .filter((scenario) => scenario[referenceKey] === itemId)
-        .map((scenario) => scenario.display_name || scenario.scenario_id);
-      if (referencedBy.length) {
-        throw new Error(`Блок используется в сценариях: ${referencedBy.join(', ')}. Сначала измените или удалите эти сценарии.`);
-      }
+      await reassignScenarioReferenceBeforeDeleting(
+        referenceKey,
+        itemId,
+        firstRemainingItemId(items, idKey, itemId),
+        successNoun.toLowerCase(),
+      );
     }
     items.splice(index, 1);
   } else {
@@ -8815,9 +9338,37 @@ function selectedValues(select) {
   if (!select) {
     return [];
   }
-  return Array.from(select.selectedOptions || [])
+  if (select.selectedOptions) {
+    return Array.from(select.selectedOptions)
+      .map((option) => option.value)
+      .filter(Boolean);
+  }
+  const controls = typeof select.length === 'number' && !select.tagName
+    ? Array.from(select)
+    : [select];
+  return controls
+    .filter((control) => {
+      if (control.type === 'checkbox' || control.type === 'radio') {
+        return control.checked;
+      }
+      return true;
+    })
     .map((option) => option.value)
     .filter(Boolean);
+}
+
+function selectedScenarioReactCallValues(form) {
+  const controls = Array.from(form?.querySelectorAll('[data-scenario-react-call]') || []);
+  if (!controls.length) {
+    return [];
+  }
+  const selected = controls
+    .filter((control) => control.checked)
+    .map((control) => control.value)
+    .filter(Boolean);
+  return selected.length
+    ? selected
+    : controls.map((control) => control.value).filter(Boolean);
 }
 
 function formList(data, name) {
@@ -8995,12 +9546,6 @@ function parseResolutionOutputRules(form, targetSlotId) {
       source_hint: targetSlotId,
       fallback: 'ask_clarification',
     });
-  }
-  if (!rules.length && targetSlotId) {
-    throw new Error('Профиль должен содержать хотя бы один выходной слот.');
-  }
-  if (rules.length && !rules.some((rule) => rule.required_for_success)) {
-    rules[0].required_for_success = true;
   }
   return rules
     .sort((left, right) => left.order - right.order)
@@ -9532,10 +10077,6 @@ function addResolutionOutputRow() {
 function removeResolutionOutputRow(target) {
   const row = target.closest('[data-resolution-output-row]');
   if (!row) return;
-  const container = row.parentElement;
-  if (container && container.querySelectorAll('[data-resolution-output-row]').length <= 1) {
-    throw new Error('Профиль должен содержать хотя бы один выходной слот.');
-  }
   row.remove();
 }
 
@@ -9554,10 +10095,6 @@ function addRouteRuleCard() {
 function removeRouteRuleCard(target) {
   const card = target.closest('[data-route-rule-card]');
   if (!card) return;
-  const container = card.parentElement;
-  if (container && container.querySelectorAll('[data-route-rule-card]').length <= 1) {
-    throw new Error('Маршрут должен содержать хотя бы одно правило классификации.');
-  }
   card.remove();
 }
 
@@ -9905,11 +10442,13 @@ async function previewEndpointOpenApiContract(target) {
       operator_id: state.actorId,
       endpoint_id: endpoint.endpoint_id,
       contract_source: endpoint.contract_source,
+      lang: endpoint.contract_source.lang || adminInterfaceLanguage,
     }),
   });
   const operations = mergeImportedEndpointOperations(endpoint.endpoint_id, result.operations || {});
   state.lastData.openApiImportPreview = {
     endpoint_id: endpoint.endpoint_id,
+    contract_source: normalizedOpenApiContractSource(endpoint.contract_source),
     result,
   };
   const container = form.querySelector('#endpointOperationCards');
@@ -9949,6 +10488,9 @@ async function applyEndpointOpenApiImport(target) {
   const preview = openApiPreviewForEndpoint(endpoint.endpoint_id);
   if (!preview) {
     throw new Error('Сначала загрузите preview OpenAPI-контракта.');
+  }
+  if (!openApiPreviewMatchesEndpoint(preview, endpoint)) {
+    throw new Error('Повторно загрузите preview OpenAPI-контракта после изменения URL, метода или языка контракта.');
   }
   endpoint.operations = parseEndpointOperationCards(form, endpoint.adapter_type);
   if (preview.result?.transport_security) {
@@ -10263,6 +10805,8 @@ function initEvents() {
         addEndpointOperationCard();
       } else if (action === 'endpoint-operation-remove') {
         removeEndpointOperationCard(target);
+      } else if (action === 'endpoint-mock-import-operations') {
+        importSelectedOperationsIntoMockEndpoint(target);
       } else if (action === 'endpoint-request-field-add') {
         addEndpointOperationFieldRow(target, 'request');
       } else if (action === 'endpoint-response-field-add') {
@@ -10350,6 +10894,10 @@ function initEvents() {
       syncConfidenceOverrideBlock(target.closest('[data-confidence-override]'));
       return;
     }
+    if (target?.matches?.('[data-scenario-react-endpoint-type]')) {
+      syncScenarioReactCallsByEndpointTypes(target.closest('form'));
+      return;
+    }
     if (target?.matches?.('[data-operation-contract-control]')) {
       const card = target.closest('[data-endpoint-operation-card]');
       if (target.closest('[data-operation-schema-editor="response"]')) {
@@ -10360,6 +10908,10 @@ function initEvents() {
     }
     if (target?.matches?.('[data-operation-mock-control]')) {
       updateEndpointOperationJsonPreview(target.closest('[data-endpoint-operation-card]'));
+      return;
+    }
+    if (target?.matches?.('[data-mock-import-source]')) {
+      syncMockImportOperationRows(target.closest('form'));
       return;
     }
     if (target?.matches?.('[data-operation-param-source]')) {

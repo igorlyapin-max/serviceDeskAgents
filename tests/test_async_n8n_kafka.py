@@ -584,6 +584,46 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         self.assertEqual(validation["status"], "invalid")
         self.assertTrue(any("transport_security.kafka" in error for error in validation["errors"]))
 
+    def test_n8n_endpoint_accepts_credential_configured_transport_policy(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("integration_endpoints"))
+        endpoint = next(item for item in payload["endpoints"] if item["endpoint_id"] == "n8n")
+        transport = endpoint["extensions"]["transport_security"]
+        transport["http"]["policy"] = "credential_configured"
+        transport["kafka"]["policy"] = "credential_configured"
+
+        validation = self.config_store.validate_payload("integration_endpoints", payload)
+
+        self.assertEqual(validation["status"], "valid", validation["errors"])
+
+    def test_n8n_endpoint_rejects_unknown_transport_policy(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("integration_endpoints"))
+        endpoint = next(item for item in payload["endpoints"] if item["endpoint_id"] == "n8n")
+        endpoint["extensions"]["transport_security"]["kafka"]["policy"] = "inline_secret"
+
+        validation = self.config_store.validate_payload("integration_endpoints", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("transport_security.kafka.policy" in error for error in validation["errors"]))
+
+    def test_n8n_workflow_allows_empty_operations_after_endpoint_operation_cleanup(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("n8n_workflows"))
+        workflow = next(item for item in payload["workflows"] if item["workflow_id"] == "zabbix_problem_processing")
+        workflow["operations"] = []
+
+        validation = self.config_store.validate_payload("n8n_workflows", payload)
+
+        self.assertEqual(validation["status"], "valid", validation["errors"])
+
+    def test_n8n_workflow_rejects_unknown_endpoint_operation(self) -> None:
+        payload = copy.deepcopy(self.config_store.active_payload("n8n_workflows"))
+        workflow = next(item for item in payload["workflows"] if item["workflow_id"] == "zabbix_problem_processing")
+        workflow["operations"] = ["missing_legacy_operation"]
+
+        validation = self.config_store.validate_payload("n8n_workflows", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("missing_legacy_operation" in error for error in validation["errors"]))
+
     def test_hr_find_manager_workflow_requires_servicedesk_token(self) -> None:
         workflow_path = Path("infra/n8n/workflows/hr-find-manager.json")
         workflow = json.loads(workflow_path.read_text(encoding="utf-8"))

@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request
 
 from jsonschema import Draft202012Validator, SchemaError
@@ -21,6 +21,10 @@ class OpenApiContractError(ValueError):
 MAX_OPENAPI_CONTRACT_BYTES = 2 * 1024 * 1024
 SUPPORTED_METHODS = {"GET", "POST"}
 TRANSPORT_SECURITY_SELECTOR_KEYS = {"selected_transport", "result_transport"}
+DEFAULT_CONTRACT_LANGUAGE = "ru"
+SUPPORTED_CONTRACT_LANGUAGES = {"ru", "en"}
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 
 
 def safe_url_for_log(url: str) -> str:
@@ -32,6 +36,7 @@ def resolve_contract_source_url(endpoint: dict[str, Any], contract_source: dict[
     source_url = str(contract_source.get("url") or "").strip()
     if not source_url:
         raise OpenApiContractError("Укажите URL OpenAPI-контракта.")
+    language = contract_source_language(contract_source)
 
     base_url = _endpoint_base_url(endpoint)
     parsed_source = urlparse(source_url)
@@ -41,7 +46,7 @@ def resolve_contract_source_url(endpoint: dict[str, Any], contract_source: dict[
             raise OpenApiContractError("Базовый URL endpoint должен быть абсолютным http/https URL.")
         if parsed_source.scheme != parsed_base.scheme or parsed_source.netloc != parsed_base.netloc:
             raise OpenApiContractError("Абсолютный URL OpenAPI должен совпадать с host и scheme сохраненного endpoint.")
-        return source_url
+        return _url_with_contract_language(source_url, language)
     if parsed_source.scheme:
         raise OpenApiContractError("OpenAPI-контракт можно получать только по http или https.")
 
@@ -60,7 +65,41 @@ def resolve_contract_source_url(endpoint: dict[str, Any], contract_source: dict[
         resolved_path = source_path
     else:
         resolved_path = f"{base_path}/{source_path.lstrip('/')}" if base_path else f"/{source_path.lstrip('/')}"
-    return urlunparse((parsed_base.scheme, parsed_base.netloc, resolved_path, "", parsed_source.query, ""))
+    resolved_url = urlunparse((parsed_base.scheme, parsed_base.netloc, resolved_path, "", parsed_source.query, ""))
+    return _url_with_contract_language(resolved_url, language)
+
+
+def contract_source_language(contract_source: dict[str, Any]) -> str:
+    raw_language = contract_source.get("lang") or contract_source.get("language")
+    if not raw_language:
+        parsed_source = urlparse(str(contract_source.get("url") or ""))
+        query = dict(parse_qsl(parsed_source.query, keep_blank_values=True))
+        raw_language = query.get("lang")
+    language = str(raw_language or DEFAULT_CONTRACT_LANGUAGE).strip().lower()
+    if language not in SUPPORTED_CONTRACT_LANGUAGES:
+        allowed = ", ".join(sorted(SUPPORTED_CONTRACT_LANGUAGES))
+        raise OpenApiContractError(f"Неподдерживаемый язык OpenAPI-контракта: {language}. Допустимо: {allowed}.")
+    return language
+
+
+def _url_with_contract_language(url: str, language: str) -> str:
+    parsed = urlparse(url)
+    query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "lang"
+    ]
+    query_pairs.append(("lang", language))
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            urlencode(query_pairs),
+            parsed.fragment,
+        )
+    )
 
 
 def _endpoint_base_url(endpoint: dict[str, Any]) -> str:
@@ -92,9 +131,12 @@ def _auth_headers(endpoint: dict[str, Any]) -> dict[str, str]:
 
 def fetch_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, Any]) -> tuple[dict[str, Any], str]:
     url = resolve_contract_source_url(endpoint, contract_source)
+    method = str(contract_source.get("method") or "GET").upper()
+    if method != "GET":
+        raise OpenApiContractError("OpenAPI-контракт можно получать только read-only методом GET.")
     headers = {"Accept": "application/json"}
     headers.update(_auth_headers(endpoint))
-    request = Request(url, headers=headers, method=str(contract_source.get("method") or "GET").upper())
+    request = Request(url, headers=headers, method=method)
     operation_name = f"openapi_contract/{endpoint.get('endpoint_id', 'endpoint')}"
     try:
         body = urlopen_with_retry(request, timeout=10, operation_name=operation_name, attempts=2)
@@ -111,6 +153,71 @@ def fetch_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, 
     if not isinstance(document, dict):
         raise OpenApiContractError("OpenAPI endpoint вернул не объект JSON.")
     return document, url
+
+
+def openapi_contract_localization_diagnostics(
+    document: dict[str, Any],
+    requested_language: str,
+) -> tuple[dict[str, Any], list[str]]:
+    localization = document.get("x-localization")
+    localization_meta = localization if isinstance(localization, dict) else {}
+    contract_operation = document.get("paths", {}).get("/webhook/contracts/openapi.json", {}).get("get", {})
+    email_operation = document.get("paths", {}).get("/webhook/email/send", {}).get("post", {})
+    control_metadata = {
+        "info_title": str(document.get("info", {}).get("title") or ""),
+        "info_description": str(document.get("info", {}).get("description") or ""),
+        "contract_summary": str(contract_operation.get("summary") or ""),
+        "email_send_summary": str(email_operation.get("summary") or ""),
+    }
+    diagnostics = {
+        "requested_language": requested_language,
+        "has_x_localization": bool(localization_meta),
+        "default_locale": localization_meta.get("default_locale"),
+        "supported_locales": localization_meta.get("supported_locales") or [],
+        "query_parameter": localization_meta.get("query_parameter"),
+        "control_metadata": control_metadata,
+    }
+    warnings = []
+    if requested_language == "ru":
+        if not localization_meta:
+            warnings.append("OpenAPI preview запрошен с lang=ru, но live-контракт не содержит x-localization metadata.")
+        control_text = " ".join(value for value in control_metadata.values() if value)
+        if control_text and not CYRILLIC_RE.search(control_text):
+            warnings.append("OpenAPI preview запрошен с lang=ru, но контрольная metadata выглядит непереведенной или англоязычной.")
+    return diagnostics, warnings
+
+
+def _looks_english_without_cyrillic(value: str) -> bool:
+    return bool(LATIN_RE.search(value)) and not CYRILLIC_RE.search(value)
+
+
+def openapi_operation_language_warnings(result: dict[str, Any], requested_language: str) -> list[str]:
+    if requested_language != "ru":
+        return []
+    operations = result.get("operations")
+    if not isinstance(operations, dict) or not operations:
+        return []
+    checked = 0
+    english_like = 0
+    for operation in operations.values():
+        if not isinstance(operation, dict):
+            continue
+        text = " ".join(
+            str(operation.get(key) or "").strip()
+            for key in ("display_name", "description")
+            if str(operation.get(key) or "").strip()
+        )
+        if not text:
+            continue
+        checked += 1
+        if _looks_english_without_cyrillic(text):
+            english_like += 1
+    if checked and english_like >= max(1, (checked + 1) // 2):
+        return [
+            "OpenAPI-контракт запрошен на русском языке, но metadata операций выглядит англоязычной. "
+            "Проверьте локализацию n8n contract endpoint lang=ru."
+        ]
+    return []
 
 
 def _contains_delivery_selector(value: Any) -> bool:
@@ -530,8 +637,19 @@ def preview_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str
     if source.get("type") not in {"openapi_3_1", None}:
         raise OpenApiContractError("Поддерживается только contract_source.type=openapi_3_1.")
     source.setdefault("method", "GET")
+    language = contract_source_language(source)
+    source["lang"] = language
     document, resolved_url = fetch_openapi_contract(endpoint, source)
     result = import_openapi_operations(document)
+    localization_diagnostics, localization_warnings = openapi_contract_localization_diagnostics(document, language)
+    metadata_warnings = openapi_operation_language_warnings(result, language)
+    warnings = [*(result.get("warnings") or []), *localization_warnings, *metadata_warnings]
+    if warnings:
+        result["warnings"] = warnings
     result["proposed_react_calls"] = proposed_react_calls_for_operations(endpoint, result["operations"])
     result["source_url"] = safe_url_for_log(resolved_url)
+    result["contract_language"] = language
+    result["contract_diagnostics"] = {
+        "localization": localization_diagnostics,
+    }
     return result

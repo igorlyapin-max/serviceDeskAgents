@@ -122,6 +122,44 @@ class LegacySlotCleanupTest(unittest.TestCase):
             [slot["slot_id"] for slot in legacy_slots],
         )
 
+    def test_stage_without_slots_requires_resolution_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = self.store(tempdir)
+            payload = store.active_payload("slot_schemas")
+            schema = next(item for item in payload["slot_schemas"] if item["slot_schema_id"] == "slot.password_reset")
+            schema["stages"].append(
+                {
+                    "stage_id": "stage.empty",
+                    "display_name": "Пустой этап",
+                    "order": 99,
+                    "slots": [],
+                }
+            )
+
+            validation = store.validate_payload("slot_schemas", payload)
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("stage.empty" in error for error in validation["errors"]))
+
+    def test_stage_with_resolution_profile_can_have_no_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = self.store(tempdir)
+            payload = store.active_payload("slot_schemas")
+            schema = next(item for item in payload["slot_schemas"] if item["slot_schema_id"] == "slot.password_reset")
+            schema["stages"].append(
+                {
+                    "stage_id": "stage.profile_only",
+                    "display_name": "Разрешение профилем",
+                    "order": 99,
+                    "resolution_profile_id": "profile.password_reset.login_from_ad",
+                    "slots": [],
+                }
+            )
+
+            validation = store.validate_payload("slot_schemas", payload)
+
+        self.assertEqual(validation["status"], "valid")
+
 
 if __name__ == "__main__":
     unittest.main()

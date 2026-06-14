@@ -195,7 +195,7 @@ Long-running actions use `wait_state` plus an external result. The platform crea
 
 For asynchronous ReAct calls, the worker passes n8n a callback package with `idempotency_key_base`. This is the command key, not the result key. Each `progress`, `success`, `error`, `timeout` or `cancelled` result must be returned as a separate `ExternalEvent` with a stable `idempotency_key`, for example `<idempotency_key_base>:<event_id>`. HTTP callback is accepted only for `http_callback` or `both` waits; Kafka events are accepted only for `kafka_event` or `both` waits and only from the expected `result_topic`.
 
-`result_transport` selects result delivery for one run. Endpoint/OpenAPI/workflow-level `transport_security` only describes protection for those transports and must not contain `selected_transport` or change the delivery mode.
+`result_transport` selects result delivery for one run. Endpoint/OpenAPI/workflow-level `transport_security` only describes protection for those transports and must not contain `selected_transport` or change the delivery mode. `transport_security.policy` accepts `admin_configured` and `credential_configured`; both describe how credentials are configured, not which result transport is selected.
 
 The result contract is defined on the endpoint operation through `async_event_contracts`. The contract key must match `expected_event_type` from the resolution profile step. When a wait is opened, the platform stores a contract snapshot in `wait_state`, so already running waits are not affected by later endpoint-operation edits. For old waits without a snapshot, the runtime may fall back to the active configuration by `origin.endpoint_id`, `origin.operation_id` and `event_type`. The platform validates `success.result`, `progress.result` and `error.error` with that JSON Schema before updating `wait_state`. `wait_state` and the idempotency receipt store a safe compact external event version: secrets are masked and large payloads are replaced with a summary.
 
@@ -208,3 +208,5 @@ Before ticket text is sent to an LLM, minimal redaction is applied: email addres
 ## Language Rules
 
 The UI supports Russian and English. Technical identifiers are not translated: API paths, environment variables, JSON fields, service names, Kafka topics, enum/status ids, tool names, endpoint ids and operation ids.
+
+When importing an n8n OpenAPI contract, language is selected at the contract-discovery boundary with `contract_source.lang` and the `lang=ru|en` query parameter; the current Russian UI uses `lang=ru`. Only human-facing contract metadata is localized: `title`, `summary`, `description`, response descriptions and example summaries. Runtime payloads, `operationId`, paths, schema names, JSON fields, enum/const values, auth headers and correlation fields stay stable.

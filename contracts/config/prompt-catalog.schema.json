@@ -32,7 +32,6 @@
     },
     "prompts": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": true,

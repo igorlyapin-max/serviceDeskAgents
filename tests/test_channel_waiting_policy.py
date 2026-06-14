@@ -84,7 +84,7 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
 
         self.assertNotIn("timeouts", normalized["slot_schemas"][0])
 
-    def test_empty_stage_requires_resolution_profile(self) -> None:
+    def test_empty_stage_requires_slots_or_resolution_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
             payload = store.active_payload("slot_schemas")

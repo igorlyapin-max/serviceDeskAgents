@@ -4,9 +4,12 @@ import json
 import unittest
 from pathlib import Path
 
+from apps.orchestrator.app import openapi_contracts
 from apps.orchestrator.app.openapi_contracts import (
     OpenApiContractError,
     import_openapi_operations,
+    openapi_contract_localization_diagnostics,
+    openapi_operation_language_warnings,
     proposed_react_calls_for_operations,
     resolve_contract_source_url,
 )
@@ -28,6 +31,7 @@ class OpenApiContractsTest(unittest.TestCase):
         self.assertEqual(transport["kafka"]["security_protocol_env"], "KAFKA_SECURITY_PROTOCOL")
         self.assertEqual(transport["kafka"]["supported_security_protocols"], ["SASL_SSL", "SSL"])
         self.assertEqual(transport["kafka"]["supported_auth"], ["sasl", "mtls"])
+        self.assertEqual(endpoint["contract_source"]["lang"], "ru")
 
     def test_imports_openapi_transport_security_without_delivery_choice(self) -> None:
         document = {
@@ -68,6 +72,44 @@ class OpenApiContractsTest(unittest.TestCase):
         self.assertNotIn("result_transport", transport)
         self.assertNotIn("selected_transport", transport)
 
+    def test_imports_openapi_credential_configured_transport_security(self) -> None:
+        document = {
+            "openapi": "3.1.0",
+            "info": {"version": "2026.06"},
+            "x-transport-security": {
+                "http": {
+                    "policy": "credential_configured",
+                    "production_recommended_scheme": "https",
+                    "token_header": "X-ServiceDesk-Callback-Token",
+                    "token_env": "N8N_CALLBACK_TOKEN",
+                },
+                "kafka": {
+                    "policy": "credential_configured",
+                    "bootstrap_servers_env": "KAFKA_BOOTSTRAP_SERVERS",
+                    "security_protocol_env": "KAFKA_SECURITY_PROTOCOL",
+                    "supported_security_protocols": ["SASL_SSL", "SSL"],
+                    "supported_auth": ["sasl", "mtls"],
+                },
+            },
+            "paths": {
+                "/webhook/ping": {
+                    "get": {
+                        "operationId": "ping",
+                        "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                    }
+                }
+            },
+        }
+
+        result = import_openapi_operations(document)
+        transport = result["transport_security"]
+
+        self.assertEqual(transport["http"]["policy"], "credential_configured")
+        self.assertEqual(transport["http"]["token_env"], "N8N_CALLBACK_TOKEN")
+        self.assertEqual(transport["kafka"]["policy"], "credential_configured")
+        self.assertNotIn("result_transport", transport)
+        self.assertNotIn("selected_transport", transport)
+
     def test_openapi_transport_security_rejects_delivery_choice(self) -> None:
         document = {
             "openapi": "3.1.0",
@@ -98,12 +140,22 @@ class OpenApiContractsTest(unittest.TestCase):
 
         self.assertEqual(
             resolve_contract_source_url(endpoint, {"url": "contracts/openapi.json"}),
-            "http://127.0.0.1:5678/webhook/contracts/openapi.json",
+            "http://127.0.0.1:5678/webhook/contracts/openapi.json?lang=ru",
         )
         self.assertEqual(
             resolve_contract_source_url(endpoint, {"url": "/webhook/contracts/openapi.json"}),
-            "http://127.0.0.1:5678/webhook/contracts/openapi.json",
+            "http://127.0.0.1:5678/webhook/contracts/openapi.json?lang=ru",
         )
+        self.assertEqual(
+            resolve_contract_source_url(endpoint, {"url": "contracts/openapi.json?version=1", "lang": "en"}),
+            "http://127.0.0.1:5678/webhook/contracts/openapi.json?version=1&lang=en",
+        )
+        self.assertEqual(
+            resolve_contract_source_url(endpoint, {"url": "contracts/openapi.json?lang=en"}),
+            "http://127.0.0.1:5678/webhook/contracts/openapi.json?lang=en",
+        )
+        with self.assertRaises(OpenApiContractError):
+            resolve_contract_source_url(endpoint, {"url": "contracts/openapi.json", "lang": "de"})
 
     def test_absolute_contract_url_must_match_endpoint_host(self) -> None:
         endpoint = {
@@ -114,10 +166,130 @@ class OpenApiContractsTest(unittest.TestCase):
 
         self.assertEqual(
             resolve_contract_source_url(endpoint, {"url": "http://127.0.0.1:5678/webhook/contracts/openapi.json"}),
-            "http://127.0.0.1:5678/webhook/contracts/openapi.json",
+            "http://127.0.0.1:5678/webhook/contracts/openapi.json?lang=ru",
         )
         with self.assertRaises(OpenApiContractError):
             resolve_contract_source_url(endpoint, {"url": "http://169.254.169.254/latest/meta-data"})
+
+    def test_openapi_localization_diagnostics_detects_stale_english_ru_contract(self) -> None:
+        document = {
+            "openapi": "3.1.0",
+            "info": {
+                "title": "n8n Integration Adapter API",
+                "description": "Machine-readable contract for n8n webhooks.",
+            },
+            "paths": {
+                "/webhook/contracts/openapi.json": {
+                    "get": {
+                        "summary": "Get the OpenAPI contract for n8n webhooks",
+                        "responses": {"200": {"description": "OpenAPI contract"}},
+                    }
+                },
+                "/webhook/email/send": {
+                    "post": {
+                        "summary": "Send a text email through n8n",
+                        "responses": {"200": {"description": "OK"}},
+                    }
+                },
+            },
+        }
+
+        diagnostics, warnings = openapi_contract_localization_diagnostics(document, "ru")
+
+        self.assertFalse(diagnostics["has_x_localization"])
+        self.assertEqual(diagnostics["requested_language"], "ru")
+        self.assertIn("x-localization", warnings[0])
+        self.assertTrue(any("англоязычной" in warning for warning in warnings))
+
+    def test_preview_returns_localization_diagnostics(self) -> None:
+        endpoint = {
+            "endpoint_id": "n8n",
+            "adapter_type": "n8n_webhook",
+            "base_url": "http://127.0.0.1:5678/webhook",
+        }
+        document = {
+            "openapi": "3.1.0",
+            "info": {
+                "title": "n8n Integration Adapter API",
+                "version": "2026.06",
+                "description": "Machine-readable contract for n8n webhooks.",
+            },
+            "paths": {
+                "/webhook/email/send": {
+                    "post": {
+                        "operationId": "sendEmail",
+                        "summary": "Send a text email through n8n",
+                        "responses": {
+                            "200": {
+                                "description": "OK",
+                                "content": {"application/json": {"schema": {"type": "object"}}},
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        original_fetch = openapi_contracts.fetch_openapi_contract
+        try:
+            openapi_contracts.fetch_openapi_contract = lambda _endpoint, _source: (
+                document,
+                "http://127.0.0.1:5678/webhook/contracts/openapi.json?lang=ru",
+            )
+
+            result = openapi_contracts.preview_openapi_contract(
+                endpoint,
+                {"url": "contracts/openapi.json", "lang": "ru"},
+            )
+        finally:
+            openapi_contracts.fetch_openapi_contract = original_fetch
+
+        localization = result["contract_diagnostics"]["localization"]
+        self.assertEqual(localization["requested_language"], "ru")
+        self.assertFalse(localization["has_x_localization"])
+        self.assertTrue(any("англоязычной" in warning for warning in result["warnings"]))
+
+    def test_preview_rejects_non_get_openapi_contract_method_before_fetch(self) -> None:
+        endpoint = {
+            "endpoint_id": "n8n",
+            "adapter_type": "n8n_webhook",
+            "base_url": "http://127.0.0.1:5678/webhook",
+        }
+        original_fetch = openapi_contracts.urlopen_with_retry
+        try:
+            openapi_contracts.urlopen_with_retry = lambda *_args, **_kwargs: self.fail("fetch should not be called")
+            with self.assertRaisesRegex(OpenApiContractError, "GET"):
+                openapi_contracts.preview_openapi_contract(
+                    endpoint,
+                    {"url": "contracts/openapi.json", "method": "POST", "lang": "ru"},
+                )
+        finally:
+            openapi_contracts.urlopen_with_retry = original_fetch
+
+    def test_operation_language_warning_detects_english_metadata_in_ru_import(self) -> None:
+        result = {
+            "operations": {
+                "send_email": {
+                    "display_name": "Send email",
+                    "description": "Send an email through n8n.",
+                }
+            }
+        }
+
+        warnings = openapi_operation_language_warnings(result, "ru")
+
+        self.assertTrue(any("metadata операций" in warning for warning in warnings))
+
+    def test_operation_language_warning_accepts_russian_metadata_in_ru_import(self) -> None:
+        result = {
+            "operations": {
+                "send_email": {
+                    "display_name": "Отправить email",
+                    "description": "Отправляет сообщение через n8n.",
+                }
+            }
+        }
+
+        self.assertEqual(openapi_operation_language_warnings(result, "ru"), [])
 
     def test_imports_openapi_operation_contracts(self) -> None:
         document = {

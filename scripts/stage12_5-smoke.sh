@@ -91,11 +91,11 @@ for removed_view in [
     'data-view="scenarioTools"',
 ]:
     assert removed_view not in html, removed_view
-assert "1. Разрешение слотов" in html, html[:300]
-assert "0. Слоты" in html, html[:300]
+assert "Разрешение слотов" in html, html[:300]
+assert "Слоты" in html, html[:300]
 assert "Системные промпты" in html, html[:300]
 assert 'data-view="scenarioPrompts"' in html, html[:300]
-assert "6. Промпты" in html, html[:300]
+assert "Промпты" in html, html[:300]
 assert "Реестр промптов" not in html, html[:300]
 assert 'data-view="prompts"' not in html, html[:300]
 js = request("/admin/static/app.js", parse_json=False)
@@ -177,7 +177,6 @@ for expected_slot_text in [
     "уточнить у клиента",
     "эскалировать оператору",
     "Технический ключ поля",
-    "Где используется",
     "slot-schema-operation",
     "route-operation",
     "Правила классификации",
@@ -201,7 +200,8 @@ for expected_slot_text in [
     "transport_kafka_supported_security_protocols",
     "Contract URL",
     "Execution URL",
-    "Нельзя удалить: сначала уберите связи",
+    "contract_source_lang",
+    "contract_language",
     "Входные параметры операции",
     "Поля ответа операции",
     "Тестовый ответ mock",
@@ -211,7 +211,6 @@ for expected_slot_text in [
     "Поля ответа, доступные ReAct",
     "Создать и привязать ReAct-вызов ИИ",
     "operation-binding-create-editor",
-    "Нельзя отвязать: сначала уберите связи",
     "Статус контракта",
     "Версия контракта",
     "Имя поля результата ReAct",
@@ -229,6 +228,13 @@ for expected_slot_text in [
     "readonly",
 ]:
     assert expected_slot_text in js, expected_slot_text
+for removed_usage_text in [
+    "Где используется",
+    "Нельзя удалить: сначала уберите связи",
+    "Нельзя отвязать: сначала уберите связи",
+    "Для удаления сначала",
+]:
+    assert removed_usage_text not in js, removed_usage_text
 for removed_slot_text in [
     "Запасной вопрос",
     "Порядок вопроса",

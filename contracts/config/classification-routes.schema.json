@@ -14,7 +14,6 @@
     },
     "routes": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -99,7 +98,6 @@
             "properties": {
               "rule_items": {
                 "type": "array",
-                "minItems": 1,
                 "items": {
                   "$ref": "#/$defs/classification_rule"
                 }

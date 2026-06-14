@@ -194,7 +194,7 @@ Endpoint `/metrics` отдает Prometheus-совместимые счетчи�
 
 Для асинхронных ReAct-вызовов worker передает n8n callback package с `idempotency_key_base`. Это ключ команды, а не ключ результата. Каждый `progress`, `success`, `error`, `timeout` или `cancelled` должен вернуться отдельным `ExternalEvent` со стабильным `idempotency_key`, например `<idempotency_key_base>:<event_id>`. HTTP callback принимается только для ожиданий `http_callback` или `both`; Kafka event принимается только для `kafka_event` или `both` и только из ожидаемого `result_topic`.
 
-`result_transport` выбирает доставку результата конкретного запуска. `transport_security` на endpoint/OpenAPI/workflow уровне только описывает защиту этих транспортов и не должен содержать `selected_transport` или менять delivery mode.
+`result_transport` выбирает доставку результата конкретного запуска. `transport_security` на endpoint/OpenAPI/workflow уровне только описывает защиту этих транспортов и не должен содержать `selected_transport` или менять delivery mode. Для `transport_security.policy` допустимы `admin_configured` и `credential_configured`; оба варианта описывают способ настройки credentials, а не выбор транспорта результата.
 
 Контракт результата задается в endpoint-операции через `async_event_contracts`. Ключ контракта совпадает с `expected_event_type` из шага профиля разрешения. При открытии ожидания платформа сохраняет snapshot контракта в `wait_state`, чтобы уже запущенные ожидания не меняли правила при последующем редактировании endpoint-операции. Для старых ожиданий без snapshot допускается fallback на активную конфигурацию по `origin.endpoint_id`, `origin.operation_id` и `event_type`. Платформа валидирует `success.result`, `progress.result` и `error.error` по JSON Schema этого контракта до обновления `wait_state`. В `wait_state` и idempotency receipt хранится безопасная компактная версия external event: секреты маскируются, крупные payload заменяются summary.
 
@@ -207,3 +207,5 @@ Endpoint `/metrics` отдает Prometheus-совместимые счетчи�
 ## Правила языка
 
 UI поддерживает русский и английский языки. Технические идентификаторы не переводятся: API paths, environment variables, JSON fields, service names, Kafka topics, enum/status ids, tool names, endpoint ids и operation ids.
+
+При импорте OpenAPI-контракта n8n язык выбирается на границе загрузки контракта через `contract_source.lang` и query-параметр `lang=ru|en`; текущий русский UI использует `lang=ru`. Локализуются только человекочитаемые metadata контракта: `title`, `summary`, `description`, описания response и summaries examples. Runtime payload, `operationId`, paths, schema names, JSON fields, enum/const values, auth headers и correlation fields не меняются.

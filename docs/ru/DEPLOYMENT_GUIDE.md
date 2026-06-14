@@ -306,7 +306,9 @@ Envelope проверяет общую форму события. Содержи
 
 `result_transport` является runtime-правилом, а не подсказкой. HTTP callback принимается только для ожиданий `http_callback` или `both`; Kafka event принимается только для `kafka_event` или `both` и только из ожидаемого `result_topic`. Для shared/staging/production Kafka producer identity должен ограничиваться ACL/SASL/mTLS или равноценным механизмом инфраструктуры.
 
-Не смешивайте `result_transport` и `transport_security`. `result_transport` находится в async command package (`invocation.extensions.async_callback.result_transport`) и выбирает delivery mode конкретного запуска: `http_callback`, `kafka_event` или `both`. `transport_security` публикуется в OpenAPI/каталоге endpoint/workflow как machine-readable metadata защиты выбранных транспортов: HTTP использует administrator-selected HTTPS URL и token auth, Kafka не является HTTPS и защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем.
+Не смешивайте `result_transport` и `transport_security`. `result_transport` находится в async command package (`invocation.extensions.async_callback.result_transport`) и выбирает delivery mode конкретного запуска: `http_callback`, `kafka_event` или `both`. `transport_security` публикуется в OpenAPI/каталоге endpoint/workflow как machine-readable metadata защиты выбранных транспортов: HTTP использует administrator-selected HTTPS URL и token auth, Kafka не является HTTPS и защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем. Значение `policy=admin_configured` означает настройку защиты администратором платформы, `policy=credential_configured` - что credentials задаются через конфигурацию credentials и не передаются в business payload.
+
+Язык OpenAPI-контракта n8n выбирается только при загрузке/импорте контракта: UI передает `contract_source.lang=ru` и backend добавляет `lang=ru` к contract URL. Этот параметр локализует только человекочитаемые metadata и не передается в runtime command package.
 
 ## Production hardening backlog
 

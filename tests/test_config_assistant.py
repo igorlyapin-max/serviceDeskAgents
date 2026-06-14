@@ -522,6 +522,33 @@ class ConfigAssistantTest(unittest.TestCase):
         self.assertEqual(item, {"login": "ivanov"})
         self.assertEqual(summary["result_path"], "users")
 
+    def test_service_scenario_accepts_known_react_call_scope(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            payload = copy.deepcopy(store.active_payload("service_scenarios"))
+            tool_name = store.active_payload("tools")["tools"][0]["tool_name"]
+            scenario = next(item for item in payload["scenarios"] if item["scenario_id"] == "password_reset")
+            scenario["allowed_react_call_names"] = [tool_name]
+
+            validation = store.validate_payload("service_scenarios", payload)
+
+            self.assertEqual(validation["status"], "valid", validation["errors"])
+
+    def test_service_scenario_rejects_unknown_react_call_scope(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            payload = copy.deepcopy(store.active_payload("service_scenarios"))
+            scenario = next(item for item in payload["scenarios"] if item["scenario_id"] == "password_reset")
+            scenario["allowed_react_call_names"] = ["missing_react_call"]
+
+            validation = store.validate_payload("service_scenarios", payload)
+
+            self.assertEqual(validation["status"], "invalid")
+            self.assertTrue(
+                any("missing_react_call" in error and "ReAct-вызов" in error for error in validation["errors"]),
+                validation["errors"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
