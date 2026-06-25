@@ -22,11 +22,7 @@
           "display_name",
           "mode",
           "description",
-          "question_delivery",
           "waiting_policy",
-          "incomplete_discussion_action",
-          "escalation_action",
-          "action_profiles",
           "enabled"
         ],
         "properties": {
@@ -62,9 +58,6 @@
             "items": {
               "$ref": "#/$defs/channel_parameter"
             }
-          },
-          "question_delivery": {
-            "$ref": "#/$defs/channel_action"
           },
           "waiting_policy": {
             "type": "object",
@@ -114,48 +107,6 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 168
-              }
-            }
-          },
-          "incomplete_discussion_action": {
-            "$ref": "#/$defs/channel_action"
-          },
-          "escalation_action": {
-            "$ref": "#/$defs/channel_action"
-          },
-          "action_profiles": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "profile_id",
-                "display_name",
-                "event_type",
-                "action"
-              ],
-              "properties": {
-                "profile_id": {
-                  "$ref": "#/$defs/id"
-                },
-                "display_name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 240
-                },
-                "event_type": {
-                  "type": "string",
-                  "enum": [
-                    "standard_handoff",
-                    "no_answer",
-                    "major_incident",
-                    "policy_blocked",
-                    "debug_stop"
-                  ]
-                },
-                "action": {
-                  "$ref": "#/$defs/channel_action"
-                }
               }
             }
           },
@@ -292,42 +243,6 @@
         },
         "secret": {
           "type": "boolean"
-        }
-      }
-    },
-    "channel_action": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "action_type"
-      ],
-      "properties": {
-        "action_type": {
-          "type": "string",
-          "enum": [
-            "ask_end_user",
-            "ask_operator",
-            "show_debug_message",
-            "save_context",
-            "create_draft",
-            "create_work_order",
-            "call_specialist",
-            "notify_on_call",
-            "debug_stop"
-          ]
-        },
-        "tool_name": {
-          "$ref": "#/$defs/id"
-        },
-        "endpoint_id": {
-          "$ref": "#/$defs/id"
-        },
-        "operation_id": {
-          "$ref": "#/$defs/id"
-        },
-        "message_template": {
-          "type": "string",
-          "maxLength": 2000
         }
       }
     }

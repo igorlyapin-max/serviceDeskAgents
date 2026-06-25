@@ -209,7 +209,7 @@
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "pattern": "^(slot|output|step|constant|secret):.+$"
+            "pattern": "^(slot|output|step|case|constant|secret):.+$"
           }
         },
         "on_error": {

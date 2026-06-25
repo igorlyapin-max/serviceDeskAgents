@@ -572,6 +572,43 @@ label {
   margin-top: 10px;
 }
 
+.channel-parameter-editor:empty {
+  display: none;
+}
+
+.channel-parameters {
+  margin: 0;
+}
+
+.channel-param-grid,
+.simulation-channel-params {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.channel-param-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.channel-param-grid label,
+.simulation-channel-params label {
+  min-width: 0;
+}
+
+.channel-param-grid label span:first-child,
+.simulation-channel-params label span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.simulation-channel-params {
+  min-width: 260px;
+}
+
 .knowledge-pane {
   min-height: 178px;
 }
@@ -1256,6 +1293,7 @@ tbody tr:hover {
   .ticket-form,
   .debug-form-grid,
   .debug-grid-two,
+  .channel-param-grid,
   .summary-grid,
   .status-grid,
   .dry-run-trace-grid,

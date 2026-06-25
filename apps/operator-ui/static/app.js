@@ -11,12 +11,15 @@ const state = {
   activeMainTab: 'steps',
   workflowStarted: false,
   ticketTextSnapshot: '',
+  ticketIdSnapshot: '',
   scenarios: [],
-  scenarioId: 'password_reset',
+  scenarioId: '',
   scenarioDetail: null,
   scenarioSimulation: null,
-  dryRunEnabled: true,
-  testRunMode: 'config_check',
+  debugChannelId: '',
+  channelParameterValuesByChannel: {},
+  debugFlowChannelParameterValuesByChannel: {},
+  debugFlowScenarioDetail: null,
   providedSlots: {},
   activeDebugTab: 'single',
   debugProfiles: null,
@@ -35,12 +38,8 @@ const elements = {
   ticketForm: document.getElementById('ticketForm'),
   ticketText: document.getElementById('ticketText'),
   scenarioSelect: document.getElementById('scenarioSelect'),
-  dryRunToggle: document.getElementById('dryRunToggle'),
-  testRunMode: document.getElementById('testRunMode'),
-  allowLlmToggle: document.getElementById('allowLlmToggle'),
-  allowReadonlyToggle: document.getElementById('allowReadonlyToggle'),
-  allowMockToggle: document.getElementById('allowMockToggle'),
-  allowActionApprovalToggle: document.getElementById('allowActionApprovalToggle'),
+  debugChannelSelect: document.getElementById('debugChannelSelect'),
+  channelParameterEditor: document.getElementById('channelParameterEditor'),
   loadScenarioButton: document.getElementById('loadScenarioButton'),
   enrichButton: document.getElementById('enrichButton'),
   resetSlotsButton: document.getElementById('resetSlotsButton'),
@@ -70,6 +69,8 @@ const elements = {
   debugTabs: Array.from(document.querySelectorAll('[data-debug-tab]')),
   debugPanels: Array.from(document.querySelectorAll('[data-debug-panel]')),
   debugFlowScenario: document.getElementById('debugFlowScenario'),
+  debugFlowChannel: document.getElementById('debugFlowChannel'),
+  debugFlowChannelParameterEditor: document.getElementById('debugFlowChannelParameterEditor'),
   debugFlowCount: document.getElementById('debugFlowCount'),
   debugFlowSeed: document.getElementById('debugFlowSeed'),
   debugFlowWrongDepartment: document.getElementById('debugFlowWrongDepartment'),
@@ -117,7 +118,6 @@ const visibleLabels = {
   info: 'информация',
   agent_with_confirmation: 'агент + подтверждение',
   human_review: 'человек + подсказка',
-  major_incident: 'Major Incident',
   missing: 'требуется ответ',
   model_unavailable: 'модель недоступна',
   operator_approval: 'согласование оператора',
@@ -131,10 +131,12 @@ const visibleLabels = {
   p4: 'P4',
   partial: 'частично',
   pending_auto_fill: 'ожидает автозаполнения',
+  pending_live_execution: 'ожидает реального вызова',
   pending: 'ожидает',
   planned: 'запланировано',
   provided: 'заполнено',
   ready: 'готово',
+  ready_for_execution: 'готово к выполнению',
   ready_for_react: 'готово к ReAct',
   required: 'обязательный',
   resolution_pending: 'ожидает разрешения',
@@ -184,7 +186,6 @@ const visibleLabels = {
   create_draft: 'создать черновик',
   create_work_order: 'создать наряд',
   call_specialist: 'позвать специалиста',
-  notify_on_call: 'оповестить дежурных',
   debug_stop: 'остановить с сообщением',
   standard_handoff: 'эскалация оператору',
   no_answer: 'нет ответа клиента',
@@ -276,56 +277,171 @@ const actorTypeLabels = {
   callback: 'callback',
 };
 
-const testRunModeDefaults = {
-  config_check: {
-    allow_llm: false,
-    allow_readonly_integrations: false,
-    allow_mock_integrations: false,
-    allow_action_with_approval: false,
-  },
-  llm: {
-    allow_llm: true,
-    allow_readonly_integrations: false,
-    allow_mock_integrations: false,
-    allow_action_with_approval: false,
-  },
-  llm_readonly: {
-    allow_llm: true,
-    allow_readonly_integrations: true,
-    allow_mock_integrations: true,
-    allow_action_with_approval: false,
-  },
-  approval_debug: {
-    allow_llm: true,
-    allow_readonly_integrations: true,
-    allow_mock_integrations: true,
-    allow_action_with_approval: true,
-  },
-};
-
 function compactObject(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, item]) => item !== undefined && item !== null && item !== ''),
   );
 }
 
-function currentTestRunOptions() {
+function renderChannelTaskTopic(template, agentType) {
+  return String(template || 'public.ittask.serviceDesk{agent_type}.task')
+    .replace('{agent_type}', agentType || 'Default');
+}
+
+function isSensitiveChannelField(value = '') {
+  const normalized = String(value || '').toLowerCase();
+  return [
+    'api_key',
+    'apikey',
+    'authorization',
+    'credential',
+    'credentials',
+    'password',
+    'secret',
+    'token',
+    'ключ',
+    'пароль',
+    'секрет',
+    'токен',
+  ].some((part) => normalized.includes(part));
+}
+
+function isSensitiveChannelParameter(parameter = {}) {
+  const parameterId = parameter.parameter_id || '';
+  if (['task_key', 'task_number', 'message_key', 'message_key_parameter'].includes(parameterId)) {
+    return parameter.secret === true;
+  }
+  return parameter.secret === true
+    || isSensitiveChannelField(parameterId)
+    || isSensitiveChannelField(parameter.source || '');
+}
+
+function channelParameterStore(scope = 'single') {
+  return scope === 'flow'
+    ? state.debugFlowChannelParameterValuesByChannel
+    : state.channelParameterValuesByChannel;
+}
+
+function channelById(detail, channelId) {
+  const channels = allowedDebugChannels(detail);
+  return channels.find((channel) => channel.channel_id === channelId)
+    || detail?.interaction_channel
+    || null;
+}
+
+function channelSourceDefaultValue(parameter = {}, channel = {}) {
+  const parameterId = parameter.parameter_id || '';
+  const profile = channel.technical_profile || {};
+  if (parameterId === 'task_topic') {
+    return profile.task_topic || renderChannelTaskTopic(profile.task_topic_template, profile.agent_type);
+  }
+  if (parameterId === 'agent_type') return profile.agent_type || '';
+  if (parameterId === 'result_topic') return profile.result_topic || '';
+  if (parameterId === 'task_key' || parameterId === 'task_number') return '';
+  const source = parameter.source || '';
+  if (source.startsWith('technical_profile.')) {
+    const field = source.slice('technical_profile.'.length);
+    return profile[field] ?? '';
+  }
+  return '';
+}
+
+function defaultChannelParameterValues(channel = {}) {
+  const values = {};
+  for (const parameter of channel.channel_parameters || []) {
+    if (!parameter?.parameter_id || isSensitiveChannelParameter(parameter)) continue;
+    const value = channelSourceDefaultValue(parameter, channel);
+    if (value !== undefined && value !== null && value !== '') {
+      values[parameter.parameter_id] = value;
+    }
+  }
+  return values;
+}
+
+function storedChannelParameterValues(scope, channel = {}) {
+  const channelId = channel.channel_id || 'debug';
+  const store = channelParameterStore(scope);
   return {
-    run_mode: elements.testRunMode?.value || state.testRunMode || 'config_check',
-    allow_llm: elements.allowLlmToggle?.checked === true,
-    allow_readonly_integrations: elements.allowReadonlyToggle?.checked === true,
-    allow_mock_integrations: elements.allowMockToggle?.checked === true,
-    allow_action_with_approval: elements.allowActionApprovalToggle?.checked === true,
+    ...defaultChannelParameterValues(channel),
+    ...(store[channelId] || {}),
   };
 }
 
-function syncTestRunModeDefaults() {
-  state.testRunMode = elements.testRunMode?.value || 'config_check';
-  const defaults = testRunModeDefaults[state.testRunMode] || testRunModeDefaults.config_check;
-  if (elements.allowLlmToggle) elements.allowLlmToggle.checked = defaults.allow_llm;
-  if (elements.allowReadonlyToggle) elements.allowReadonlyToggle.checked = defaults.allow_readonly_integrations;
-  if (elements.allowMockToggle) elements.allowMockToggle.checked = defaults.allow_mock_integrations;
-  if (elements.allowActionApprovalToggle) elements.allowActionApprovalToggle.checked = defaults.allow_action_with_approval;
+function persistChannelParameterValues(scope, channelId, values) {
+  if (!channelId) return;
+  channelParameterStore(scope)[channelId] = compactObject(values || {});
+}
+
+function readChannelParameterValues(container) {
+  const values = {};
+  container?.querySelectorAll('[data-channel-param-id]').forEach((input) => {
+    const parameterId = input.dataset.channelParamId || '';
+    if (!parameterId || input.disabled) return;
+    values[parameterId] = input.value;
+  });
+  return compactObject(values);
+}
+
+function currentChannelParameterValues(scope = 'single', detail = state.scenarioDetail, channelId = '') {
+  const selectedChannelId = channelId || (scope === 'flow'
+    ? (elements.debugFlowChannel?.value || state.debugChannelId)
+    : effectiveDebugChannelId(detail));
+  const channel = channelById(detail, selectedChannelId) || { channel_id: selectedChannelId, channel_parameters: [] };
+  const container = scope === 'flow'
+    ? elements.debugFlowChannelParameterEditor
+    : elements.channelParameterEditor;
+  const values = {
+    ...storedChannelParameterValues(scope, channel),
+    ...readChannelParameterValues(container),
+  };
+  persistChannelParameterValues(scope, selectedChannelId, values);
+  return values;
+}
+
+function renderChannelParameterEditor(container, detail, channelId, scope = 'single') {
+  if (!container) return;
+  const channel = channelById(detail, channelId);
+  if (!channel?.channel_id) {
+    container.innerHTML = '';
+    return;
+  }
+  const parameters = (channel.channel_parameters || [])
+    .filter((parameter) => parameter?.parameter_id)
+    .filter((parameter) => !isSensitiveChannelParameter(parameter));
+  if (!parameters.length) {
+    container.innerHTML = '<div class="muted-text">У выбранного канала нет настраиваемых параметров для отладочного прогона.</div>';
+    return;
+  }
+  const values = storedChannelParameterValues(scope, channel);
+  container.innerHTML = `
+    <details class="run-options channel-parameters" open data-channel-param-scope="${escapeHtml(scope)}">
+      <summary>Параметры канала</summary>
+      <div class="channel-param-grid">
+        ${parameters.map((parameter) => {
+          const parameterId = parameter.parameter_id || '';
+          const value = values[parameterId] ?? '';
+          return `
+            <label>
+              <span>${escapeHtml(parameter.display_name || parameterId)}</span>
+              <input data-channel-param-id="${escapeHtml(parameterId)}" value="${escapeHtml(value)}" autocomplete="off">
+              <span class="field-help">${escapeHtml(parameterId)} · ${escapeHtml(parameter.direction || 'input')} · ${escapeHtml(parameter.source || 'ручной ввод')}</span>
+            </label>
+          `;
+        }).join('')}
+      </div>
+    </details>
+  `;
+}
+
+function currentTestRunOptions() {
+  return {
+    run_mode: 'operator_full_debug',
+    allow_llm: true,
+    allow_readonly_integrations: true,
+    allow_mock_integrations: true,
+    allow_action_with_approval: true,
+    bypass_policy_gates: false,
+  };
 }
 
 function apiHeaders(extra = {}) {
@@ -539,9 +655,9 @@ function renderFilledSlotValues(items = []) {
 function traceStatusHint(status) {
   const hints = {
     completed: 'Шаг выполнен успешно.',
-    ready: 'Вызов подготовлен, но в dry-run не выполнялся.',
+    ready: 'Вызов подготовлен, но еще не выполнялся.',
     blocked: 'Продолжение заблокировано настройками, политикой или недостающими параметрами.',
-    skipped: 'Шаг пропущен выбранным режимом тестового прогона.',
+    skipped: 'Шаг пропущен выбранным режимом отладочного прогона.',
     error: 'Шаг завершился ошибкой.',
     failed: 'Шаг завершился ошибкой.',
     approval_required: 'Требуется подтверждение оператора перед выполнением.',
@@ -589,6 +705,9 @@ function renderDryRunTraceItem(item, index) {
 function renderVariableContextSnapshot(simulation) {
   const snapshot = simulation?.variable_context_snapshot || null;
   if (!snapshot) return '';
+  const parameterStateById = Object.fromEntries(
+    (simulation?.channel_parameter_state || []).map((parameter) => [parameter.parameter_id, parameter]),
+  );
   const slotRows = Object.entries(snapshot.slot || {}).map(([slotId, slotState]) => {
     const value = slotState && typeof slotState === 'object' && 'value' in slotState ? slotState.value : slotState;
     const status = slotState && typeof slotState === 'object' ? slotState.status : '';
@@ -599,8 +718,8 @@ function renderVariableContextSnapshot(simulation) {
     ];
   });
   const stageRows = [
-    ['${stage.0.slot_values}', 'Слоты после приема и нормализации'],
-    ['${stage.1.resolution_state}', 'Результаты разрешения слотов'],
+    ['${stage.0.slot_values}', 'Этапы сценария: собранные значения'],
+    ['${stage.1.resolution_state}', 'Профили разрешения: состояние разрешения'],
     ['${stage.2.classification}', 'Классификация и маршрут'],
     ['${stage.4.ready_tool_launches}', 'Подготовленные ReAct-вызовы'],
     ['${stage.4.planned_waits}', 'Запланированные ожидания'],
@@ -623,11 +742,28 @@ function renderVariableContextSnapshot(simulation) {
         '',
       ])
     : [];
+  const channelRows = Object.entries(snapshot.channel || {}).flatMap(([channelId, values]) =>
+    Object.entries(values || {}).map(([field, value]) => {
+      const parameterState = parameterStateById[field];
+      return [
+        `<code>\${channel.${escapeHtml(channelId)}.${escapeHtml(field)}}</code>`,
+        traceJson(value),
+        parameterState ? badge(parameterState.status || 'resolved') : '',
+      ];
+    }),
+  );
+  const missingChannelRows = (simulation?.channel_parameter_state || [])
+    .filter((parameter) => !['resolved', 'secret'].includes(parameter.status))
+    .map((parameter) => [
+      `<code>\${channel.${escapeHtml(simulation?.interaction_channel?.channel_id || 'channel')}.${escapeHtml(parameter.parameter_id)}}</code>`,
+      escapeHtml(parameter.source || 'н/д'),
+      badge(parameter.status || 'missing'),
+    ]);
   return `
     <details class="trace-run-block variable-context-block">
       <summary>
         <span class="trace-run-title">Доступные переменные выполнения</span>
-        <span class="summary-line">${slotRows.length} слотов</span>
+        <span class="summary-line">${slotRows.length} слотов; ${channelRows.length} параметров канала</span>
       </summary>
       <div class="trace-run-body">
         ${table(
@@ -636,6 +772,8 @@ function renderVariableContextSnapshot(simulation) {
             [`<code>\${case.scenario_id}</code>`, traceJson(snapshot.case?.scenario_id), ''],
             [`<code>\${case.input_text}</code>`, traceJson(snapshot.case?.input_text), ''],
             ...slotRows,
+            ...channelRows,
+            ...missingChannelRows,
             ...waitRows,
             ...stageRows,
           ],
@@ -651,17 +789,17 @@ function renderDryRunTracePanel(simulation) {
     return `
       <details class="trace-run-block" open>
         <summary>
-          <span class="trace-run-title">Трасса тестового прогона</span>
+          <span class="trace-run-title">Трасса отладочного прогона</span>
           ${badge('pending')}
         </summary>
-        <div class="trace-run-body"><div class="empty">Тестовый прогон еще не выполнялся</div></div>
+        <div class="trace-run-body"><div class="empty">Отладочный прогон еще не выполнялся</div></div>
       </details>
     `;
   }
   return `
     <details class="trace-run-block" open>
       <summary>
-        <span class="trace-run-title">Трасса тестового прогона</span>
+        <span class="trace-run-title">Трасса отладочного прогона</span>
         <span class="summary-line">${trace.length} событий</span>
       </summary>
       <div class="trace-run-body">
@@ -688,6 +826,15 @@ function stepBlock(number, title, status, body) {
 function formatList(items, mapper = (item) => item) {
   const values = (items || []).map(mapper).filter(Boolean);
   return values.length ? values.map(escapeHtml).join(', ') : 'н/д';
+}
+
+function routeReferenceLabel(route = {}, fallbackId = '') {
+  const id = route?.route_id || fallbackId || '';
+  const displayName = route?.display_name || '';
+  if (displayName && id && displayName !== id) {
+    return `${displayName} (${id})`;
+  }
+  return displayName || id || 'н/д';
 }
 
 function formatRuleHits(items) {
@@ -718,7 +865,7 @@ function clientAgentOutcome(simulation) {
     return {
       status: 'pending',
       label: 'Ожидает запуска',
-      summary: 'Тестовый прогон еще не выполнялся.',
+      summary: 'Отладочный прогон еще не выполнялся.',
       next_step: 'Введите текст заявки и нажмите «Анализировать».',
     };
   }
@@ -727,7 +874,7 @@ function clientAgentOutcome(simulation) {
     return {
       status: 'error',
       label: 'Ошибка',
-      summary: simulation.error.message || 'Тестовый прогон завершился ошибкой.',
+      summary: simulation.error.message || 'Отладочный прогон завершился ошибкой.',
       next_step: 'Исправьте ошибку и повторите запуск.',
     };
   }
@@ -770,7 +917,7 @@ function clientAgentOutcome(simulation) {
   return {
     status: 'success',
     label: 'Завершено автоматически',
-    summary: 'Агент собрал обязательные данные и завершил тестовый прогон автоматически.',
+    summary: 'Агент собрал обязательные данные и завершил отладочный прогон автоматически.',
     next_step: 'Проверьте трассу и итоговые данные при необходимости.',
   };
 }
@@ -809,7 +956,7 @@ function renderAgentOutcomePanel(simulation) {
       <p>${escapeHtml(outcome.summary || outcome.label || 'Итог не рассчитан')}</p>
       <div class="agent-outcome-next">
         <div class="metric-label">Следующий шаг</div>
-        <div>${escapeHtml(outcome.next_step || 'Проверьте трассу тестового прогона.')}</div>
+        <div>${escapeHtml(outcome.next_step || 'Проверьте трассу отладочного прогона.')}</div>
       </div>
       <div class="grid">${details}</div>
     </section>
@@ -1051,7 +1198,65 @@ function renderScenarioSelect() {
     .join('');
 }
 
+function allowedDebugChannels(detail = state.scenarioDetail) {
+  const channels = detail?.allowed_interaction_channels || [];
+  const realChannels = channels.filter((channel) => channel.channel_id && channel.channel_id !== 'debug');
+  if (realChannels.length) return realChannels;
+  return channels.length ? channels : [detail?.interaction_channel].filter((channel) => channel?.channel_id);
+}
+
+function effectiveDebugChannelId(detail = state.scenarioDetail) {
+  const channels = allowedDebugChannels(detail);
+  const ids = new Set(channels.map((channel) => channel.channel_id));
+  if (state.debugChannelId && ids.has(state.debugChannelId)) {
+    return state.debugChannelId;
+  }
+  const defaultChannelId = detail?.scenario?.default_channel_id || detail?.interaction_channel?.channel_id || 'debug';
+  const selected = ids.has(defaultChannelId) ? defaultChannelId : (channels[0]?.channel_id || 'debug');
+  state.debugChannelId = selected;
+  return selected;
+}
+
+function debugChannelIdForDetail(detail, preferred = '') {
+  const channels = allowedDebugChannels(detail);
+  const ids = new Set(channels.map((channel) => channel.channel_id));
+  if (preferred && ids.has(preferred)) return preferred;
+  const defaultChannelId = detail?.scenario?.default_channel_id || detail?.interaction_channel?.channel_id || 'debug';
+  return ids.has(defaultChannelId) ? defaultChannelId : (channels[0]?.channel_id || 'debug');
+}
+
+function renderDebugChannelSelectFor(select, detail, selectedValue = '') {
+  if (!select) return;
+  const channels = allowedDebugChannels(detail);
+  const selected = debugChannelIdForDetail(detail, selectedValue || state.debugChannelId);
+  select.innerHTML = channels.length
+    ? channels.map((channel) => `
+      <option value="${escapeHtml(channel.channel_id)}" ${channel.channel_id === selected ? 'selected' : ''}>
+        ${escapeHtml(channel.display_name || channel.channel_id)}
+      </option>
+    `).join('')
+    : '<option value="debug">Отладочный канал</option>';
+  select.value = selected;
+  select.disabled = !channels.length;
+}
+
+function renderDebugChannelSelect() {
+  const selected = effectiveDebugChannelId();
+  renderDebugChannelSelectFor(elements.debugChannelSelect, state.scenarioDetail, selected);
+  renderDebugChannelSelectFor(elements.debugFlowChannel, state.scenarioDetail, selected);
+  renderChannelParameterEditor(elements.channelParameterEditor, state.scenarioDetail, selected, 'single');
+  renderChannelParameterEditor(elements.debugFlowChannelParameterEditor, state.scenarioDetail, selected, 'flow');
+}
+
+async function detailForDebugFlowScenario(scenarioId) {
+  if (scenarioId && scenarioId === state.scenarioId && state.scenarioDetail) {
+    return state.scenarioDetail;
+  }
+  return api(`${scenarioApiBase}/scenarios/${encodeURIComponent(scenarioId)}`);
+}
+
 function renderScenario() {
+  renderDebugChannelSelect();
   renderScenarioSummary();
   renderQuestion();
   renderSlotAnswers();
@@ -1074,18 +1279,15 @@ function renderScenarioSummary() {
   const missingCount = simulation?.missing_slots?.length ?? 0;
   const answerableCount = answerableMissingSlotIds(simulation, detail).length;
   const route = detail.route || {};
-  const channel = detail.interaction_channel || simulation?.interaction_channel || {};
-  const mode = simulation?.simulation_options || currentTestRunOptions();
+  const channel = simulation?.interaction_channel || detail.interaction_channel || {};
   elements.scenarioSummary.innerHTML = [
     `<span>${escapeHtml(detail.scenario.display_name)}</span>`,
     badge(detail.readiness?.status),
     badge(route.priority),
     `<span>${escapeHtml(channel.display_name || 'канал не задан')}</span>`,
-    `<span>${escapeHtml(simulation?.simulation_options?.display_name || elements.testRunMode?.selectedOptions?.[0]?.textContent || 'тестовый прогон')}</span>`,
     badge(simulation?.final_decision || 'pending'),
     `<span>Недостающих слотов: ${escapeHtml(missingCount)}</span>`,
     `<span>Вопросов для уточнения: ${escapeHtml(answerableCount)}</span>`,
-    mode.allow_llm ? '<span>LLM включен</span>' : '<span>LLM выключен</span>',
   ].join(' ');
 }
 
@@ -1135,14 +1337,15 @@ function renderQuestion() {
     `
     : '';
   const channel = simulation.interaction_channel || detail.interaction_channel || {};
-  const questionDelivery = simulation.question_delivery || channel.question_delivery || {};
+  const delivery = simulation.client_question?.delivery || {};
+  const deliveryMode = visibleLabels[delivery.mode] || delivery.mode || channel.mode || 'н/д';
   elements.questionView.innerHTML = `
     <div class="question-title">Нужно уточнение у клиента</div>
     <div class="question-text">${escapeHtml(resolutionQuestion(slot, simulation))}</div>
     <div class="question-meta">Слот: ${escapeHtml(slot.display_name || slotId)} / приоритет: ${
       escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group || 'н/д')
     }</div>
-    <div class="question-meta">Канал: ${escapeHtml(channel.display_name || 'н/д')} / доставка вопроса клиенту: ${escapeHtml(visibleLabels[questionDelivery.action_type] || questionDelivery.action_type || 'н/д')}</div>
+    <div class="question-meta">Канал: ${escapeHtml(channel.display_name || 'н/д')} / режим доставки: ${escapeHtml(deliveryMode)}</div>
     ${resolutionMeta}
     <div class="question-input-row">
       <input id="slotAnswerInput" autocomplete="off" placeholder="Ответ клиента или введенный оператором ответ">
@@ -1190,8 +1393,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
   const escalation = detail.escalation_policy || {};
   const channel = simulation?.interaction_channel || detail.interaction_channel || {};
   const waitingPolicy = normalizeWaitingPolicy(simulation?.waiting_policy || channel.waiting_policy || {});
-  const escalationAction = simulation?.escalation_action || channel.escalation_action || {};
-  const channelProfiles = simulation?.channel_action_profiles || detail.channel_action_profiles || {};
+  const escalationAction = simulation?.escalation_action || {};
   const slotRows = orderedSlots(slotSchema).map((slot) => [
     escapeHtml(slot.display_name),
     escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group),
@@ -1216,16 +1418,21 @@ function renderFiveStepView(detail, simulation, options = {}) {
   ]);
   const classification = simulation?.classification || {};
   const topRouteRows = (classification.top_routes || []).map((item) => [
-    escapeHtml(item.display_name || item.route_id),
+    escapeHtml(routeReferenceLabel(item, item.route_id)),
     badge(item.route),
     escapeHtml(item.priority || 'н/д'),
     escapeHtml(item.confidence ?? 'н/д'),
     escapeHtml(formatRuleHits(item.positive_hits)),
     escapeHtml(formatRuleHits(item.negative_hits)),
   ]);
+  const selectedClassificationRoute = {
+    route_id: classification.route_id,
+    display_name: classification.display_name,
+  };
   const routeRows = [
     ['Решение правил', escapeHtml(visibleLabels[classification.decision_level] || classification.decision_level || 'н/д')],
-    ['Настроенный маршрут сценария', escapeHtml(classification.configured_route_id || route.route_id || 'н/д')],
+    ['Настроенный маршрут сценария', escapeHtml(routeReferenceLabel(route, classification.configured_route_id || route.route_id))],
+    ['Выбранный маршрут классификации', escapeHtml(routeReferenceLabel(selectedClassificationRoute, classification.route_id))],
     ['Совпадает со сценарием', escapeHtml(classification.matches_configured_route ? 'да' : 'нет')],
     ['Порог правил', escapeHtml(route.confidence?.rules_min ?? 'н/д')],
     ['LLM few-shot', escapeHtml(route.confidence?.llm_min ?? 'н/д')],
@@ -1284,22 +1491,8 @@ function renderFiveStepView(detail, simulation, options = {}) {
     two_tool_errors: '2 ошибки инструментов подряд',
     iteration_limit: 'достигнут лимит ReAct-итераций',
     confidence_below_050: 'confidence ниже 0.50',
-    affected_users_threshold: 'превышен порог Major Incident',
     policy_blocked: 'политика заблокировала автоисполнение',
   };
-  const profileRows = ['standard_handoff', 'no_answer', 'major_incident', 'policy_blocked']
-    .map((eventType) => {
-      const profile = channelProfiles[eventType];
-      if (!profile) return null;
-      const action = profile.action || {};
-      return [
-        badge(eventType),
-        escapeHtml(profile.display_name || profile.profile_id),
-        badge(action.action_type || 'missing'),
-        escapeHtml(action.tool_name ? `${action.tool_name} / ${action.endpoint_id || 'н/д'} / ${action.operation_id || 'н/д'}` : 'без ReAct-вызова'),
-      ];
-    })
-    .filter(Boolean);
   return [
     renderAgentOutcomePanel(simulation),
     renderDryRunTracePanel(simulation),
@@ -1316,7 +1509,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
       </div>
       ${table(['Слот', 'Приоритет', 'Тип', 'Способ заполнения', 'Статус', 'Результат слота', 'Confidence', 'Причина'], slotRows)}
-      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение dry-run', 'Результаты слотов', 'Выходные слоты', 'Действие', 'Сообщение'], resolutionRows) : ''}`,
+      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение', 'Результаты слотов', 'Выходные слоты', 'Действие', 'Сообщение'], resolutionRows) : ''}`,
     ),
     stepBlock(
       2,
@@ -1327,7 +1520,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Маршрут', badge(classification.route || route.route))}
         ${metric('Workflow state', escapeHtml(classification.workflow_state_id || route.workflow_state_id || 'н/д'))}
         ${metric('Канал', escapeHtml(channel.display_name || 'н/д'))}
-        ${metric('Confidence dry-run', escapeHtml(classification.confidence ?? 'н/д'))}
+        ${metric('Confidence', escapeHtml(classification.confidence ?? 'н/д'))}
       </div>
       ${table(['Уровень', 'Значение'], routeRows)}
       ${topRouteRows.length ? table(['Кандидат маршрута', 'Маршрут', 'Приоритет', 'Confidence', 'Позитивные признаки', 'Негативные признаки'], topRouteRows) : ''}`,
@@ -1361,7 +1554,6 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Таймаут канала', escapeHtml(`${waitingPolicy.first_reminder_after_seconds ?? 'н/д'} сек / ${waitingPolicy.discussion_timeout_seconds ?? 'н/д'} сек`))}
         ${metric('Клиент не ответил', badge(waitingPolicy.on_no_answer || 'missing'))}
         ${metric('Эскалация оператору', badge(escalationAction.action_type || 'missing'))}
-        ${metric('Major Incident', escapeHtml(`${escalation.major_incident?.affected_users_threshold || 'н/д'} пользователей`))}
         ${metric('Условия эскалации', escapeHtml(formatList(escalation.handoff_conditions, (item) => conditionLabels[item] || item)))}
         ${metric('Пакет эскалации', escapeHtml(formatList(escalation.handoff_package, (item) => packageLabels[item] || item)))}
         ${metric('Ожидает клиента', badge(simulation?.awaiting_client_response ? 'yes' : 'no'))}
@@ -1369,7 +1561,6 @@ function renderFiveStepView(detail, simulation, options = {}) {
       </div>
       ${plannedWaitRows.length ? table(['Статус', 'Тип', 'Источник', 'План ожидания', 'Ожидаемое событие', 'Timeout'], plannedWaitRows) : ''}
       ${runtimeWaitRows.length ? table(['Статус', 'Тип', 'Источник', 'Deadline', 'Correlation', 'Последнее событие'], runtimeWaitRows) : ''}
-      ${profileRows.length ? table(['Событие', 'Профиль канала', 'Действие', 'ReAct-вызов / подключение / операция'], profileRows) : ''}
       <div class="message-block">
         <div class="metric-label">Уведомление клиенту</div>
         <p>${escapeHtml(escalation.user_notification_template || 'н/д')}</p>
@@ -1390,14 +1581,18 @@ function renderSteps() {
   });
 }
 
+function effectiveTicketText() {
+  return state.ticketTextSnapshot || elements.ticketText.value.trim();
+}
+
 function syncAnalyzeButton() {
-  const answerableSlots = state.dryRunEnabled ? answerableMissingSlotIds() : [];
-  const disabled = !state.scenarios.length || !state.scenarioId || !elements.ticketText.value.trim() || answerableSlots.length > 0;
+  const answerableSlots = answerableMissingSlotIds();
+  const disabled = !state.scenarios.length || !state.scenarioId || !effectiveTicketText() || answerableSlots.length > 0;
   elements.analyzeButton.disabled = disabled;
   elements.analyzeButton.title = answerableSlots.length
     ? 'Сначала ответьте на вопрос обогащения заявки'
     : '';
-  elements.enrichButton.disabled = !state.workflowStarted || !state.dryRunEnabled;
+  elements.enrichButton.disabled = !state.workflowStarted;
   elements.resetSlotsButton.disabled = !state.workflowStarted;
   elements.loadScenarioButton.disabled = !state.workflowStarted;
 }
@@ -1426,7 +1621,7 @@ async function loadScenarioDetail(scenarioId = state.scenarioId, options = {}) {
   state.scenarioDetail = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(scenarioId)}`);
   state.scenarioSimulation = null;
   renderScenario();
-  if (options.simulate === true && state.dryRunEnabled) {
+  if (options.simulate === true) {
     await simulateScenario();
   }
 }
@@ -1436,20 +1631,18 @@ async function simulateScenario() {
     renderScenario();
     return;
   }
-  if (!state.dryRunEnabled) {
-    state.scenarioSimulation = null;
-    renderScenario();
-    return;
-  }
   elements.enrichButton.disabled = true;
   try {
     const runOptions = currentTestRunOptions();
+    const channelId = effectiveDebugChannelId();
     state.scenarioSimulation = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(state.scenarioId)}/simulate`, {
       method: 'POST',
       body: JSON.stringify({
-        text: state.ticketTextSnapshot,
+        text: effectiveTicketText(),
         provided_slots: state.providedSlots,
         operator_id: elements.operatorId.value.trim() || 'admin-1',
+        channel_id: channelId,
+        channel_parameter_values: currentChannelParameterValues('single', state.scenarioDetail, channelId),
         ...runOptions,
       }),
     });
@@ -1458,7 +1651,7 @@ async function simulateScenario() {
     state.scenarioSimulation = {
       schema_version: '1.0',
       scenario_id: state.scenarioId,
-      input_text: state.ticketTextSnapshot,
+      input_text: effectiveTicketText(),
       run_mode: runOptions.run_mode,
       simulation_options: runOptions,
       slot_values: {},
@@ -1472,7 +1665,7 @@ async function simulateScenario() {
         {
           step: '0',
           status: 'error',
-          title: 'Тестовый прогон',
+          title: 'Отладочный прогон',
           message: error.message,
         },
       ],
@@ -1481,14 +1674,14 @@ async function simulateScenario() {
         status: 'error',
         label: 'Ошибка',
         summary: error.message,
-        next_step: 'Исправьте ошибку и повторите тестовый прогон.',
+        next_step: 'Исправьте ошибку и повторите отладочный прогон.',
       },
       dry_run: true,
       error: { message: error.message },
     };
     elements.apiStatus.textContent = `Ошибка сценария: ${error.message}`;
   } finally {
-    elements.enrichButton.disabled = !state.dryRunEnabled;
+    elements.enrichButton.disabled = false;
     renderScenario();
   }
 }
@@ -1526,13 +1719,6 @@ function resetSlots() {
   }
 }
 
-function setDryRunEnabled(enabled) {
-  state.dryRunEnabled = enabled;
-  elements.enrichButton.disabled = !enabled;
-  if (!enabled) state.scenarioSimulation = null;
-  renderScenario();
-}
-
 function firstSlotValue(slotIds) {
   for (const slotId of slotIds) {
     const value = state.providedSlots[slotId];
@@ -1543,17 +1729,158 @@ function firstSlotValue(slotIds) {
   return '';
 }
 
+function newDebugTicketId() {
+  const suffix = window.crypto?.randomUUID
+    ? window.crypto.randomUUID().replaceAll('-', '').slice(0, 12)
+    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `debug-${suffix}`;
+}
+
+function ensureTicketIdSnapshot() {
+  if (!state.ticketIdSnapshot) {
+    state.ticketIdSnapshot = newDebugTicketId();
+  }
+  return state.ticketIdSnapshot;
+}
+
+function readPath(value, parts) {
+  let current = value;
+  for (const part of parts) {
+    if (current === undefined || current === null) return undefined;
+    if (Array.isArray(current) && /^\d+$/.test(part)) {
+      current = current[Number(part)];
+    } else if (typeof current === 'object') {
+      current = current[part];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function normalizeBindingValue(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (/^-?\d+$/.test(trimmed)) return Number(trimmed);
+  if (/^-?\d+\.\d+$/.test(trimmed)) return Number(trimmed);
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  return value;
+}
+
+function slotRuntimeValue(slotId) {
+  if (state.providedSlots[slotId] !== undefined && state.providedSlots[slotId] !== null) {
+    return state.providedSlots[slotId];
+  }
+  const slotValue = state.scenarioSimulation?.slot_values?.[slotId];
+  if (slotValue && typeof slotValue === 'object' && 'value' in slotValue) {
+    return slotValue.value;
+  }
+  return slotValue;
+}
+
+function caseRuntimeValue(field, payload) {
+  const caseValues = {
+    ticket_id: payload.ticket_id,
+    case_id: payload.case_id,
+    description: payload.description,
+    input_text: effectiveTicketText(),
+    scenario_id: state.scenarioId,
+    channel_id: effectiveDebugChannelId(),
+    priority: payload.priority,
+    user: payload.user,
+    service: payload.service,
+  };
+  return caseValues[field];
+}
+
+function channelRuntimeValue(path) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  if (!parts.length) return undefined;
+  const channelId = parts[0];
+  const channelValues = state.scenarioSimulation?.channel_variables?.[channelId]
+    || state.scenarioSimulation?.variable_context_snapshot?.channel?.[channelId];
+  return readPath(channelValues, parts.slice(1));
+}
+
+function resolveLaunchBindingValue(sourceRef, payload) {
+  const value = String(sourceRef || '').trim();
+  if (!value) return undefined;
+  const templateMatch = value.match(/^\$\{([^{}]+)\}$/);
+  const ref = templateMatch ? templateMatch[1] : value;
+  const [source, ...rest] = ref.split(':');
+  const sourceValue = rest.join(':');
+  if (!sourceValue) return undefined;
+  if (source === 'constant') return normalizeBindingValue(sourceValue);
+  if (source === 'slot' || source === 'output') return slotRuntimeValue(sourceValue);
+  if (source === 'case') return caseRuntimeValue(sourceValue, payload);
+  if (source === 'channel') return channelRuntimeValue(sourceValue);
+  return undefined;
+}
+
+function buildScenarioDebugActions(payload) {
+  const launches = (state.scenarioSimulation?.ready_tool_launches || [])
+    .filter((launch) => launch?.status === 'ready' || launch?.status === 'approval_required');
+  return launches.map((launch, index) => {
+    const parameters = {};
+    Object.entries(launch.parameter_bindings || {}).forEach(([parameter, sourceRef]) => {
+      const value = resolveLaunchBindingValue(sourceRef, payload);
+      if (value !== undefined && value !== null && value !== '') {
+        parameters[parameter] = value;
+      }
+    });
+    const actionType = launch.action_type || 'read_only';
+    const extensions = compactObject({
+      endpoint_id: launch.endpoint_id,
+      operation_id: launch.operation_id,
+      completion_policy: launch.completion_policy,
+      source_profile_id: launch.profile_id,
+      source_step_id: launch.step_id,
+      debug_launch_id: launch.launch_id,
+    });
+    return {
+      tool_name: launch.tool_name,
+      action_id: `${launch.launch_id || `debug_launch_${index + 1}`}.action`,
+      action_type: actionType,
+      parameters,
+      reason: `Операторский отладочный запуск ReAct-вызова ${launch.tool_name}.`,
+      risk_level: launch.risk_level || (actionType === 'action' ? 'medium' : 'low'),
+      expected_effect: `Будет выполнена endpoint-операция ${launch.endpoint_id || 'н/д'} / ${launch.operation_id || 'н/д'}.`,
+      requires_state_change: actionType === 'action',
+      risk_notes: 'Операторская консоль отладки выполняет вызов без policy/safety gates.',
+      extensions,
+    };
+  });
+}
+
+function scenarioDebugDecisionOverride(payload) {
+  const proposedActions = buildScenarioDebugActions(payload);
+  if (!proposedActions.length) return undefined;
+  return {
+    schema_version: '1.0',
+    decision: {
+      type: 'action_proposed',
+      summary: `Операторский отладочный запуск: ${proposedActions.length} ReAct-вызовов сценария.`,
+      confidence: 1,
+    },
+    operator_message: 'Выполняется полный отладочный прогон вызовов сценария без policy/safety gates.',
+    internal_reasoning_summary: 'Операторская консоль отладки передала готовые ReAct-вызовы из сценарной симуляции.',
+    citations: [],
+    proposed_actions: proposedActions,
+  };
+}
+
 function legacyScenarioForAnalyze() {
   const route = state.scenarioDetail?.route?.route;
   const hasLaunches = (state.scenarioDetail?.tool_launches || []).length > 0;
   if (answerableMissingSlotIds().length) return 'clarification';
-  if (route === 'major_incident' || route === 'human_review') return 'escalation';
+  if (route === 'human_review') return 'escalation';
   if (hasLaunches) return 'runbook';
   return 'answer';
 }
 
 function formPayload() {
-  const text = state.ticketTextSnapshot || elements.ticketText.value.trim();
+  const text = effectiveTicketText();
   const slotSummary = Object.entries(state.providedSlots)
     .map(([key, value]) => `${key}: ${value}`)
     .join('; ');
@@ -1562,13 +1889,20 @@ function formPayload() {
   const service = firstSlotValue(['app_name', 'resource_name', 'device_id', 'account_type', 'symptom', 'location'])
     || state.scenarioDetail?.scenario?.display_name
     || 'заявка';
-  return compactObject({
+  const payload = compactObject({
     user: firstSlotValue(['user_login', 'user_id']) || 'не указан',
     service,
     priority: routePriority.toLowerCase(),
     scenario: legacyScenarioForAnalyze(),
+    ticket_id: ensureTicketIdSnapshot(),
     description,
   });
+  const decisionOverride = scenarioDebugDecisionOverride(payload);
+  if (decisionOverride) {
+    payload.scenario = 'action';
+    payload.decision_override = decisionOverride;
+  }
+  return payload;
 }
 
 function renderKnowledge() {
@@ -1746,7 +2080,7 @@ function renderTrace() {
         const trace = state.scenarioSimulation.execution_trace || [];
         elements.traceView.innerHTML = trace.length
           ? trace.map((item, index) => renderDryRunTraceItem(item, index)).join('')
-          : '<div class="empty">Нет событий тестового прогона</div>';
+          : '<div class="empty">Нет событий отладочного прогона</div>';
         return;
       }
       if (state.activeTab === 'json') {
@@ -1858,8 +2192,9 @@ async function analyzeTicket() {
   elements.analyzeButton.disabled = true;
   state.workflowStarted = true;
   state.ticketTextSnapshot = elements.ticketText.value.trim();
-  if (!state.ticketTextSnapshot) {
+  if (!effectiveTicketText()) {
     renderScenario();
+    syncAnalyzeButton();
     return;
   }
   state.analysis = null;
@@ -1878,9 +2213,7 @@ async function analyzeTicket() {
       return;
     }
   }
-  if (state.dryRunEnabled) {
-    await simulateScenario();
-  }
+  await simulateScenario();
   if (answerableMissingSlotIds().length) {
     renderQuestion();
     syncAnalyzeButton();
@@ -2129,13 +2462,19 @@ async function prepareDebugSimulation() {
   if (!scenarioId) return;
   elements.debugPrepareButton.disabled = true;
   try {
+    const detail = await detailForDebugFlowScenario(scenarioId);
+    state.debugFlowScenarioDetail = detail;
+    const channelId = debugChannelIdForDetail(detail, elements.debugFlowChannel?.value || state.debugChannelId);
+    renderDebugChannelSelectFor(elements.debugFlowChannel, detail, channelId);
+    renderChannelParameterEditor(elements.debugFlowChannelParameterEditor, detail, channelId, 'flow');
     state.debugSimulation = await api('/debug/simulations/prepare', {
       method: 'POST',
       body: JSON.stringify({
         source: 'scenario_profiles',
         scenario_ids: [scenarioId],
         count_per_scenario: Number(elements.debugFlowCount?.value || 1),
-        channel_id: 'debug',
+        channel_id: channelId,
+        channel_parameter_values: currentChannelParameterValues('flow', detail, channelId),
         seed: elements.debugFlowSeed?.value || undefined,
         include_wrong_department: elements.debugFlowWrongDepartment?.checked === true,
         mode: 'dry_run',
@@ -2197,6 +2536,38 @@ function renderSimulationExpectations(item) {
   `;
 }
 
+function renderDebugItemChannelParameters(item, detail, run = {}) {
+  const channelId = item.channel_id || run.channel_id || '';
+  const channel = channelById(detail, channelId);
+  if (!channel?.channel_id) {
+    return '<div class="muted-text">канал не загружен</div>';
+  }
+  const parameters = (channel.channel_parameters || [])
+    .filter((parameter) => parameter?.parameter_id)
+    .filter((parameter) => !isSensitiveChannelParameter(parameter));
+  if (!parameters.length) {
+    return '<div class="muted-text">нет параметров</div>';
+  }
+  const values = {
+    ...defaultChannelParameterValues(channel),
+    ...(run.channel_parameter_values || {}),
+    ...(item.channel_parameter_values || {}),
+  };
+  return `
+    <div class="simulation-channel-params" data-sim-channel-params>
+      ${parameters.map((parameter) => {
+        const parameterId = parameter.parameter_id || '';
+        return `
+          <label>
+            <span>${escapeHtml(parameter.display_name || parameterId)}</span>
+            <input data-sim-channel-param-id="${escapeHtml(parameterId)}" value="${escapeHtml(values[parameterId] ?? '')}" autocomplete="off">
+          </label>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function renderDebugAgentOutcome(item) {
   const outcome = item.agent_outcome || null;
   if (!outcome) {
@@ -2215,6 +2586,7 @@ function renderDebugAgentOutcome(item) {
 function renderDebugSimulation() {
   const run = state.debugSimulation?.run;
   const items = state.debugSimulation?.items || [];
+  const flowDetail = state.debugFlowScenarioDetail || state.scenarioDetail;
   if (!run) {
     elements.debugSimulationStatus.textContent = 'Поток не сформирован';
     elements.debugSimulationItems.innerHTML = '<div class="empty">Сначала сформируйте поток</div>';
@@ -2250,6 +2622,7 @@ function renderDebugSimulation() {
             <th>Сценарий</th>
             <th>Вариант</th>
             <th>Текст обращения</th>
+            <th>Параметры канала</th>
             <th>Ожидаемые данные</th>
             <th>Итог агента</th>
             <th>Case</th>
@@ -2264,6 +2637,7 @@ function renderDebugSimulation() {
               <td>${escapeHtml(item.scenario_display_name || item.scenario_id)}</td>
               <td>${escapeHtml(item.variant || 'н/д')}</td>
               <td><textarea class="compact-textarea" data-sim-item-text>${escapeHtml(item.text || '')}</textarea></td>
+              <td>${renderDebugItemChannelParameters(item, flowDetail, run)}</td>
               <td>${renderSimulationExpectations(item)}</td>
               <td>${renderDebugAgentOutcome(item)}</td>
               <td>${item.case_id ? `<button type="button" data-action="debug-open-case" data-case-id="${escapeHtml(item.case_id)}">${escapeHtml(item.case_id)}</button>` : 'не создан'}</td>
@@ -2287,12 +2661,19 @@ async function saveDebugSimulationItem(row, overrides = {}) {
   if (!runId || !itemId) return;
   const text = row.querySelector('[data-sim-item-text]')?.value || '';
   const current = (state.debugSimulation.items || []).find((item) => item.item_id === itemId) || {};
+  const channelParamInputs = Array.from(row.querySelectorAll('[data-sim-channel-param-id]'));
+  const channelParameterValues = {};
+  for (const input of channelParamInputs) {
+    const parameterId = input.dataset.simChannelParamId || '';
+    if (parameterId) channelParameterValues[parameterId] = input.value;
+  }
   const response = await api(`/debug/simulations/${encodeURIComponent(runId)}/items/${encodeURIComponent(itemId)}`, {
     method: 'PATCH',
     body: JSON.stringify({
       patch: {
         text,
         excluded: current.excluded === true,
+        ...(channelParamInputs.length ? { channel_parameter_values: compactObject(channelParameterValues) } : {}),
         ...overrides,
       },
     }),
@@ -2672,6 +3053,7 @@ elements.scenarioSelect.addEventListener('change', (event) => {
   state.scenarioId = event.target.value;
   state.workflowStarted = false;
   state.ticketTextSnapshot = '';
+  state.ticketIdSnapshot = '';
   state.scenarioDetail = null;
   state.scenarioSimulation = null;
   state.providedSlots = {};
@@ -2684,19 +3066,58 @@ elements.scenarioSelect.addEventListener('change', (event) => {
   renderScenario();
   renderAnalysis();
 });
-elements.ticketText.addEventListener('input', syncAnalyzeButton);
-elements.dryRunToggle.addEventListener('change', (event) => setDryRunEnabled(event.target.checked));
-elements.testRunMode?.addEventListener('change', () => {
-  syncTestRunModeDefaults();
+elements.ticketText.addEventListener('input', () => {
+  state.ticketTextSnapshot = elements.ticketText.value.trim();
+  state.ticketIdSnapshot = '';
+  state.scenarioSimulation = null;
+  state.analysis = null;
+  state.approvalResults = {};
   syncAnalyzeButton();
 });
-[
-  elements.allowLlmToggle,
-  elements.allowReadonlyToggle,
-  elements.allowMockToggle,
-  elements.allowActionApprovalToggle,
-].forEach((toggle) => {
-  toggle?.addEventListener('change', syncAnalyzeButton);
+elements.debugChannelSelect?.addEventListener('change', async (event) => {
+  currentChannelParameterValues('single', state.scenarioDetail, state.debugChannelId || event.target.value || '');
+  state.debugChannelId = event.target.value || '';
+  renderChannelParameterEditor(elements.channelParameterEditor, state.scenarioDetail, state.debugChannelId, 'single');
+  if (state.workflowStarted) {
+    await simulateScenario();
+  } else {
+    renderScenario();
+  }
+});
+elements.debugFlowScenario?.addEventListener('change', async (event) => {
+  try {
+    const detail = await detailForDebugFlowScenario(event.target.value);
+    state.debugFlowScenarioDetail = detail;
+    renderDebugChannelSelectFor(elements.debugFlowChannel, detail, elements.debugFlowChannel?.value || state.debugChannelId);
+    renderChannelParameterEditor(
+      elements.debugFlowChannelParameterEditor,
+      detail,
+      elements.debugFlowChannel?.value || state.debugChannelId,
+      'flow',
+    );
+  } catch (error) {
+    if (elements.debugSimulationStatus) {
+      elements.debugSimulationStatus.textContent = `Каналы сценария не загружены: ${error.message}`;
+    }
+  }
+});
+elements.debugFlowChannel?.addEventListener('change', (event) => {
+  currentChannelParameterValues('flow', state.debugFlowScenarioDetail || state.scenarioDetail, state.debugChannelId || event.target.value || '');
+  state.debugChannelId = event.target.value || state.debugChannelId;
+  renderChannelParameterEditor(
+    elements.debugFlowChannelParameterEditor,
+    state.debugFlowScenarioDetail || state.scenarioDetail,
+    state.debugChannelId,
+    'flow',
+  );
+});
+elements.channelParameterEditor?.addEventListener('input', () => {
+  const channelId = elements.debugChannelSelect?.value || state.debugChannelId;
+  persistChannelParameterValues('single', channelId, readChannelParameterValues(elements.channelParameterEditor));
+});
+elements.debugFlowChannelParameterEditor?.addEventListener('input', () => {
+  const channelId = elements.debugFlowChannel?.value || state.debugChannelId;
+  persistChannelParameterValues('flow', channelId, readChannelParameterValues(elements.debugFlowChannelParameterEditor));
 });
 elements.operatorId.addEventListener('change', () => {
   loadScenarios();
@@ -2756,7 +3177,6 @@ document.addEventListener('click', (event) => {
   }
 });
 
-syncTestRunModeDefaults();
 setDebugTab(state.activeDebugTab);
 setMainTab(state.activeMainTab);
 renderAnalysis();

@@ -91,7 +91,7 @@ for removed_view in [
     'data-view="scenarioTools"',
 ]:
     assert removed_view not in html, removed_view
-assert "Разрешение слотов" in html, html[:300]
+assert "Профили разрешения" in html, html[:300]
 assert "Слоты" in html, html[:300]
 assert "Системные промпты" in html, html[:300]
 assert 'data-view="scenarioPrompts"' in html, html[:300]
@@ -336,17 +336,17 @@ assert detail["system_confidence_defaults"]["auto_accept_confidence"] == 0.85, d
 assert "user_login" in detail["slot_confidence_thresholds"], detail
 print("карта сценария проверена")
 
-graph = request("/admin/orchestration-graph?scenario_id=password_reset&view=scenario")
+graph = request("/admin/orchestration-graph?view=scenario")
 assert graph["readonly"] is True, graph
 assert graph["view"] == "scenario", graph
-assert graph["scenario_id"] == "password_reset", graph
+assert graph["scenario_id"] in {item["scenario_id"] for item in scenarios["scenarios"]}, graph
 assert graph["nodes"], graph
 assert graph["edges"], graph
 assert all(node["readonly"] is True for node in graph["nodes"]), graph
 titles = {node["title"] for node in graph["nodes"]}
 for expected_title in [
-    "0. Слоты",
-    "1. Разрешение слотов",
+    "Этапы сценария",
+    "Профили разрешения",
     "2. Классификация и маршрут",
     "3. ReAct-планирование",
     "5. Решение и эскалация",

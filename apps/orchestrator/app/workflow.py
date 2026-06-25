@@ -165,10 +165,7 @@ class TicketWorkflow:
             return analysis
 
         proposed_actions = ai_decision.get("proposed_actions", [])
-        execution_policy_results = [
-            self.policy.evaluate(action)
-            for action in proposed_actions
-        ]
+        execution_policy_results = self._execution_policy_results(proposed_actions, ticket)
         workflow_state = self._resolve_workflow_state(ai_decision, execution_policy_results)
         approval_requests = self._create_action_gates(
             case_id,
@@ -772,6 +769,45 @@ class TicketWorkflow:
             facts["execution_mode"] = self._dominant_execution_mode(policy_results)
         return self.state_resolver.resolve(facts)
 
+    def _execution_policy_results(
+        self,
+        actions: list[dict[str, Any]],
+        ticket: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if ticket.get("debug_bypass_policy_gates"):
+            return [
+                self._debug_bypass_policy_result(action, ticket)
+                for action in actions
+            ]
+        return [
+            self.policy.evaluate(action)
+            for action in actions
+        ]
+
+    def _debug_bypass_policy_result(
+        self,
+        action: dict[str, Any],
+        ticket: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = {
+            "schema_version": "1.0",
+            "action_id": action["action_id"],
+            "tool_name": action["tool_name"],
+            "execution_mode": "auto_execute",
+            "allowed": True,
+            "approval_required": False,
+            "policy_rule_id": "debug.operator_full_debug.bypass_policy_gates",
+            "reason": "Операторский отладочный прогон отключил policy/safety gates.",
+            "extensions": {
+                "debug_bypass_policy_gates": True,
+                "debug_run_mode": ticket.get("debug_run_mode") or "operator_full_debug",
+            },
+        }
+        if action.get("risk_level"):
+            result["risk_level"] = action["risk_level"]
+        self.contracts.require_valid("execution_policy_result", result)
+        return result
+
     @staticmethod
     def _dominant_execution_mode(policy_results: list[dict[str, Any]]) -> str:
         priority = ["blocked", "operator_approval", "auto_execute", "dry_run", "manual_only"]
@@ -1127,6 +1163,8 @@ class TicketWorkflow:
 
     @staticmethod
     def _gate_type_for_policy(policy_result: dict[str, Any]) -> str | None:
+        if policy_result.get("extensions", {}).get("debug_bypass_policy_gates"):
+            return None
         if policy_result["execution_mode"] == "operator_approval":
             return "operator_approval"
         if policy_result["execution_mode"] == "auto_execute":

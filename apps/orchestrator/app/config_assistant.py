@@ -3,7 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .config_registry import schema_properties, schema_required
+from .config_registry import (
+    canonical_react_parameter_schema,
+    react_visible_parameter_schema,
+    schema_properties,
+    schema_required,
+)
 
 
 def _normalize_text(value: str | None) -> str:
@@ -14,6 +19,13 @@ def _find_by_id(items: list[dict[str, Any]], key: str, value: str | None) -> dic
     if not value:
         return None
     return next((item for item in items if item.get(key) == value), None)
+
+
+def _react_parameter_schema(tool: dict[str, Any] | None) -> dict[str, Any]:
+    canonical_schema = canonical_react_parameter_schema((tool or {}).get("tool_name"))
+    if canonical_schema:
+        return canonical_schema
+    return react_visible_parameter_schema((tool or {}).get("parameters_schema"))
 
 
 def _template_refs(instruction: str) -> list[str]:
@@ -39,6 +51,16 @@ def _template_param_calls(instruction: str) -> list[str]:
         parsed = _template_param_ref(ref)
         if parsed:
             calls.append(parsed["call"])
+    return calls
+
+
+def _instruction_react_calls(instruction: str) -> list[str]:
+    calls: list[str] = []
+    seen: set[str] = set()
+    for call in [*_template_react_calls(instruction), *_template_param_calls(instruction)]:
+        if call and call not in seen:
+            seen.add(call)
+            calls.append(call)
     return calls
 
 
@@ -87,14 +109,32 @@ def _binding_from_template_ref(ref: str) -> str | None:
             f"{step_ref['kind']}.{step_ref['name']}"
         )
     parts = _template_ref_parts(ref)
-    if len(parts) >= 2 and parts[0] in {"slot", "output"}:
+    if len(parts) >= 2 and parts[0] in {"slot", "output", "case"}:
         return f"{parts[0]}:{'.'.join(parts[1:])}"
     return None
 
 
+def _constant_binding_from_raw(value: str | None) -> str | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    if raw_value.startswith("${") or re.match(r"^(?:slot|output|step|case|constant|secret):", raw_value):
+        return None
+    constant = raw_value.rstrip(".,;")
+    if (
+        (constant.startswith('"') and constant.endswith('"'))
+        or (constant.startswith("'") and constant.endswith("'"))
+        or (constant.startswith("«") and constant.endswith("»"))
+    ):
+        constant = constant[1:-1].strip()
+    if not constant:
+        return None
+    return f"constant:{constant}"
+
+
 def _template_source_for_parameter(parameter: str, instruction: str, react_call: str | None = None) -> str | None:
     param_pattern = _template_param_ref_pattern("input")
-    source_pattern = r"\$\{(?P<source>(?:slot|output|step)\.[^{}]+)\}"
+    source_pattern = r"\$\{(?P<source>(?:slot|output|step|case)\.[^{}]+)\}"
     patterns = [
         rf"{param_pattern}\s*(?:<-|=|из|from)\s*{source_pattern}",
         rf"{source_pattern}\s*(?:->|=>|в|to)\s*{param_pattern}",
@@ -108,6 +148,19 @@ def _template_source_for_parameter(parameter: str, instruction: str, react_call:
             binding = _binding_from_template_ref(match.group("source"))
             if binding:
                 return binding
+    for match in re.finditer(
+        rf"{param_pattern}\s*(?:<-|=|из|from)\s*(?P<constant>[^\n]+)",
+        instruction or "",
+        flags=re.IGNORECASE,
+    ):
+        if match.group("name") != parameter:
+            continue
+        if react_call and match.group("call") != react_call:
+            continue
+        raw_value = re.split(r"\s+\$\{|\s+результат\b|\s+если\b", match.group("constant"), maxsplit=1, flags=re.IGNORECASE)[0]
+        binding = _constant_binding_from_raw(raw_value)
+        if binding:
+            return binding
     return None
 
 
@@ -138,16 +191,15 @@ def _humanize(value: str) -> str:
 
 
 def _tool_by_name(tools: list[dict[str, Any]], react_call: str | None, instruction: str) -> dict[str, Any] | None:
+    instruction_calls = _instruction_react_calls(instruction)
+    for template_call in instruction_calls:
+        tool = _find_by_id(tools, "tool_name", template_call)
+        if tool:
+            return tool
+    if instruction_calls:
+        return None
     if react_call:
         return _find_by_id(tools, "tool_name", react_call)
-    for template_call in _template_react_calls(instruction):
-        tool = _find_by_id(tools, "tool_name", template_call)
-        if tool:
-            return tool
-    for template_call in _template_param_calls(instruction):
-        tool = _find_by_id(tools, "tool_name", template_call)
-        if tool:
-            return tool
     normalized_instruction = _normalize_text(instruction)
     for tool in tools:
         tool_name = _normalize_text(tool.get("tool_name"))
@@ -240,15 +292,20 @@ def _result_field_for_slot(
 def _output_mapping_hints(instruction: str, react_call: str | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     output_pattern = _template_param_ref_pattern("output")
-    slot_pattern = r"\$\{slot\.(?P<slot>[A-Za-z][A-Za-z0-9_.-]*)\}"
+    slot_target_pattern = (
+        r"(?:\$\{slot\.(?P<slot>[A-Za-z][A-Za-z0-9_.-]*)\}"
+        r"|(?P<plain_slot>[A-Za-z][A-Za-z0-9_.-]*))"
+    )
     for pattern in [
-        rf"{slot_pattern}\s*(?:<-|=|из|from)\s*{output_pattern}",
-        rf"{output_pattern}\s*(?:->|=>|в|to)\s*{slot_pattern}",
+        rf"{slot_target_pattern}\s*(?:<-|=|из|from)\s*{output_pattern}",
+        rf"{output_pattern}\s*(?:->|=>|в|to)\s*{slot_target_pattern}",
     ]:
         for match in re.finditer(pattern, instruction or "", flags=re.IGNORECASE):
             if react_call and match.group("call") != react_call:
                 continue
-            hints.append({"target": match.group("slot"), "field": match.group("name")})
+            target = match.group("slot") or match.group("plain_slot")
+            if target:
+                hints.append({"target": target, "field": match.group("name")})
     for section in re.findall(r"(?:выходы?|outputs?)\s*:\s*([^.\n]+)", instruction or "", flags=re.IGNORECASE):
         for target, field in re.findall(r"([A-Za-z][A-Za-z0-9_.-]*)\s*<-\s*([A-Za-z][A-Za-z0-9_.-]*)", section):
             hints.append({"target": target, "field": field})
@@ -378,7 +435,7 @@ def _template_reference_errors(
             kind = parsed_param["kind"]
             name = parsed_param["name"]
             if kind == "input":
-                input_names = set(schema_properties(ref_tool.get("parameters_schema", {})).keys())
+                input_names = set(schema_properties(_react_parameter_schema(ref_tool)).keys())
                 if input_names and name not in input_names:
                     errors.append(f"Ссылка ${{{ref}}} указывает на неизвестный входной параметр ReAct-вызова {ref_tool_name}: {name}.")
             elif kind == "output":
@@ -393,6 +450,9 @@ def _template_reference_errors(
         elif parts[0] == "channel":
             if len(parts) < 3:
                 errors.append(f"Ссылка ${{{ref}}} должна иметь формат ${{channel.<channel_id>.<parameter>}}.")
+        elif parts[0] == "case":
+            if len(parts) < 2:
+                errors.append(f"Ссылка ${{{ref}}} должна иметь формат ${{case.<field>}}.")
         elif parts[0] == "step":
             parsed_step = _template_step_ref(ref)
             if not parsed_step:
@@ -414,7 +474,7 @@ def _template_reference_errors(
                 continue
             ref_tool = tools_by_name.get(parsed_step["call"])
             if ref_tool and parsed_step["kind"] == "input":
-                input_names = set(schema_properties(ref_tool.get("parameters_schema", {})).keys())
+                input_names = set(schema_properties(_react_parameter_schema(ref_tool)).keys())
                 if input_names and parsed_step["name"] not in input_names:
                     errors.append(
                         f"Ссылка ${{{ref}}} указывает на неизвестный входной параметр "
@@ -445,15 +505,23 @@ def compile_attribute_resolution_step(
     warnings: list[str] = []
     errors: list[str] = []
     slots = slot_schema.get("slots", [])
-    tool = _tool_by_name(tools, react_call, instruction)
+    instruction_calls = _instruction_react_calls(instruction)
+    if len(instruction_calls) > 1:
+        errors.append(
+            "Один шаг разрешения атрибута может использовать только один ReAct-вызов. "
+            f"Найдены: {', '.join(instruction_calls)}."
+        )
+    requested_react_call = instruction_calls[0] if instruction_calls else react_call
+    tool = _tool_by_name(tools, requested_react_call, instruction)
     if not tool:
         errors.append("Не найден ReAct-вызов для шага разрешения атрибута.")
         tool = {}
     errors.extend(_template_reference_errors(instruction=instruction, slots=slots, tools=tools, tool=tool, previous_steps=previous_steps))
-    parameters = list(schema_properties(tool.get("parameters_schema", {})).keys())
-    required_parameters = set(schema_required(tool.get("parameters_schema", {})))
+    parameter_schema = _react_parameter_schema(tool)
+    parameters = list(schema_properties(parameter_schema).keys())
+    required_parameters = set(schema_required(parameter_schema))
     parameter_mapping: dict[str, str] = {}
-    selected_react_call = tool.get("tool_name") or react_call
+    selected_react_call = tool.get("tool_name") or requested_react_call
     if re.search(r"\bentity:", instruction or "", flags=re.IGNORECASE):
         errors.append(
             "Ссылки entity:<name> устарели. Используйте step:<step_id>.react.<react_call>.output.<field>."
@@ -464,13 +532,24 @@ def compile_attribute_resolution_step(
             parameter_mapping[parameter] = explicit_source
             continue
         explicit = re.search(
-            rf"(?:параметр\s+)?{re.escape(parameter)}\s+(?:передай|заполни|=|<-)\s+((?:slot|output|step|constant|secret):[A-Za-z0-9_.:-]+)",
+            rf"(?:параметр\s+)?{re.escape(parameter)}\s+(?:передай|заполни|=|<-)\s+"
+            r"((?:slot|output|step|case|constant|secret):[A-Za-z0-9_.:-]+)",
             instruction or "",
             flags=re.IGNORECASE,
         )
         if explicit:
             parameter_mapping[parameter] = explicit.group(1).rstrip(".,;")
             continue
+        explicit_constant = re.search(
+            rf"(?:параметр\s+)?{re.escape(parameter)}\s*(?:<-|=|из|from)\s*([^\n.]+)",
+            instruction or "",
+            flags=re.IGNORECASE,
+        )
+        if explicit_constant:
+            binding = _constant_binding_from_raw(explicit_constant.group(1))
+            if binding:
+                parameter_mapping[parameter] = binding
+                continue
         slot = _slot_for_parameter(parameter, slots, instruction, selected_react_call)
         if slot:
             parameter_mapping[parameter] = f"slot:{slot['slot_id']}"
@@ -501,7 +580,7 @@ def compile_attribute_resolution_step(
     structure = {
         "step_id": f"step{len(previous_steps or []) + 1}",
         "step_name": resolved_step_name[:240],
-        "react_call": tool.get("tool_name", react_call or ""),
+        "react_call": selected_react_call or "",
         "parameter_mapping": parameter_mapping,
         "on_error": _on_error_from_instruction(instruction),
         "configuration_instruction": instruction,
@@ -512,6 +591,11 @@ def compile_attribute_resolution_step(
             "result_fields": result_fields,
         },
     }
+    output_mapping_hints = _output_mapping_hints(instruction, selected_react_call)
+    for hint in output_mapping_hints:
+        hint["source_ref"] = (
+            f"${{step.{structure['step_id']}.react.{structure['react_call']}.output.{hint['field']}}}"
+        )
     return {
         "schema_version": "1.0",
         "structure": structure,
@@ -520,6 +604,7 @@ def compile_attribute_resolution_step(
             "react_call": structure["react_call"],
             "input_parameters": parameters,
             "result_fields": [field["field_id"] for field in result_fields],
+            "output_mapping_hints": output_mapping_hints,
         },
         "warnings": warnings,
         "validation_errors": errors,

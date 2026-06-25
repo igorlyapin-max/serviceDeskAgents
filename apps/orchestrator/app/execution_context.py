@@ -76,11 +76,26 @@ def template_refs(text: str | None) -> list[str]:
     return [match.strip() for match in TEMPLATE_REF_RE.findall(str(text or "")) if match.strip()]
 
 
+def schema_composition_branches(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(schema, dict):
+        return []
+    branches: list[dict[str, Any]] = []
+    for key in ("allOf", "anyOf", "oneOf"):
+        value = schema.get(key)
+        if isinstance(value, list):
+            branches.extend(item for item in value if isinstance(item, dict))
+    return branches
+
+
 def schema_properties(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
     properties = schema.get("properties", {})
-    return properties if isinstance(properties, dict) else {}
+    result = dict(properties) if isinstance(properties, dict) else {}
+    for branch in schema_composition_branches(schema):
+        for name, property_schema in schema_properties(branch).items():
+            result.setdefault(name, property_schema)
+    return result
 
 
 def schema_required(schema: dict[str, Any] | None) -> list[str]:
@@ -424,6 +439,7 @@ def _channel_source_value(
 def build_channel_variable_context(
     interaction_channel: dict[str, Any] | None,
     planned_waits: list[dict[str, Any]],
+    channel_parameter_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(interaction_channel, dict):
         return {}
@@ -456,6 +472,30 @@ def build_channel_variable_context(
         value = _channel_source_value(str(parameter.get("source") or ""), technical_profile, planned_waits)
         if value not in (None, "", [], {}):
             values[parameter_id] = copy.deepcopy(value)
+
+    declared_parameters = {
+        str(parameter.get("parameter_id") or "").strip(): parameter
+        for parameter in interaction_channel.get("channel_parameters", [])
+        if isinstance(parameter, dict) and parameter.get("parameter_id")
+    }
+    override_ids: set[str] = set()
+    for parameter_id, value in (channel_parameter_values or {}).items():
+        parameter_id = str(parameter_id or "").strip()
+        if not parameter_id or value in (None, "", [], {}):
+            continue
+        parameter = declared_parameters.get(parameter_id) or {}
+        if parameter.get("secret") or _is_sensitive_channel_field(parameter_id):
+            continue
+        values[parameter_id] = copy.deepcopy(value)
+        override_ids.add(parameter_id)
+    if "task_key" in override_ids and "task_number" not in override_ids:
+        values["task_number"] = copy.deepcopy(values["task_key"])
+    elif "task_number" in override_ids and "task_key" not in override_ids:
+        values["task_key"] = copy.deepcopy(values["task_number"])
+    elif values.get("task_key") not in (None, "", [], {}) and values.get("task_number") in (None, "", [], {}):
+        values["task_number"] = copy.deepcopy(values["task_key"])
+    elif values.get("task_number") not in (None, "", [], {}) and values.get("task_key") in (None, "", [], {}):
+        values["task_key"] = copy.deepcopy(values["task_number"])
 
     return {"channel": {channel_id: values}} if values else {}
 
@@ -515,6 +555,7 @@ def build_simulation_variable_context(
     final_decision: str,
     agent_outcome: dict[str, Any] | None = None,
     interaction_channel: dict[str, Any] | None = None,
+    channel_parameter_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = {
         "case": {
@@ -551,5 +592,9 @@ def build_simulation_variable_context(
         },
         "wait": copy.deepcopy(planned_waits[0] if planned_waits else {}),
     }
-    context.update(build_channel_variable_context(interaction_channel, planned_waits))
+    context.update(build_channel_variable_context(
+        interaction_channel,
+        planned_waits,
+        channel_parameter_values=channel_parameter_values,
+    ))
     return context

@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,15 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
 STEP_SOURCE_REF_RE = re.compile(
     r"^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$"
 )
+PARAM_REACT_OUTPUT_REF_RE = re.compile(
+    r"^\$\{paramReAct\.(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+    r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}$"
+)
+STEP_OUTPUT_REF_RE = re.compile(
+    r"^\$\{step\.(?P<step_id>step[1-9][0-9]*)\.react\."
+    r"(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+    r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}$"
+)
 
 DEFAULT_CLIENT_WAITING_POLICY = {
     "auto_close_requires_client_confirmation": True,
@@ -97,6 +107,11 @@ DEFAULT_CLIENT_WAITING_POLICY = {
 DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC = "external.events"
 DEFAULT_SERVICEDESK_TASK_TOPIC_TEMPLATE = "public.ittask.serviceDesk{agent_type}.task"
 DEFAULT_SERVICEDESK_AGENT_TYPE = "Default"
+
+DRAFT_VALIDATION_RELATED_DOMAINS = {
+    "slot_schemas": {"attribute_resolution_profiles"},
+    "attribute_resolution_profiles": {"slot_schemas"},
+}
 
 DEFAULT_CHANNEL_CAPABILITIES = {
     "supports_client_questions": True,
@@ -144,6 +159,7 @@ SIMULATION_RUN_MODES = {
         "allow_readonly_integrations": False,
         "allow_mock_integrations": False,
         "allow_action_with_approval": False,
+        "bypass_policy_gates": False,
     },
     "llm": {
         "display_name": "С моделью",
@@ -151,6 +167,7 @@ SIMULATION_RUN_MODES = {
         "allow_readonly_integrations": False,
         "allow_mock_integrations": False,
         "allow_action_with_approval": False,
+        "bypass_policy_gates": False,
     },
     "llm_readonly": {
         "display_name": "С моделью и безопасными интеграциями",
@@ -158,6 +175,7 @@ SIMULATION_RUN_MODES = {
         "allow_readonly_integrations": True,
         "allow_mock_integrations": True,
         "allow_action_with_approval": False,
+        "bypass_policy_gates": False,
     },
     "approval_debug": {
         "display_name": "Отладочный запуск с подтверждениями",
@@ -165,6 +183,15 @@ SIMULATION_RUN_MODES = {
         "allow_readonly_integrations": True,
         "allow_mock_integrations": True,
         "allow_action_with_approval": True,
+        "bypass_policy_gates": False,
+    },
+    "operator_full_debug": {
+        "display_name": "Полный операторский отладочный прогон",
+        "allow_llm": True,
+        "allow_readonly_integrations": True,
+        "allow_mock_integrations": True,
+        "allow_action_with_approval": True,
+        "bypass_policy_gates": True,
     },
 }
 
@@ -214,11 +241,26 @@ def normalize_endpoint_binding(binding: dict[str, Any]) -> None:
     normalize_endpoint_reference(binding)
 
 
+def schema_composition_branches(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(schema, dict):
+        return []
+    branches: list[dict[str, Any]] = []
+    for key in ("allOf", "anyOf", "oneOf"):
+        value = schema.get(key)
+        if isinstance(value, list):
+            branches.extend(item for item in value if isinstance(item, dict))
+    return branches
+
+
 def schema_properties(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
     properties = schema.get("properties", {})
-    return properties if isinstance(properties, dict) else {}
+    result = dict(properties) if isinstance(properties, dict) else {}
+    for branch in schema_composition_branches(schema):
+        for name, property_schema in schema_properties(branch).items():
+            result.setdefault(name, property_schema)
+    return result
 
 
 def schema_required(schema: dict[str, Any] | None) -> list[str]:
@@ -372,11 +414,46 @@ def default_parameter_mapping(
             *schema_properties(tool_schema).keys(),
         ]))
     result = {}
+    operation_name_set = set(operation_names)
+    operation_properties = schema_properties(operation_schema)
     for name in operation_names:
+        if (
+            name in SYSTEM_OPERATION_PARAMETERS
+            or is_endpoint_parameter_alias(name, operation_name_set, operation_properties.get(name))
+        ):
+            continue
         if name in tool_names:
             result[name] = f"react:{name}"
         elif name == "login" and "user_login" in tool_names:
             result[name] = "react:user_login"
+    return result
+
+
+def normalize_parameter_mapping(
+    mapping: dict[str, Any],
+    tool_schema: dict[str, Any] | None,
+    operation_schema: dict[str, Any] | None,
+) -> dict[str, str]:
+    if not isinstance(mapping, dict):
+        return {}
+    tool_names = set(schema_required(tool_schema))
+    tool_names.update(schema_properties(tool_schema))
+    operation_names = set(schema_required(operation_schema))
+    operation_properties = schema_properties(operation_schema)
+    operation_names.update(operation_properties)
+    result = {}
+    for target_parameter, source_ref in mapping.items():
+        target = str(target_parameter or "")
+        source, separator, source_value = str(source_ref).partition(":")
+        if (
+            target in SYSTEM_OPERATION_PARAMETERS
+            or is_endpoint_parameter_alias(target, operation_names, operation_properties.get(target))
+        ):
+            continue
+        if source == "react" and source_value not in tool_names:
+            continue
+        if separator == ":" and source in {"react", "constant", "secret"} and source_value:
+            result[target] = str(source_ref)
     return result
 
 
@@ -535,11 +612,82 @@ def object_schema(required: list[str], properties: dict[str, dict[str, Any]]) ->
     return result
 
 
+SYSTEM_OPERATION_PARAMETERS = {"invocation"}
+
+
+def snake_case_name(value: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", str(value or "")).lower()
+
+
+def schema_marks_alias(schema: dict[str, Any] | None) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    description = str(schema.get("description") or "").strip().lower()
+    return (
+        description.startswith("alias")
+        or "alias accepted" in description
+        or "alias, принимаемый" in description
+    )
+
+
+def is_endpoint_parameter_alias(
+    name: str,
+    names: set[str],
+    schema: dict[str, Any] | None = None,
+) -> bool:
+    value = str(name or "")
+    if schema_marks_alias(schema) and "_" not in value:
+        return True
+    if not any(character.isupper() for character in value):
+        return False
+    canonical_name = snake_case_name(value)
+    return canonical_name != value and canonical_name in names
+
+
+def react_visible_parameter_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return default_request_schema()
+    normalized = copy.deepcopy(schema)
+    properties = schema_properties(normalized)
+    if not properties:
+        return normalized
+    property_names = set(properties)
+    hidden_names = {
+        name
+        for name in property_names
+        if (
+            name in SYSTEM_OPERATION_PARAMETERS
+            or is_endpoint_parameter_alias(name, property_names, properties.get(name))
+        )
+    }
+    if not hidden_names:
+        return normalized
+    normalized["properties"] = {
+        name: property_schema
+        for name, property_schema in properties.items()
+        if name not in hidden_names
+    }
+    normalized["required"] = [
+        name
+        for name in schema_required(normalized)
+        if name not in hidden_names
+    ]
+    return normalized
+
+
 CANONICAL_REACT_PARAMETER_SCHEMAS = {
     "check_zabbix_status": object_schema(["target_ref"], {"target_ref": string_property()}),
     "query_cmdb_object": object_schema(["object_ref"], {"object_ref": string_property()}),
     "get_service_owner": object_schema(["target_ref"], {"target_ref": string_property()}),
     "search_known_incidents": object_schema(["query"], {"query": string_property()}),
+    "n8n_wait_for_email_by_ticket": object_schema(
+        ["ticket_number", "poll_interval_minutes", "timeout_minutes"],
+        {
+            "ticket_number": string_property("Номер заявки"),
+            "poll_interval_minutes": {"type": "integer", "title": "Интервал опроса, минут"},
+            "timeout_minutes": {"type": "integer", "title": "Таймаут ожидания, минут"},
+        },
+    ),
     "start_systemcenter_runbook": object_schema(
         ["runbook_code"],
         {
@@ -966,6 +1114,22 @@ def slot_schema_resolution_profile_ids(slot_schema: dict[str, Any] | None) -> li
     return list(dict.fromkeys(profile_ids))
 
 
+def operator_manual_slot_hint(slot: dict[str, Any]) -> str:
+    return (
+        slot.get("operator_hint")
+        or slot.get("fallback_question")
+        or slot.get("user_question")
+        or f"Заполните \"{slot.get('display_name') or slot.get('slot_id') or 'слот'}\" вручную: профиль разрешения отсутствует."
+    )
+
+
+def convert_slot_to_operator_manual(slot: dict[str, Any]) -> None:
+    slot["fill_method"] = "operator_manual"
+    slot["operator_hint"] = operator_manual_slot_hint(slot)
+    for field in SLOT_CONTEXT_FIELDS - {"operator_hint"}:
+        slot.pop(field, None)
+
+
 def normalize_slot_schema_stages(slot_schema: dict[str, Any]) -> None:
     stages = slot_schema.get("stages")
     if not isinstance(stages, list) or not stages:
@@ -1284,25 +1448,24 @@ def normalize_channel_parameters(
     return list(result_by_id.values())
 
 
-def fallback_channel_action_type(mode: str | None, capabilities: dict[str, Any] | None = None) -> str:
-    allowed = ConfigStore._channel_action_types_for_mode(mode or "", capabilities)
-    for candidate in ("save_context", "create_work_order", "create_draft", "debug_stop", "show_debug_message"):
-        if candidate in allowed:
-            return candidate
-    return sorted(allowed)[0] if allowed else "debug_stop"
-
-
-def normalize_channel_action_for_capabilities(
-    action: dict[str, Any] | None,
-    *,
-    mode: str | None = None,
-    capabilities: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    result = action if isinstance(action, dict) else {}
-    allowed = ConfigStore._channel_action_types_for_mode(mode or "", capabilities)
-    if result.get("action_type") not in allowed:
-        result["action_type"] = fallback_channel_action_type(mode, capabilities)
-    return result
+def default_channel_handoff_action(channel: dict[str, Any] | None) -> dict[str, Any]:
+    channel = channel or {}
+    mode = channel.get("mode")
+    channel_id = channel.get("channel_id")
+    if channel_id == "service_desk" or mode == "offline_interactive":
+        return {
+            "action_type": "create_work_order",
+            "message_template": "Создать наряд ответственному специалисту с пакетом эскалации.",
+        }
+    if channel_id == "messenger_bot" or mode == "online_interactive":
+        return {
+            "action_type": "call_specialist",
+            "message_template": "Позвать специалиста в диалог с полным контекстом сценария.",
+        }
+    return {
+        "action_type": "debug_stop",
+        "message_template": "Остановить сценарий и показать причину эскалации оператору.",
+    }
 
 
 def normalize_simulation_options(
@@ -1312,6 +1475,7 @@ def normalize_simulation_options(
     allow_readonly_integrations: bool | None = None,
     allow_mock_integrations: bool | None = None,
     allow_action_with_approval: bool | None = None,
+    bypass_policy_gates: bool | None = None,
 ) -> dict[str, Any]:
     mode = run_mode or "config_check"
     if mode not in SIMULATION_RUN_MODES:
@@ -1323,6 +1487,7 @@ def normalize_simulation_options(
         ("allow_readonly_integrations", allow_readonly_integrations),
         ("allow_mock_integrations", allow_mock_integrations),
         ("allow_action_with_approval", allow_action_with_approval),
+        ("bypass_policy_gates", bypass_policy_gates),
     ):
         if value is not None:
             options[key] = bool(value)
@@ -1382,6 +1547,10 @@ def resolved_dry_run_parameters(
                 value = slot_value.get("value") if isinstance(slot_value, dict) else slot_value
         elif source == "output":
             value = outputs.get(source_value)
+        elif source == "case":
+            value = value_at_path(provided, source_value)
+            if value is None:
+                value = value_at_path(provided.get("case"), source_value) if isinstance(provided.get("case"), dict) else None
         elif source == "step":
             match = STEP_SOURCE_REF_RE.match(source_value)
             if match:
@@ -1972,18 +2141,25 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
             output_slots,
             result_policy,
         )
-    if target_slot_id and target_slot_id not in [item["slot_id"] for item in result["output_slots_order"]]:
-        result["output_slots_order"].insert(
-            0,
-            {
-                "slot_id": target_slot_id,
-                "order": 1,
-                "required_for_success": True,
-                "source_hint": target_slot_id,
-                "fallback": "ask_clarification",
-            },
-        )
-    result["output_slots_order"] = normalize_output_slot_order(result["output_slots_order"], target_slot_id)
+    last_step = normalized_enrichment_steps[-1] if normalized_enrichment_steps else None
+    if last_step:
+        output_hint_by_slot = {
+            hint["target"]: hint["field"]
+            for hint in output_mapping_hints_from_instruction(
+                last_step.get("configuration_instruction"),
+                react_call=last_step.get("react_call"),
+            )
+        }
+        if output_hint_by_slot:
+            for item in result.get("output_slots_order", []):
+                slot_id = item.get("slot_id")
+                if slot_id in output_hint_by_slot:
+                    item["source_hint"] = output_hint_by_slot[slot_id]
+    result["output_slots_order"] = normalize_output_slot_order(
+        result["output_slots_order"],
+        target_slot_id,
+        last_step=last_step,
+    )
 
     fallback = result.setdefault(
         "fallback",
@@ -2140,7 +2316,155 @@ def output_slots_order_from_policy(
     return result
 
 
-def normalize_output_slot_order(items: list[dict[str, Any]], target_slot_id: str | None) -> list[dict[str, Any]]:
+def normalize_output_source_hint(
+    source_hint: Any,
+    *,
+    last_step: dict[str, Any] | None = None,
+) -> str:
+    hint = str(source_hint or "").strip()
+    if not hint:
+        return ""
+    if re.match(r"^(paramReAct|step)\.", hint):
+        return f"${{{hint}}}"
+    step_match = STEP_OUTPUT_REF_RE.match(hint)
+    if step_match and last_step:
+        if (
+            step_match.group("step_id") == last_step.get("step_id")
+            and step_match.group("react_call") == last_step.get("react_call")
+        ):
+            return step_match.group("field")
+    return hint
+
+
+def enrichment_step_id(step: dict[str, Any], index: int) -> str:
+    value = str(step.get("step_id") or "").strip()
+    return value if re.match(r"^step[1-9][0-9]*$", value) else f"step{index}"
+
+
+def output_source_hint_reference(
+    source_hint: Any,
+    enrichment_steps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    hint = str(source_hint or "").strip()
+    if re.match(r"^(paramReAct|step)\.", hint):
+        hint = f"${{{hint}}}"
+    if not enrichment_steps:
+        return {
+            "source_hint": hint,
+            "field": hint,
+            "error": "output_slots_order не может ссылаться на результат: шаги обогащения не настроены.",
+        }
+    steps = [
+        {**step, "step_id": enrichment_step_id(step, index)}
+        for index, step in enumerate(enrichment_steps, start=1)
+    ]
+    step_match = STEP_OUTPUT_REF_RE.match(hint)
+    if step_match:
+        step_id = step_match.group("step_id")
+        react_call = step_match.group("react_call")
+        step = next((item for item in steps if item.get("step_id") == step_id), None)
+        if not step:
+            return {
+                "source_hint": hint,
+                "step_id": step_id,
+                "react_call": react_call,
+                "field": step_match.group("field"),
+                "error": f"source_hint ссылается на неизвестный шаг: {step_id}.",
+            }
+        if step.get("react_call") != react_call:
+            return {
+                "source_hint": hint,
+                "step_id": step_id,
+                "react_call": react_call,
+                "field": step_match.group("field"),
+                "error": (
+                    f"source_hint ожидает ReAct-вызов {react_call} в {step_id}, "
+                    f"но там настроен {step.get('react_call')}."
+                ),
+            }
+        return {
+            "source_hint": hint,
+            "step": step,
+            "step_id": step_id,
+            "react_call": react_call,
+            "field": step_match.group("field"),
+        }
+
+    param_match = PARAM_REACT_OUTPUT_REF_RE.match(hint)
+    if param_match:
+        react_call = param_match.group("react_call")
+        matches = [step for step in steps if step.get("react_call") == react_call]
+        if not matches:
+            return {
+                "source_hint": hint,
+                "react_call": react_call,
+                "field": param_match.group("field"),
+                "error": f"source_hint ссылается на ReAct-вызов, которого нет в шагах профиля: {react_call}.",
+            }
+        if len(matches) > 1:
+            step_ids = ", ".join(step.get("step_id", "") for step in matches)
+            return {
+                "source_hint": hint,
+                "react_call": react_call,
+                "field": param_match.group("field"),
+                "error": (
+                    f"source_hint неоднозначен: ReAct-вызов {react_call} используется в шагах {step_ids}. "
+                    "Используйте формат ${step.<step_id>.react.<react_call>.output.<field>}."
+                ),
+            }
+        step = matches[0]
+        return {
+            "source_hint": hint,
+            "step": step,
+            "step_id": step.get("step_id"),
+            "react_call": react_call,
+            "field": param_match.group("field"),
+        }
+
+    step = steps[-1]
+    return {
+        "source_hint": hint,
+        "step": step,
+        "step_id": step.get("step_id"),
+        "react_call": step.get("react_call"),
+        "field": hint,
+    }
+
+
+def output_mapping_hints_from_instruction(
+    instruction: str | None,
+    *,
+    react_call: str | None = None,
+) -> list[dict[str, str]]:
+    output_pattern = (
+        r"\$\{paramReAct\."
+        r"(?P<call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+        r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}"
+    )
+    slot_target_pattern = (
+        r"(?:\$\{slot\.(?P<slot>[A-Za-z][A-Za-z0-9_.-]*)\}"
+        r"|(?P<plain_slot>[A-Za-z][A-Za-z0-9_.-]*))"
+    )
+    hints: list[dict[str, str]] = []
+    for pattern in (
+        rf"{slot_target_pattern}\s*(?:<-|=|из|from)\s*{output_pattern}",
+        rf"{output_pattern}\s*(?:->|=>|в|to)\s*{slot_target_pattern}",
+    ):
+        for match in re.finditer(pattern, instruction or "", flags=re.IGNORECASE):
+            if react_call and match.group("call") != react_call:
+                continue
+            target = match.group("slot") or match.group("plain_slot")
+            if target:
+                hints.append({"target": target, "field": match.group("field")})
+    return hints
+
+
+def normalize_output_slot_order(
+    items: list[dict[str, Any]],
+    target_slot_id: str | None,
+    *,
+    last_step: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     normalized = []
     seen = set()
     for item in sorted(items or [], key=lambda value: int(value.get("order", 999))):
@@ -2152,7 +2476,7 @@ def normalize_output_slot_order(items: list[dict[str, Any]], target_slot_id: str
             "slot_id": slot_id,
             "order": len(normalized) + 1,
             "required_for_success": bool(item.get("required_for_success", slot_id == target_slot_id)),
-            "source_hint": item.get("source_hint") or slot_id,
+            "source_hint": normalize_output_source_hint(item.get("source_hint") or slot_id, last_step=last_step),
             "fallback": item.get("fallback") or ("ask_clarification" if slot_id == target_slot_id else "leave_empty"),
         })
     return normalized
@@ -2273,6 +2597,60 @@ def selected_operation_result_schema(
     return selected_schema
 
 
+def display_label(display_name: Any, technical_id: Any) -> str:
+    display = str(display_name or "").strip()
+    technical = str(technical_id or "").strip()
+    if display and technical and display != technical:
+        return f'"{display}" ({technical})'
+    if display:
+        return f'"{display}"'
+    return technical
+
+
+def output_slot_error_context(
+    *,
+    profile: dict[str, Any],
+    rule: dict[str, Any],
+    source_ref: dict[str, Any],
+    tool: dict[str, Any],
+    selected_schema: dict[str, Any] | None,
+    source_hint: str,
+    local_hint: str,
+    slot_schema: dict[str, Any] | None,
+) -> str:
+    slot_id = str(rule.get("slot_id") or "")
+    slot_by_id = {
+        slot.get("slot_id"): slot
+        for slot in (slot_schema or {}).get("slots", [])
+        if slot.get("slot_id")
+    }
+    slot = slot_by_id.get(slot_id, {})
+    steps = [
+        {**step, "step_id": enrichment_step_id(step, index)}
+        for index, step in enumerate(profile.get("enrichment_steps", []), start=1)
+    ]
+    step = next((item for item in steps if item.get("step_id") == source_ref.get("step_id")), {})
+    step_index = next(
+        (index for index, item in enumerate(steps, start=1) if item.get("step_id") == source_ref.get("step_id")),
+        None,
+    )
+    step_prefix = f"шаг {step_index}" if step_index else f"шаг {source_ref.get('step_id') or 'н/д'}"
+    step_label = display_label(
+        step.get("step_name") or step.get("display_name"),
+        step.get("step_id") or source_ref.get("step_id"),
+    )
+    tool_label = display_label(tool.get("display_name"), tool.get("tool_name"))
+    available_fields = sorted(schema_properties(selected_schema).keys()) if selected_schema else []
+    available_text = ", ".join(available_fields) if available_fields else "контракт не содержит именованных полей"
+    return (
+        f"Профиль {display_label(profile.get('display_name'), profile.get('profile_id'))} -> "
+        f"Выходные слоты и порядок заполнения -> строка {rule.get('order') or '?'} "
+        f"{display_label(slot.get('display_name'), slot_id)} -> Источник значения \"{source_hint}\": "
+        f"поле \"{local_hint}\" отсутствует в результате {step_prefix} {step_label} / "
+        f"ReAct-вызов {tool_label}. Доступные поля результата: {available_text}."
+    )
+
+
 def operation_response_items(
     operation_result: dict[str, Any],
     response_schema: dict[str, Any] | None = None,
@@ -2360,6 +2738,64 @@ def operation_result_value(
     return value_at_path(result_item, hint)
 
 
+def resolved_output_rule_values(
+    *,
+    profile: dict[str, Any],
+    enrichment_step_results: dict[str, Any],
+    tool_by_name: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    output_values: dict[str, Any] = {}
+    selected_items: dict[str, dict[str, Any]] = {}
+    summaries: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    errors: list[str] = []
+    enrichment_steps = profile.get("enrichment_steps", [])
+    source_refs_by_rule: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    for rule in profile.get("output_slots_order", []):
+        source_ref = output_source_hint_reference(rule.get("source_hint"), enrichment_steps)
+        if source_ref.get("error"):
+            errors.append(f"{rule.get('slot_id')}: {source_ref['error']}")
+            continue
+        source_refs_by_rule.append((rule, source_ref))
+
+    for rule, source_ref in source_refs_by_rule:
+        step_id = source_ref.get("step_id")
+        step_result = enrichment_step_results.get(step_id or "")
+        raw_result = (step_result or {}).get("result")
+        tool = tool_by_name.get(source_ref.get("react_call") or "")
+        if raw_result is None or not tool:
+            errors.append(f"{rule.get('slot_id')}: результат шага {step_id} недоступен.")
+            continue
+        if step_id not in selected_items:
+            count, result_item, result_summary = operation_response_items(
+                raw_result,
+                tool.get("result_schema"),
+                [
+                    {**item_rule, "source_hint": item_ref.get("field", "")}
+                    for item_rule, item_ref in source_refs_by_rule
+                    if item_ref.get("step_id") == step_id
+                ],
+            )
+            counts[step_id] = count
+            summaries[step_id] = result_summary
+            selected_items[step_id] = result_item or {}
+            if result_summary.get("source_status") == "configuration_error":
+                errors.append(result_summary.get("reason") or f"Контракт результата шага {step_id} неоднозначен.")
+        result_item = selected_items.get(step_id) or {}
+        result_summary = summaries.get(step_id) or {}
+        value = operation_result_value(result_item, source_ref.get("field", ""), result_summary)
+        if value is not None:
+            output_values[rule["slot_id"]] = value
+
+    return output_values, {
+        "counts": counts,
+        "summaries": summaries,
+        "errors": errors,
+        "source_status": "configuration_error" if errors else "mock_output",
+    }
+
+
 def resolution_profile_human_action(profile: dict[str, Any]) -> str:
     action = profile.get("human_resolution_policy", {}).get("action")
     if action == "escalate_operator":
@@ -2416,9 +2852,10 @@ def simulated_llm_resolution_decision(
     count: int,
     confidence: float,
     effective_thresholds: dict[str, float],
+    precomputed_output_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    output_values = {}
-    if count == 1 and result_item:
+    output_values = dict(precomputed_output_values or {})
+    if count == 1 and result_item and not precomputed_output_values:
         for rule in profile["output_slots_order"]:
             value = operation_result_value(result_item, rule.get("source_hint", ""), result_summary)
             if value is not None:
@@ -2465,9 +2902,10 @@ def direct_mapping_resolution_decision(
     result_summary: dict[str, Any] | None = None,
     count: int,
     confidence: float,
+    precomputed_output_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    output_values = {}
-    if count == 1 and result_item:
+    output_values = dict(precomputed_output_values or {})
+    if count == 1 and result_item and not precomputed_output_values:
         for rule in profile["output_slots_order"]:
             value = operation_result_value(result_item, rule.get("source_hint", ""), result_summary)
             if value is not None:
@@ -2538,13 +2976,7 @@ def tool_usage_refs(
     for profile in resolution_payload.get("profiles", []):
         if any(step.get("react_call") == tool_name for step in profile.get("enrichment_steps", [])):
             refs.append(f"attribute_resolution_profile:{profile.get('profile_id')}")
-    for channel in channels_payload.get("channels", []):
-        for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
-            if channel.get(action_key, {}).get("tool_name") == tool_name:
-                refs.append(f"interaction_channel:{channel.get('channel_id')}/{action_key}")
-        for profile in channel.get("action_profiles", []):
-            if profile.get("action", {}).get("tool_name") == tool_name:
-                refs.append(f"interaction_channel:{channel.get('channel_id')}/profile:{profile.get('profile_id')}")
+    _ = channels_payload
     return refs
 
 
@@ -2998,6 +3430,16 @@ class ConfigStore:
             return copy.deepcopy(overrides[domain])
         return self.active_config(domain)["payload"]
 
+    @contextmanager
+    def active_payload_overrides(self, overrides: dict[str, dict[str, Any]] | None):
+        normalized = self._validation_overrides(overrides)
+        token = _ACTIVE_PAYLOAD_OVERRIDES.set(normalized) if normalized else None
+        try:
+            yield
+        finally:
+            if token is not None:
+                _ACTIVE_PAYLOAD_OVERRIDES.reset(token)
+
     def _validation_overrides(
         self,
         overrides: dict[str, dict[str, Any]] | None,
@@ -3133,6 +3575,8 @@ class ConfigStore:
                 canonical_schema = canonical_react_parameter_schema(tool.get("tool_name"))
                 if canonical_schema:
                     tool["parameters_schema"] = canonical_schema
+                else:
+                    tool["parameters_schema"] = react_visible_parameter_schema(tool.get("parameters_schema"))
                 seen_bindings: set[tuple[str | None, str | None]] = set()
                 normalized_bindings = []
                 for binding in tool.get("endpoint_bindings", []):
@@ -3144,7 +3588,14 @@ class ConfigStore:
                     if canonical_schema:
                         binding["parameter_mapping"] = default_parameter_mapping(tool, operation)
                     else:
-                        binding.setdefault("parameter_mapping", default_parameter_mapping(tool, operation))
+                        if binding.get("parameter_mapping"):
+                            binding["parameter_mapping"] = normalize_parameter_mapping(
+                                binding.get("parameter_mapping") or {},
+                                tool.get("parameters_schema"),
+                                operation.get("request_schema") if operation else None,
+                            )
+                        else:
+                            binding.setdefault("parameter_mapping", default_parameter_mapping(tool, operation))
                     binding.setdefault("result_mapping", default_result_mapping(tool, operation))
                     binding_key = (binding.get("endpoint_id"), binding.get("operation_id"))
                     if binding_key in seen_bindings:
@@ -3167,7 +3618,6 @@ class ConfigStore:
             route_mapping = {
                 "agent_l1": "agent_with_confirmation",
                 "l1_hint": "human_review",
-                "l2_major_incident": "major_incident",
             }
             for route in normalized.get("routes", []):
                 scenario_id = route.pop("scenario_id", None)
@@ -3191,7 +3641,6 @@ class ConfigStore:
                 policy["auto_close"].pop("requires_user_confirmation", None)
                 policy.pop("waiting", None)
                 policy.pop("channel_profile_mapping", None)
-                policy.get("major_incident", {}).pop("notify_on_call", None)
         elif domain == "interaction_channels":
             legacy_waiting_defaults = self._legacy_client_waiting_defaults()
             for channel in normalized.get("channels", []):
@@ -3213,21 +3662,13 @@ class ConfigStore:
                     channel.get("waiting_policy"),
                     legacy_waiting_defaults,
                 )
-                channel.setdefault("action_profiles", default_channel_action_profiles(channel))
-                for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
-                    channel[action_key] = normalize_channel_action_for_capabilities(
-                        channel.get(action_key, {}),
-                        mode=channel.get("mode"),
-                        capabilities=channel.get("capabilities"),
-                    )
-                    normalize_endpoint_reference(channel.get(action_key, {}))
-                for profile in channel.get("action_profiles", []):
-                    profile["action"] = normalize_channel_action_for_capabilities(
-                        profile.get("action", {}),
-                        mode=channel.get("mode"),
-                        capabilities=channel.get("capabilities"),
-                    )
-                    normalize_endpoint_reference(profile.get("action", {}))
+                for legacy_action_key in (
+                    "question_delivery",
+                    "incomplete_discussion_action",
+                    "escalation_action",
+                    "action_profiles",
+                ):
+                    channel.pop(legacy_action_key, None)
         elif domain == "integration_endpoints":
             normalized = merge_legacy_integration_endpoints(normalized)
             for endpoint in normalized.get("endpoints", []):
@@ -3467,7 +3908,9 @@ class ConfigStore:
                 item["status"] = "blocked_by_missing_slots"
                 blocked_launches.append(item)
                 continue
-            if launch.get("action_type") == "action" and not simulation_options.get("allow_action_with_approval"):
+            if simulation_options.get("bypass_policy_gates"):
+                item["status"] = "ready"
+            elif launch.get("action_type") == "action" and not simulation_options.get("allow_action_with_approval"):
                 item["status"] = "approval_required"
             else:
                 item["status"] = "ready"
@@ -3544,10 +3987,16 @@ class ConfigStore:
             self.active_payload("escalation_policies")["policies"],
             "policy_id",
         ).get(scenario["escalation_policy_id"])
-        interaction_channel = self._by_id(
+        channel_by_id = self._by_id(
             self.active_payload("interaction_channels")["channels"],
             "channel_id",
-        ).get(scenario.get("default_channel_id", "debug"))
+        )
+        interaction_channel = channel_by_id.get(scenario.get("default_channel_id", "debug"))
+        allowed_interaction_channels = [
+            channel_by_id[channel_id]
+            for channel_id in (scenario.get("allowed_channel_ids") or [scenario.get("default_channel_id", "debug")])
+            if channel_id in channel_by_id
+        ]
         profile_by_id = self._by_id(
             self.active_payload("attribute_resolution_profiles")["profiles"],
             "profile_id",
@@ -3596,7 +4045,6 @@ class ConfigStore:
                 )
                 for slot in slot_schema["slots"]
             }
-        channel_action_profiles = resolve_channel_action_profiles(interaction_channel)
         return {
             "schema_version": "1.0",
             "scenario": scenario,
@@ -3606,7 +4054,7 @@ class ConfigStore:
             "orchestrator_policy": policy,
             "tool_launches": tool_launches,
             "interaction_channel": interaction_channel,
-            "channel_action_profiles": channel_action_profiles,
+            "allowed_interaction_channels": allowed_interaction_channels,
             "prompt_pack": prompt_pack,
             "prompt_preview": build_prompt_preview(prompt_pack) if prompt_pack else "",
             "escalation_policy": escalation_policy,
@@ -3805,16 +4253,16 @@ class ConfigStore:
             ),
             node(
                 "slot_filling",
-                "0. Слоты",
+                "Этапы сценария",
                 x=250,
                 y=210,
                 step_number=0,
                 status=item_status(slot_schema) if detail else "valid",
-                description="Сбор обязательных данных: один вопрос за раз, приоритет кто -> что -> когда.",
+                description="План этапов сценария: профиль разрешения этапа и слоты, которые заполняются моделью, оператором или клиентом.",
                 config_refs=[
                     config_ref(
                         domain="slot_schemas",
-                        title="Схема слотов",
+                        title="План этапов",
                         item=slot_schema,
                         id_key="slot_schema_id",
                         view_name="scenarioSlots",
@@ -3837,7 +4285,7 @@ class ConfigStore:
             ),
             node(
                 "attribute_resolution",
-                "1. Разрешение слотов",
+                "Профили разрешения",
                 x=460,
                 y=210,
                 step_number=1,
@@ -3963,7 +4411,7 @@ class ConfigStore:
                 y=210,
                 step_number=5,
                 status=item_status(escalation_policy) if detail else "valid",
-                description="Системные правила финального решения, ожидания клиента, handoff оператору и Major Incident.",
+                description="Системные правила финального решения, ожидания клиента и handoff оператору.",
             ),
             node(
                 "interaction_channel",
@@ -4038,7 +4486,7 @@ class ConfigStore:
             edge("waiting", "slot_filling", "ответ клиента", condition="возобновить сценарий", edge_type="loop"),
             edge("attribute_resolution", "classification", "слоты готовы"),
             edge("classification", "react_planning", "маршрут выбран"),
-            edge("classification", "escalation", "эскалация оператору", condition="major incident или низкая уверенность"),
+            edge("classification", "escalation", "эскалация оператору", condition="human review или низкая уверенность"),
             edge("endpoint_contracts", "attribute_resolution", "enrichment steps", edge_type="support"),
             edge("react_planning", "decision", "стоп-условие"),
             edge("decision", "waiting", "ожидать клиента", condition="нет ответа клиента"),
@@ -4295,19 +4743,62 @@ class ConfigStore:
 
             mock_output = copy.deepcopy(operation.get("mock_output") or {})
             if not mock_output:
+                if simulation_options.get("run_mode") == "operator_full_debug":
+                    step_id = enrichment_step.get("step_id") or f"step{step_index}"
+                    enrichment_step_results[step_id] = {
+                        "step_id": step_id,
+                        "step_name": enrichment_step.get("step_name"),
+                        "react_call": tool_name,
+                        "endpoint_id": endpoint_id,
+                        "operation_id": operation_id,
+                        "parameters": parameters,
+                        "result": {
+                            "status": "ready_for_execution",
+                            "reason": "Операция будет выполнена при анализе заявки.",
+                        },
+                        "completion_policy": launch.get("completion_policy"),
+                    }
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="ready",
+                        title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                        message="Тестовый ответ операции не задан; в полном отладочном прогоне ReAct-вызов будет выполнен реально.",
+                        details={
+                            "step_index": step_index,
+                            "step_id": step_id,
+                            "react_call": tool_name,
+                            "endpoint_id": endpoint_id,
+                            "operation_id": operation_id,
+                            "completion_policy": launch.get("completion_policy"),
+                            "parameter_sources": parameter_sources,
+                            "parameters": parameters,
+                            "result": enrichment_step_results[step_id]["result"],
+                        },
+                    )
+                    return {
+                        **default_result,
+                        "enrichment_step_results": enrichment_step_results,
+                        "status": "pending_live_execution",
+                        "decision": "execute_react_call",
+                        "reason": "Операция будет выполнена при анализе заявки.",
+                    }
                 append_trace(
                     execution_trace,
                     step="1",
                     status="blocked",
                     title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="В dry-run нет mock_output для ReAct-вызова обогащения контекста.",
+                    message="В режиме проверки без выполнения нужен тестовый ответ операции.",
                     details={
                         "react_call": tool_name,
                         "endpoint_id": endpoint_id,
                         "operation_id": operation_id,
                         "parameter_sources": parameter_sources,
                         "parameters": parameters,
-                        "result": {"status": "not_executed", "reason": "Для endpoint-операции не задан mock_output."},
+                        "result": {
+                            "status": "not_executed",
+                            "reason": "В режиме проверки без выполнения нужен тестовый ответ операции.",
+                        },
                     },
                 )
                 return {
@@ -4315,7 +4806,7 @@ class ConfigStore:
                     "enrichment_step_results": enrichment_step_results,
                     "status": "blocked_by_configuration",
                     "decision": "handoff",
-                    "reason": "В dry-run нет mock_output для ReAct-вызова обогащения контекста.",
+                    "reason": "В режиме проверки без выполнения нужен тестовый ответ операции.",
                 }
 
             step_id = enrichment_step.get("step_id") or f"step{step_index}"
@@ -4373,7 +4864,7 @@ class ConfigStore:
         count, result_item, result_summary = operation_response_items(
             last_mock_output,
             (last_tool or {}).get("result_schema"),
-            profile.get("output_slots_order", []),
+            [],
         )
         if result_summary.get("source_status") == "configuration_error":
             append_trace(
@@ -4396,6 +4887,33 @@ class ConfigStore:
                 "result_summary": result_summary,
                 "reason": result_summary.get("reason") or "Контракт результата операции неоднозначен.",
             }
+        precomputed_output_values, output_resolution_summary = resolved_output_rule_values(
+            profile=profile,
+            enrichment_step_results=enrichment_step_results,
+            tool_by_name=tool_by_name,
+        )
+        if output_resolution_summary.get("source_status") == "configuration_error":
+            reason = "; ".join(output_resolution_summary.get("errors") or []) or "Не удалось разрешить источники выходных слотов."
+            append_trace(
+                execution_trace,
+                step="1",
+                status="blocked",
+                title=f"Разрешение атрибута: {profile['display_name']}",
+                message=reason,
+                details={
+                    "enrichment_steps": len(enrichment_steps),
+                    "output_slots_order": profile.get("output_slots_order", []),
+                    "result_summary": output_resolution_summary,
+                },
+            )
+            return {
+                **default_result,
+                "enrichment_step_results": enrichment_step_results,
+                "status": "blocked_by_configuration",
+                "decision": "handoff",
+                "result_summary": output_resolution_summary,
+                "reason": reason,
+            }
         confidence = result_confidence(result_item, {"confidence_path": "confidence"})
         if not profile.get("use_llm_after_steps", True):
             llm_decision = None
@@ -4405,6 +4923,7 @@ class ConfigStore:
                 result_summary=result_summary,
                 count=count,
                 confidence=confidence,
+                precomputed_output_values=precomputed_output_values,
             )
         elif not simulation_options["allow_llm"]:
             llm_decision = {
@@ -4433,6 +4952,7 @@ class ConfigStore:
                 count=count,
                 confidence=confidence,
                 effective_thresholds=effective_thresholds,
+                precomputed_output_values=precomputed_output_values,
             )
             resolution_decision = llm_decision
         output_values = resolution_decision.get("filled_slots", {})
@@ -4475,19 +4995,40 @@ class ConfigStore:
             "reason": reason,
         }
 
+    def resolve_simulation_channel(self, scenario: dict[str, Any], channel_id: str) -> dict[str, Any]:
+        requested_channel_id = str(channel_id or "").strip()
+        if not requested_channel_id:
+            raise ConfigRegistryError("Укажите channel_id для отладочного прогона канала.")
+        allowed_channel_ids = scenario.get("allowed_channel_ids") or [scenario.get("default_channel_id", "debug")]
+        if requested_channel_id not in allowed_channel_ids:
+            raise ConfigRegistryError(
+                f"Канал {requested_channel_id} не входит в allowed_channel_ids сценария {scenario.get('scenario_id')}."
+            )
+        channel_by_id = self._by_id(self.active_payload("interaction_channels")["channels"], "channel_id")
+        channel = channel_by_id.get(requested_channel_id)
+        if not channel:
+            raise ConfigRegistryError(f"Канал не найден: {requested_channel_id}")
+        return copy.deepcopy(channel)
+
     def simulate_scenario(
         self,
         scenario_id: str,
         *,
         text: str,
         provided_slots: dict[str, Any] | None = None,
+        channel_id: str | None = None,
+        channel_parameter_values: dict[str, Any] | None = None,
         run_mode: str | None = None,
         allow_llm: bool | None = None,
         allow_readonly_integrations: bool | None = None,
         allow_mock_integrations: bool | None = None,
         allow_action_with_approval: bool | None = None,
-        ) -> dict[str, Any]:
+        bypass_policy_gates: bool | None = None,
+    ) -> dict[str, Any]:
         detail = self.scenario_detail(scenario_id)
+        if channel_id:
+            interaction_channel = self.resolve_simulation_channel(detail["scenario"], channel_id)
+            detail["interaction_channel"] = interaction_channel
         slot_schema = detail["slot_schema"] or {"slots": [], "question_order": []}
         stages = slot_schema_stages(slot_schema)
         known_slot_ids = {slot["slot_id"] for slot in slot_schema["slots"]}
@@ -4497,13 +5038,14 @@ class ConfigStore:
             allow_readonly_integrations=allow_readonly_integrations,
             allow_mock_integrations=allow_mock_integrations,
             allow_action_with_approval=allow_action_with_approval,
+            bypass_policy_gates=bypass_policy_gates,
         )
         execution_trace: list[dict[str, Any]] = []
         append_trace(
             execution_trace,
             step="0",
             status="started",
-            title="Режим тестового прогона",
+            title="Режим отладочного прогона",
             message=simulation_options["display_name"],
             details={
                 key: simulation_options[key]
@@ -4513,6 +5055,7 @@ class ConfigStore:
                     "allow_readonly_integrations",
                     "allow_mock_integrations",
                     "allow_action_with_approval",
+                    "bypass_policy_gates",
                 )
             },
         )
@@ -4875,8 +5418,6 @@ class ConfigStore:
             simulation_options=simulation_options,
         )
         interaction_channel = detail.get("interaction_channel") or {}
-        channel_action_profiles = detail.get("channel_action_profiles") or {}
-        standard_profile = channel_action_profiles.get("standard_handoff") or {}
         missing_slot_set = set(missing_slots)
         resolution_operator_handoffs = [
             item
@@ -4906,7 +5447,11 @@ class ConfigStore:
         client_question = {
             "required": bool(next_question),
             "question": next_question,
-            "delivery": interaction_channel.get("question_delivery"),
+            "delivery": {
+                "channel_id": interaction_channel.get("channel_id"),
+                "mode": interaction_channel.get("mode"),
+                "capabilities": interaction_channel.get("capabilities", {}),
+            },
             "waiting_policy": interaction_channel.get("waiting_policy"),
             "resume_after_answer": bool(next_question),
             "semantic": "client_clarification",
@@ -4915,7 +5460,7 @@ class ConfigStore:
             final_decision == "blocked_by_configuration"
             or final_decision == "operator_handoff"
             or classification.get("decision_level") == "human_required"
-            or classification.get("route") in {"human_review", "major_incident"}
+            or classification.get("route") == "human_review"
         )
         operator_escalation_reason = None
         if operator_escalation_required:
@@ -4923,13 +5468,11 @@ class ConfigStore:
                 operator_escalation_reason = "Конфигурация или параметры ReAct-вызова не позволяют продолжить автообработку."
             elif final_decision == "operator_handoff":
                 operator_escalation_reason = "Профиль разрешения слота настроен на эскалацию оператору."
-            elif classification.get("route") == "major_incident":
-                operator_escalation_reason = "Маршрут требует немедленной обработки как Major Incident."
             elif classification.get("decision_level") == "human_required":
                 operator_escalation_reason = "Уверенность классификации ниже порога самостоятельного решения."
             else:
                 operator_escalation_reason = "Маршрут требует участия оператора."
-        escalation_action = standard_profile.get("action") or interaction_channel.get("escalation_action")
+        escalation_action = default_channel_handoff_action(interaction_channel)
         escalation_policy = detail.get("escalation_policy") or {}
         escalation_package = {
             "policy_id": escalation_policy.get("policy_id"),
@@ -4961,6 +5504,11 @@ class ConfigStore:
             "package": escalation_package if operator_escalation_required else None,
             "semantic": "operator_escalation",
         }
+        planned_waits = [
+            item["planned_wait"]
+            for item in [*ready_launches, *blocked_launches]
+            if item.get("planned_wait")
+        ]
         simulation_result = {
             "schema_version": "1.0",
             "scenario_id": scenario_id,
@@ -4968,10 +5516,7 @@ class ConfigStore:
             "run_mode": simulation_options["run_mode"],
             "simulation_options": simulation_options,
             "interaction_channel": interaction_channel,
-            "channel_action_profiles": channel_action_profiles,
-            "question_delivery": interaction_channel.get("question_delivery"),
             "waiting_policy": interaction_channel.get("waiting_policy"),
-            "incomplete_discussion_action": interaction_channel.get("incomplete_discussion_action"),
             "escalation_action": escalation_action,
             "slot_values": slot_values,
             "missing_slots": missing_slots,
@@ -4986,11 +5531,7 @@ class ConfigStore:
             "classification": classification,
             "ready_tool_launches": ready_launches,
             "blocked_tool_launches": blocked_launches,
-            "planned_waits": [
-                item["planned_wait"]
-                for item in [*ready_launches, *blocked_launches]
-                if item.get("planned_wait")
-            ],
+            "planned_waits": planned_waits,
             "next_allowed_actions": next_allowed_actions,
             "execution_trace": execution_trace,
             "final_decision": final_decision,
@@ -5009,6 +5550,14 @@ class ConfigStore:
             final_decision=final_decision,
             agent_outcome=simulation_result["agent_outcome"],
             interaction_channel=interaction_channel,
+            channel_parameter_values=channel_parameter_values,
+        )
+        simulation_result["channel_variables"] = copy.deepcopy(
+            simulation_result["variable_context_snapshot"].get("channel") or {}
+        )
+        simulation_result["channel_parameter_state"] = channel_debug_parameter_state(
+            interaction_channel,
+            simulation_result["channel_variables"],
         )
         return simulation_result
 
@@ -5063,11 +5612,142 @@ class ConfigStore:
 
     def validate_draft(self, draft_id: str) -> dict[str, Any]:
         draft = self.require_draft(draft_id)
-        validation = self.validate_payload(draft["domain"], draft["payload"])
+        active_overrides, override_errors = self._draft_validation_overrides(draft)
+        validation = self.validate_payload(
+            draft["domain"],
+            draft["payload"],
+            active_overrides=active_overrides,
+        )
+        if override_errors:
+            validation["errors"] = [*override_errors, *validation.get("errors", [])]
+            validation["status"] = "invalid"
+            for gate in validation.get("gates", []):
+                gate["status"] = "failed"
         draft["validation"] = validation
         draft["status"] = "valid" if validation["status"] == "valid" else "invalid"
         draft["updated_at"] = utc_now()
         return self._save_draft(draft)
+
+    def _draft_validation_overrides(
+        self,
+        draft: dict[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]] | None, list[str]]:
+        domain = draft["domain"]
+        related_domains = DRAFT_VALIDATION_RELATED_DOMAINS.get(domain, set())
+        if not related_domains:
+            return None, []
+
+        raw_payloads: dict[str, dict[str, Any]] = {
+            related_domain: self._latest_working_draft_payload(
+                domain=related_domain,
+                created_by=draft.get("created_by", ""),
+                base_version_id=self.active_version_id(related_domain),
+            )
+            or self.active_payload(related_domain)
+            for related_domain in related_domains
+        }
+        raw_payloads[domain] = copy.deepcopy(draft["payload"])
+        return self._normalize_draft_validation_overrides(raw_payloads, current_domain=domain)
+
+    def _latest_working_draft_payload(
+        self,
+        *,
+        domain: str,
+        created_by: str,
+        base_version_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        working_statuses = {"draft", "valid", "regression_passed"}
+        current_base_version_id = base_version_id or self.active_version_id(domain)
+        for candidate in self.list_drafts(domain=domain, limit=100):
+            if candidate.get("status") not in working_statuses:
+                continue
+            if candidate.get("created_by") != created_by:
+                continue
+            candidate_base_version_id = candidate.get("base_version_id")
+            if current_base_version_id and candidate_base_version_id != current_base_version_id:
+                continue
+            if not current_base_version_id and candidate_base_version_id:
+                continue
+            payload = candidate.get("payload")
+            if isinstance(payload, dict):
+                return copy.deepcopy(payload)
+        return None
+
+    def _delete_working_drafts_for_domain_operator(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        domain: str,
+        operator_id: str,
+        preserve_draft_ids: set[str],
+    ) -> list[str]:
+        if not operator_id:
+            return []
+        rows = connection.execute(
+            """
+            select draft_id
+            from config_drafts
+            where domain = ?
+              and created_by = ?
+              and status in ('draft', 'valid', 'regression_passed')
+            order by updated_at desc, draft_id desc
+            """,
+            (domain, operator_id),
+        ).fetchall()
+        draft_ids = [
+            str(row["draft_id"])
+            for row in rows
+            if str(row["draft_id"]) not in preserve_draft_ids
+        ]
+        if draft_ids:
+            connection.executemany(
+                "delete from config_drafts where draft_id = ?",
+                [(draft_id,) for draft_id in draft_ids],
+            )
+        return draft_ids
+
+    def _normalize_draft_validation_overrides(
+        self,
+        raw_payloads: dict[str, dict[str, Any]],
+        *,
+        current_domain: str,
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        normalized: dict[str, dict[str, Any]] = {}
+        errors: list[str] = []
+        if "slot_schemas" in raw_payloads:
+            slot_payload = self._normalize_payload("slot_schemas", raw_payloads["slot_schemas"])
+            slot_errors = self.contracts.validate(CONFIG_DOMAINS["slot_schemas"].contract_name, slot_payload)
+            if slot_errors and current_domain != "slot_schemas":
+                errors.extend(
+                    f"Связанный черновик slot_schemas невалиден: {error}"
+                    for error in slot_errors
+                )
+            else:
+                normalized["slot_schemas"] = slot_payload
+
+        if "attribute_resolution_profiles" in raw_payloads:
+            token = _ACTIVE_PAYLOAD_OVERRIDES.set(normalized) if normalized else None
+            try:
+                profile_payload = self._normalize_payload(
+                    "attribute_resolution_profiles",
+                    raw_payloads["attribute_resolution_profiles"],
+                )
+            finally:
+                if token is not None:
+                    _ACTIVE_PAYLOAD_OVERRIDES.reset(token)
+            profile_errors = self.contracts.validate(
+                CONFIG_DOMAINS["attribute_resolution_profiles"].contract_name,
+                profile_payload,
+            )
+            if profile_errors and current_domain != "attribute_resolution_profiles":
+                errors.extend(
+                    f"Связанный черновик attribute_resolution_profiles невалиден: {error}"
+                    for error in profile_errors
+                )
+            else:
+                normalized["attribute_resolution_profiles"] = profile_payload
+
+        return normalized, errors
 
     def save_regression(self, draft_id: str, regression: dict[str, Any]) -> dict[str, Any]:
         draft = self.require_draft(draft_id)
@@ -5076,6 +5756,202 @@ class ConfigStore:
             draft["status"] = "regression_passed"
         draft["updated_at"] = utc_now()
         return self._save_draft(draft)
+
+    def validate_draft_bundle(self, draft_ids: list[str]) -> dict[str, Any]:
+        drafts = self._require_draft_bundle(draft_ids)
+        overrides = self._normalize_bundle_payloads(drafts)
+        validations: dict[str, dict[str, Any]] = {}
+        saved_drafts = []
+        for draft in drafts:
+            domain = draft["domain"]
+            validation = self.validate_payload(
+                domain,
+                overrides.get(domain, draft["payload"]),
+                active_overrides=overrides,
+            )
+            draft["validation"] = validation
+            draft["status"] = "valid" if validation["status"] == "valid" else "invalid"
+            draft["updated_at"] = utc_now()
+            saved_drafts.append(self._save_draft(draft))
+            validations[domain] = validation
+        status = "invalid" if any(item.get("status") != "valid" for item in validations.values()) else "valid"
+        return {
+            "schema_version": "1.0",
+            "status": status,
+            "draft_ids": [draft["draft_id"] for draft in saved_drafts],
+            "domains": [draft["domain"] for draft in saved_drafts],
+            "drafts": saved_drafts,
+            "validations": validations,
+        }
+
+    def normalized_draft_bundle_payloads(self, draft_ids: list[str]) -> dict[str, dict[str, Any]]:
+        return self._normalize_bundle_payloads(self._require_draft_bundle(draft_ids))
+
+    def normalized_draft_payloads_for_regression(self, draft_id: str) -> dict[str, dict[str, Any]]:
+        draft = self.require_draft(draft_id)
+        overrides, override_errors = self._draft_validation_overrides(draft)
+        if override_errors:
+            raise ConfigRegistryError("; ".join(override_errors))
+        if overrides and draft["domain"] in overrides:
+            return overrides
+        payload = self._normalize_payload(draft["domain"], draft["payload"])
+        result = overrides or {}
+        result[draft["domain"]] = payload
+        return result
+
+    def activate_draft_bundle(self, draft_ids: list[str], activated_by: str) -> dict[str, Any]:
+        drafts = self._require_draft_bundle(draft_ids)
+        for draft in drafts:
+            validation = draft.get("validation")
+            regression = draft.get("regression")
+            if validation is None or validation.get("status") != "valid":
+                raise ConfigRegistryError("Все черновики пакета должны пройти валидацию перед активацией.")
+            if regression is None or regression.get("status") not in {"passed", "skipped"}:
+                raise ConfigRegistryError("Все черновики пакета должны пройти регрессионную проверку перед активацией.")
+
+        normalized_payloads = self._normalize_bundle_payloads(drafts)
+        activation_errors = self._bundle_activation_errors(normalized_payloads)
+        if activation_errors:
+            raise ConfigRegistryError(
+                "Итоговая конфигурация после пакетной активации невалидна: "
+                + "; ".join(activation_errors)
+            )
+
+        activated_at = utc_now()
+        versions = []
+        for draft in drafts:
+            domain = draft["domain"]
+            version = {
+                "schema_version": "1.0",
+                "version_id": new_version_id(),
+                "domain": domain,
+                "payload": normalized_payloads[domain],
+                "source_draft_id": draft["draft_id"],
+                "activated_by": activated_by,
+                "activated_at": activated_at,
+                "validation": draft["validation"],
+                "regression": draft["regression"],
+            }
+            previous_version_id = self.active_version_id(domain)
+            if previous_version_id:
+                version["previous_version_id"] = previous_version_id
+            self.contracts.require_valid("config_version", version)
+            versions.append(version)
+
+        with self._connect() as connection:
+            for version in versions:
+                connection.execute(
+                    """
+                    insert into config_versions (
+                        version_id,
+                        domain,
+                        version_json,
+                        source_draft_id,
+                        activated_by,
+                        activated_at
+                    )
+                    values (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        version["version_id"],
+                        version["domain"],
+                        self._to_json(version),
+                        version["source_draft_id"],
+                        version["activated_by"],
+                        version["activated_at"],
+                    ),
+                )
+                connection.execute(
+                    """
+                    insert or replace into config_active (
+                        domain,
+                        version_id,
+                        activated_at
+                    )
+                    values (?, ?, ?)
+                    """,
+                    (version["domain"], version["version_id"], activated_at),
+                )
+            for draft in drafts:
+                draft["status"] = "activated"
+                draft["updated_at"] = activated_at
+                connection.execute(
+                    """
+                    update config_drafts
+                    set status = ?,
+                        draft_json = ?,
+                        updated_at = ?
+                    where draft_id = ?
+                    """,
+                    (
+                        draft["status"],
+                        self._to_json(draft),
+                        draft["updated_at"],
+                        draft["draft_id"],
+                    ),
+                )
+            preserve_by_domain: dict[str, set[str]] = {}
+            for draft in drafts:
+                preserve_by_domain.setdefault(draft["domain"], set()).add(draft["draft_id"])
+            for domain, preserve_draft_ids in preserve_by_domain.items():
+                self._delete_working_drafts_for_domain_operator(
+                    connection,
+                    domain=domain,
+                    operator_id=activated_by,
+                    preserve_draft_ids=preserve_draft_ids,
+                )
+
+        return {
+            "schema_version": "1.0",
+            "status": "activated",
+            "activated_by": activated_by,
+            "activated_at": activated_at,
+            "draft_ids": [draft["draft_id"] for draft in drafts],
+            "versions": versions,
+        }
+
+    def _require_draft_bundle(self, draft_ids: list[str]) -> list[dict[str, Any]]:
+        unique_ids = [draft_id for draft_id in dict.fromkeys(draft_ids) if draft_id]
+        if len(unique_ids) < 2:
+            raise ConfigRegistryError("Пакетная операция требует минимум два черновика.")
+        drafts = [self.require_draft(draft_id) for draft_id in unique_ids]
+        domains = [draft["domain"] for draft in drafts]
+        duplicate_domains = self._duplicates(domains)
+        if duplicate_domains:
+            raise ConfigRegistryError(
+                "Пакетная операция не поддерживает несколько черновиков одного домена: "
+                + ", ".join(duplicate_domains)
+            )
+        return drafts
+
+    def _normalize_bundle_payloads(self, drafts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        raw_payloads = {draft["domain"]: copy.deepcopy(draft["payload"]) for draft in drafts}
+        normalized: dict[str, dict[str, Any]] = {}
+        if "slot_schemas" in raw_payloads:
+            normalized["slot_schemas"] = self._normalize_payload("slot_schemas", raw_payloads["slot_schemas"])
+        for domain, payload in raw_payloads.items():
+            if domain in {"slot_schemas", "attribute_resolution_profiles"}:
+                continue
+            normalized[domain] = self._normalize_payload(domain, payload)
+        if "attribute_resolution_profiles" in raw_payloads:
+            token = _ACTIVE_PAYLOAD_OVERRIDES.set(normalized) if normalized else None
+            try:
+                normalized["attribute_resolution_profiles"] = self._normalize_payload(
+                    "attribute_resolution_profiles",
+                    raw_payloads["attribute_resolution_profiles"],
+                )
+            finally:
+                if token is not None:
+                    _ACTIVE_PAYLOAD_OVERRIDES.reset(token)
+        return normalized
+
+    def _bundle_activation_errors(self, payloads: dict[str, dict[str, Any]]) -> list[str]:
+        errors: list[str] = []
+        for domain, payload in payloads.items():
+            validation = self.validate_payload(domain, payload, active_overrides=payloads)
+            if validation.get("status") != "valid":
+                errors.extend(f"{domain}: {error}" for error in validation.get("errors") or [])
+        return errors
 
     def activate_draft(self, draft_id: str, activated_by: str) -> dict[str, Any]:
         draft = self.require_draft(draft_id)
@@ -5089,6 +5965,12 @@ class ConfigStore:
         previous_version_id = self.active_version_id(draft["domain"])
         activated_at = utc_now()
         normalized_payload = self._normalize_payload(draft["domain"], draft["payload"])
+        activation_errors = self._activation_cross_domain_errors(draft["domain"], normalized_payload)
+        if activation_errors:
+            raise ConfigRegistryError(
+                "Итоговая конфигурация после активации невалидна: "
+                + "; ".join(activation_errors)
+            )
         version = {
             "schema_version": "1.0",
             "version_id": new_version_id(),
@@ -5137,11 +6019,60 @@ class ConfigStore:
                 """,
                 (version["domain"], version["version_id"], activated_at),
             )
-
-        draft["status"] = "activated"
-        draft["updated_at"] = activated_at
-        self._save_draft(draft)
+            draft["status"] = "activated"
+            draft["updated_at"] = activated_at
+            connection.execute(
+                """
+                update config_drafts
+                set status = ?,
+                    draft_json = ?,
+                    updated_at = ?
+                where draft_id = ?
+                """,
+                (
+                    draft["status"],
+                    self._to_json(draft),
+                    draft["updated_at"],
+                    draft["draft_id"],
+                ),
+            )
+            self._delete_working_drafts_for_domain_operator(
+                connection,
+                domain=draft["domain"],
+                operator_id=activated_by,
+                preserve_draft_ids={draft["draft_id"]},
+            )
         return version
+
+    def _activation_cross_domain_errors(self, domain: str, payload: dict[str, Any]) -> list[str]:
+        if domain == "slot_schemas":
+            overrides = {
+                "slot_schemas": payload,
+                "attribute_resolution_profiles": self.active_payload("attribute_resolution_profiles"),
+            }
+            validation = self.validate_payload("slot_schemas", payload, active_overrides=overrides)
+            return [f"slot_schemas: {error}" for error in validation.get("errors") or []]
+        if domain == "attribute_resolution_profiles":
+            slot_payload = self.active_payload("slot_schemas")
+            overrides = {
+                "slot_schemas": slot_payload,
+                "attribute_resolution_profiles": payload,
+            }
+            profile_validation = self.validate_payload(
+                "attribute_resolution_profiles",
+                payload,
+                active_overrides=overrides,
+            )
+            slot_validation = self.validate_payload(
+                "slot_schemas",
+                slot_payload,
+                active_overrides=overrides,
+            )
+            return [
+                *[f"attribute_resolution_profiles: {error}" for error in profile_validation.get("errors") or []],
+                *[f"slot_schemas: {error}" for error in slot_validation.get("errors") or []],
+            ]
+        return []
 
     def cleanup_legacy_slot_resolution(
         self,
@@ -5235,6 +6166,190 @@ class ConfigStore:
         result["dry_run"] = False
         result["versions"] = versions
         return result
+
+    def repair_orphaned_resolution_profiles(
+        self,
+        *,
+        slot_schema_id: str,
+        operator_id: str,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        plan = self._build_orphaned_resolution_profile_repair_plan(slot_schema_id=slot_schema_id)
+        if dry_run:
+            return plan
+        if plan["status"] == "blocked":
+            raise ConfigRegistryError(
+                "Исправление висячих ссылок заблокировано: " + "; ".join(plan["blocked_reasons"])
+            )
+        if plan["status"] == "ready" and not plan["summary"]["orphan_slots_repaired"] and not plan["summary"]["orphan_stage_links_cleared"]:
+            result = copy.deepcopy(plan)
+            result["status"] = "noop"
+            result["dry_run"] = False
+            result["versions"] = []
+            return result
+
+        activated_at = utc_now()
+        source_draft_id = f"orphan-profile-repair-{uuid.uuid4().hex[:12]}"
+        validation = plan["validations"]["slot_schemas"]
+        previous_version_id = self.active_version_id("slot_schemas")
+        version = {
+            "schema_version": "1.0",
+            "version_id": new_version_id(),
+            "domain": "slot_schemas",
+            "payload": copy.deepcopy(plan["payloads"]["slot_schemas"]),
+            "source_draft_id": source_draft_id,
+            "activated_by": operator_id,
+            "activated_at": activated_at,
+            "validation": validation,
+            "regression": {
+                "schema_version": "1.0",
+                "status": "skipped",
+                "summary": "Исправление висячих ссылок на отсутствующие профили разрешения.",
+            },
+        }
+        if previous_version_id:
+            version["previous_version_id"] = previous_version_id
+        self.contracts.require_valid("config_version", version)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into config_versions (
+                    version_id,
+                    domain,
+                    version_json,
+                    source_draft_id,
+                    activated_by,
+                    activated_at
+                )
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version["version_id"],
+                    version["domain"],
+                    self._to_json(version),
+                    version["source_draft_id"],
+                    version["activated_by"],
+                    version["activated_at"],
+                ),
+            )
+            connection.execute(
+                """
+                insert or replace into config_active (
+                    domain,
+                    version_id,
+                    activated_at
+                )
+                values (?, ?, ?)
+                """,
+                ("slot_schemas", version["version_id"], activated_at),
+            )
+        result = copy.deepcopy(plan)
+        result["status"] = "applied"
+        result["dry_run"] = False
+        result["versions"] = [version]
+        return result
+
+    def _build_orphaned_resolution_profile_repair_plan(self, *, slot_schema_id: str) -> dict[str, Any]:
+        slot_payload = self.active_payload("slot_schemas")
+        profile_payload = self.active_payload("attribute_resolution_profiles")
+        scenarios_payload = self.active_payload("service_scenarios")
+        profile_ids = {
+            profile["profile_id"]
+            for profile in profile_payload.get("profiles", [])
+            if profile.get("profile_id")
+        }
+        next_slot_payload = copy.deepcopy(slot_payload)
+        schemas = next_slot_payload.get("slot_schemas", [])
+        schema = next((item for item in schemas if item.get("slot_schema_id") == slot_schema_id), None)
+        blocked_reasons: list[str] = []
+        if not schema:
+            blocked_reasons.append(f"Схема слотов не найдена: {slot_schema_id}")
+
+        orphan_slots: list[dict[str, str]] = []
+        orphan_stage_links: list[dict[str, str]] = []
+        affected_scenarios = [
+            {
+                "scenario_id": scenario["scenario_id"],
+                "display_name": scenario.get("display_name", scenario["scenario_id"]),
+            }
+            for scenario in scenarios_payload.get("scenarios", [])
+            if scenario.get("slot_schema_id") == slot_schema_id
+        ]
+
+        if schema:
+            for stage in list(slot_schema_stages(schema)):
+                stage_id = stage.get("stage_id", "")
+                stage_profile_id = stage.get("resolution_profile_id")
+                if stage_profile_id and stage_profile_id not in profile_ids:
+                    orphan_stage_links.append({
+                        "slot_schema_id": slot_schema_id,
+                        "stage_id": stage_id,
+                        "missing_profile_id": stage_profile_id,
+                    })
+                    stage.pop("resolution_profile_id", None)
+                for slot in stage.get("slots") or []:
+                    profile_id = slot.get("resolution_profile_id")
+                    if slot_fill_method(slot) == "resolution_profile" and profile_id and profile_id not in profile_ids:
+                        orphan_slots.append({
+                            "slot_schema_id": slot_schema_id,
+                            "stage_id": stage_id,
+                            "slot_id": slot.get("slot_id", ""),
+                            "display_name": slot.get("display_name", slot.get("slot_id", "")),
+                            "missing_profile_id": profile_id,
+                            "new_fill_method": "operator_manual",
+                        })
+                        convert_slot_to_operator_manual(slot)
+                if not (stage.get("slots") or []) and not stage.get("resolution_profile_id"):
+                    schema["stages"].remove(stage)
+            if not slot_schema_stages(schema):
+                blocked_reasons.append(f"Схема {slot_schema_id} останется без этапов.")
+
+        validations: dict[str, dict[str, Any]]
+        normalized_slot_payload = copy.deepcopy(next_slot_payload)
+        if schema and not blocked_reasons:
+            try:
+                normalize_slot_schema_stages(schema)
+                normalized_slot_payload = self._normalize_payload("slot_schemas", next_slot_payload)
+            except ConfigRegistryError as error:
+                blocked_reasons.append(str(error))
+        active_overrides = {
+            "slot_schemas": normalized_slot_payload,
+            "attribute_resolution_profiles": profile_payload,
+        }
+        validations = {
+            "slot_schemas": self.validate_payload(
+                "slot_schemas",
+                normalized_slot_payload,
+                active_overrides=active_overrides,
+            ),
+            "attribute_resolution_profiles": self.validate_payload(
+                "attribute_resolution_profiles",
+                profile_payload,
+                active_overrides=active_overrides,
+            ),
+        }
+        for domain, validation in validations.items():
+            if validation.get("status") != "valid":
+                blocked_reasons.extend(f"{domain}: {error}" for error in validation.get("errors") or [])
+
+        summary = {
+            "slot_schema_id": slot_schema_id,
+            "orphan_slots_repaired": orphan_slots,
+            "orphan_stage_links_cleared": orphan_stage_links,
+            "affected_scenarios": affected_scenarios,
+        }
+        return {
+            "schema_version": "1.0",
+            "status": "blocked" if blocked_reasons else "ready",
+            "dry_run": True,
+            "summary": summary,
+            "blocked_reasons": list(dict.fromkeys(blocked_reasons)),
+            "validations": validations,
+            "payloads": {
+                "slot_schemas": normalized_slot_payload,
+                "attribute_resolution_profiles": profile_payload,
+            },
+        }
 
     def _build_legacy_slot_resolution_cleanup_plan(
         self,
@@ -5674,6 +6789,41 @@ class ConfigStore:
             ).fetchall()
         return [self._draft_from_row(row) for row in rows]
 
+    def delete_invalid_drafts(
+        self,
+        *,
+        domain: str,
+        operator_id: str,
+    ) -> dict[str, Any]:
+        self._require_domain(domain)
+        if not operator_id:
+            raise ConfigRegistryError("operator_id обязателен для очистки invalid drafts.")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                select draft_id, draft_json
+                from config_drafts
+                where domain = ?
+                  and created_by = ?
+                  and status = 'invalid'
+                order by updated_at desc, draft_id desc
+                """,
+                (domain, operator_id),
+            ).fetchall()
+            draft_ids = [str(row["draft_id"]) for row in rows]
+            if draft_ids:
+                connection.executemany(
+                    "delete from config_drafts where draft_id = ?",
+                    [(draft_id,) for draft_id in draft_ids],
+                )
+        return {
+            "schema_version": "1.0",
+            "domain": domain,
+            "operator_id": operator_id,
+            "deleted_count": len(draft_ids),
+            "deleted_draft_ids": draft_ids,
+        }
+
     def get_draft(self, draft_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -6037,7 +7187,7 @@ class ConfigStore:
         missing_required = [
             parameter
             for parameter in operation_required
-            if parameter not in mapping
+            if parameter not in mapping and parameter not in SYSTEM_OPERATION_PARAMETERS
         ]
         for parameter in missing_required:
             errors.append(
@@ -6166,33 +7316,6 @@ class ConfigStore:
                         f"Профиль разрешения {profile['profile_id']}.{step.get('step_id')} "
                         f"ссылается на отсутствующий binding {step.get('endpoint_id')}/{step.get('operation_id')}"
                     )
-        for channel in self.active_payload("interaction_channels")["channels"]:
-            for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
-                action = channel[action_key]
-                tool_name = action.get("tool_name")
-                if not tool_name:
-                    continue
-                tool = tool_by_name.get(tool_name)
-                if not tool:
-                    errors.append(f"{channel['channel_id']}.{action_key} ссылается на неизвестный tool_name: {tool_name}")
-                elif not tool.get("endpoint_bindings"):
-                    errors.append(f"{channel['channel_id']}.{action_key} ссылается на ReAct-вызов {tool_name} без привязки операции")
-            for profile in channel.get("action_profiles", []):
-                action = profile["action"]
-                tool_name = action.get("tool_name")
-                if not tool_name:
-                    continue
-                tool = tool_by_name.get(tool_name)
-                if not tool:
-                    errors.append(
-                        f"{channel['channel_id']}.action_profiles.{profile['profile_id']} "
-                        f"ссылается на неизвестный tool_name: {tool_name}"
-                    )
-                elif not tool.get("endpoint_bindings"):
-                    errors.append(
-                        f"{channel['channel_id']}.action_profiles.{profile['profile_id']} "
-                        f"ссылается на ReAct-вызов {tool_name} без привязки операции"
-                    )
         return errors
 
     def _validate_workflow_state_catalog(self, payload: dict[str, Any]) -> list[str]:
@@ -6306,14 +7429,14 @@ class ConfigStore:
         channel_ids = [channel["channel_id"] for channel in channels]
         for channel_id in self._duplicates(channel_ids):
             errors.append(f"Дублируется channel_id: {channel_id}")
+        debug_channels = [channel for channel in channels if channel["channel_id"] == "debug"]
+        if channels and not debug_channels:
+            errors.append("Системный канал debug должен присутствовать в каталоге.")
+        elif len(debug_channels) == 1:
+            errors.extend(self._validate_debug_channel_immutable(debug_channels[0]))
 
-        tool_by_name = {
-            tool["tool_name"]: tool
-            for tool in self.active_payload("tools")["tools"]
-        }
         for channel in channels:
             channel_id = channel["channel_id"]
-            allowed_actions = self._channel_action_types_for_mode(channel["mode"], channel.get("capabilities"))
             allowed_no_answer = self._channel_no_answer_actions_for_mode(channel["mode"], channel.get("capabilities"))
             waiting = channel["waiting_policy"]
             if waiting["on_no_answer"] not in allowed_no_answer:
@@ -6325,29 +7448,9 @@ class ConfigStore:
                 waiting["discussion_timeout_seconds"] <= waiting["first_reminder_after_seconds"]
             ):
                 errors.append(f"{channel_id} timeout обсуждения должен быть больше первого напоминания.")
-            profile_ids = [profile["profile_id"] for profile in channel.get("action_profiles", [])]
-            for profile_id in self._duplicates(profile_ids):
-                errors.append(f"{channel_id} содержит дублирующийся action profile: {profile_id}")
             parameter_ids = [parameter["parameter_id"] for parameter in channel.get("channel_parameters", [])]
             for parameter_id in self._duplicates(parameter_ids):
                 errors.append(f"{channel_id} содержит дублирующийся параметр канала: {parameter_id}")
-            errors.extend(self._validate_required_channel_action_profiles(channel))
-            for action_key in ("question_delivery", "incomplete_discussion_action", "escalation_action"):
-                action = channel[action_key]
-                if action["action_type"] not in allowed_actions:
-                    errors.append(
-                        f"{channel_id}.{action_key}.action_type={action['action_type']} "
-                        f"не подходит для режима канала {channel['mode']}."
-                    )
-                errors.extend(self._validate_channel_action_binding(tool_by_name, action, f"{channel_id}.{action_key}"))
-            for profile in channel.get("action_profiles", []):
-                label = f"{channel_id}.action_profiles.{profile['profile_id']}"
-                if profile["action"]["action_type"] not in allowed_actions:
-                    errors.append(
-                        f"{label}.action_type={profile['action']['action_type']} "
-                        f"не подходит для режима канала {channel['mode']}."
-                    )
-                errors.extend(self._validate_channel_action_binding(tool_by_name, profile["action"], label))
 
         scenario_payload = self.active_payload("service_scenarios")
         scenario_refs = self._collect_channel_scenario_refs(scenario_payload)
@@ -6357,22 +7460,26 @@ class ConfigStore:
         return errors
 
     @staticmethod
-    def _channel_action_types_for_mode(mode: str, capabilities: dict[str, Any] | None = None) -> set[str]:
-        if mode == "online_interactive":
-            actions = {"create_draft", "call_specialist", "notify_on_call"}
-            if (capabilities or {}).get("supports_client_questions", True):
-                actions.add("ask_end_user")
-            return actions
-        if mode == "offline_interactive":
-            actions = {"save_context"}
-            if (capabilities or {}).get("supports_operator_questions", True):
-                actions.add("ask_operator")
-            if (capabilities or {}).get("supports_work_order_creation", True):
-                actions.add("create_work_order")
-            return actions
-        if mode == "debug":
-            return {"show_debug_message", "debug_stop"}
-        return {"debug_stop"}
+    def _validate_debug_channel_immutable(channel: dict[str, Any]) -> list[str]:
+        canonical = next(
+            item for item in default_interaction_channels()["channels"] if item["channel_id"] == "debug"
+        )
+        immutable_fields = (
+            "channel_id",
+            "display_name",
+            "mode",
+            "description",
+            "capabilities",
+            "technical_profile",
+            "channel_parameters",
+            "waiting_policy",
+            "enabled",
+        )
+        errors = []
+        for field in immutable_fields:
+            if channel.get(field) != canonical.get(field):
+                errors.append(f"debug.{field} является системным и не должен изменяться.")
+        return errors
 
     @staticmethod
     def _channel_no_answer_actions_for_mode(mode: str, capabilities: dict[str, Any] | None = None) -> set[str]:
@@ -6386,55 +7493,6 @@ class ConfigStore:
         if mode == "debug":
             return {"debug_stop"}
         return {"debug_stop"}
-
-    @staticmethod
-    def _validate_required_channel_action_profiles(channel: dict[str, Any]) -> list[str]:
-        errors = []
-        reserved_event_types = {"standard_handoff", "no_answer", "major_incident", "policy_blocked"}
-        event_counts: dict[str, int] = {}
-        for profile in channel.get("action_profiles", []):
-            event_type = profile["event_type"]
-            event_counts[event_type] = event_counts.get(event_type, 0) + 1
-        for event_type in sorted(reserved_event_types):
-            if event_counts.get(event_type, 0) > 1:
-                errors.append(f"{channel['channel_id']} содержит несколько action profile для event_type={event_type}.")
-        for event_type, count in event_counts.items():
-            if event_type not in reserved_event_types and count > 1:
-                errors.append(f"{channel['channel_id']} содержит несколько action profile для event_type={event_type}.")
-        return errors
-
-    def _validate_channel_action_binding(
-        self,
-        tool_by_name: dict[str, dict[str, Any]],
-        action: dict[str, Any],
-        label: str,
-    ) -> list[str]:
-        errors = []
-        tool_name = action.get("tool_name")
-        if not tool_name:
-            return errors
-        tool = tool_by_name.get(tool_name)
-        if not tool:
-            errors.append(f"{label} ссылается на неизвестный tool_name: {tool_name}")
-            return errors
-        endpoint_id = action.get("endpoint_id")
-        operation_id = action.get("operation_id")
-        if endpoint_id or operation_id:
-            matching_binding = next(
-                (
-                    binding
-                    for binding in tool["endpoint_bindings"]
-                    if binding["endpoint_id"] == endpoint_id
-                    and binding["operation_id"] == operation_id
-                ),
-                None,
-            )
-            if not matching_binding:
-                errors.append(
-                    f"{label} не имеет tool binding для "
-                    f"endpoint_id={endpoint_id} operation_id={operation_id}."
-                )
-        return errors
 
     def _validate_attribute_resolution_profiles(self, payload: dict[str, Any]) -> list[str]:
         errors = []
@@ -6594,10 +7652,10 @@ class ConfigStore:
                                 f"parameters_schema ReAct-вызова {tool.get('tool_name')}."
                             )
                     source, separator, value = str(source_ref).partition(":")
-                    if separator != ":" or source not in {"slot", "output", "step", "constant", "secret"} or not value:
+                    if separator != ":" or source not in {"slot", "output", "step", "case", "constant", "secret"} or not value:
                         errors.append(
                             f"{step_label}.parameter_mapping.{parameter} должен иметь формат "
-                            "slot:<slot_id>, output:<slot_id>, "
+                            "slot:<slot_id>, output:<slot_id>, case:<field>, "
                             "step:<step_id>.react.<react_call>.input|output.<field>, constant:<value> или secret:<ref>."
                         )
                         continue
@@ -6650,25 +7708,59 @@ class ConfigStore:
                                     )
                 seen_steps[step_id] = enrichment_step
 
-            if last_step_tool and output_slot_ids:
-                result_path, selector_error = operation_result_selector_path(
-                    last_step_tool.get("result_schema", {}),
-                    profile.get("output_slots_order", []),
-                )
-                if selector_error:
-                    errors.append(f"{profile_id} результат последнего ReAct-вызова неоднозначен: {selector_error}")
-                selected_schema = selected_operation_result_schema(last_step_tool.get("result_schema", {}), result_path)
+            if output_slot_ids and profile.get("enrichment_steps"):
+                rules_by_step: dict[str, list[dict[str, Any]]] = {}
+                source_refs_by_slot: dict[str, dict[str, Any]] = {}
                 for rule in profile.get("output_slots_order", []):
-                    source_hint = rule.get("source_hint")
-                    local_hint = operation_result_local_hint(source_hint, {"result_path": result_path})
-                    if local_hint and selected_schema and not schema_declares_path(
-                        selected_schema,
-                        local_hint,
-                    ):
+                    source_ref = output_source_hint_reference(rule.get("source_hint"), profile.get("enrichment_steps", []))
+                    if source_ref.get("error"):
+                        errors.append(f"{profile_id} output_slots_order.{rule['slot_id']}: {source_ref['error']}")
+                        continue
+                    source_refs_by_slot[rule["slot_id"]] = source_ref
+                    rules_by_step.setdefault(source_ref.get("step_id") or "", []).append({
+                        **rule,
+                        "source_hint": source_ref.get("field", ""),
+                    })
+
+                for step_id, step_rules in rules_by_step.items():
+                    source_ref = next((item for item in source_refs_by_slot.values() if item.get("step_id") == step_id), {})
+                    tool = tool_by_name.get(source_ref.get("react_call") or "")
+                    if not tool:
                         errors.append(
-                            f"{profile_id} output_slots_order.{rule['slot_id']} ссылается на поле вне "
-                            f"контракта результата ReAct-вызова {last_step_tool.get('tool_name')}: {source_hint}"
+                            f"{profile_id} output_slots_order ссылается на неизвестный ReAct-вызов: "
+                            f"{source_ref.get('react_call')}"
                         )
+                        continue
+                    result_path, selector_error = operation_result_selector_path(
+                        tool.get("result_schema", {}),
+                        step_rules,
+                    )
+                    if selector_error:
+                        errors.append(
+                            f"{profile_id} результат ReAct-вызова {tool.get('tool_name')} в {step_id} "
+                            f"неоднозначен: {selector_error}"
+                        )
+                    selected_schema = selected_operation_result_schema(tool.get("result_schema", {}), result_path)
+                    for rule in step_rules:
+                        source_ref = source_refs_by_slot.get(rule["slot_id"], {})
+                        source_hint = source_ref.get("source_hint") or rule.get("source_hint")
+                        local_hint = operation_result_local_hint(rule.get("source_hint"), {"result_path": result_path})
+                        if local_hint and selected_schema and not schema_declares_path(
+                            selected_schema,
+                            local_hint,
+                        ):
+                            errors.append(
+                                output_slot_error_context(
+                                    profile=profile,
+                                    rule=rule,
+                                    source_ref=source_ref,
+                                    tool=tool,
+                                    selected_schema=selected_schema,
+                                    source_hint=str(source_hint),
+                                    local_hint=local_hint,
+                                    slot_schema=slot_schema,
+                                )
+                            )
 
             llm_script = profile["llm_resolution_script"]
             if not llm_script.get("script_text"):
@@ -6746,9 +7838,6 @@ class ConfigStore:
             allowed_channel_ids = scenario.get("allowed_channel_ids") or [default_channel_id]
             if default_channel_id not in channel_ids:
                 errors.append(f"{scenario_id} ссылается на неизвестный default_channel_id: {default_channel_id}")
-            else:
-                for channel_error in self._validate_required_channel_action_profiles(channel_by_id[default_channel_id]):
-                    errors.append(f"{scenario_id}: {channel_error}")
             for channel_id in allowed_channel_ids:
                 if channel_id not in channel_ids:
                     errors.append(f"{scenario_id} ссылается на неизвестный allowed_channel_id: {channel_id}")
@@ -6805,6 +7894,10 @@ class ConfigStore:
                 for profile in profile_by_id.values()
                 if profile.get("slot_schema_id") == schema["slot_schema_id"]
             ]
+            reference_context = build_execution_reference_context(
+                slot_schema=schema,
+                channels=self.active_payload("interaction_channels")["channels"],
+            )
             for slot in schema["slots"]:
                 fill_method = slot_fill_method(slot)
                 profile_id = slot.get("resolution_profile_id")
@@ -6832,6 +7925,15 @@ class ConfigStore:
                         errors.append(
                             f"{schema['slot_schema_id']} slot {slot['slot_id']} со способом {fill_method} "
                             f"не должен иметь поле {field}."
+                        )
+                for template_field in ("user_question", "extraction_instruction", "operator_hint"):
+                    if slot.get(template_field):
+                        errors.extend(
+                            validate_template_refs(
+                                slot.get(template_field),
+                                reference_context,
+                                label=f"{schema['slot_schema_id']} slot {slot['slot_id']}.{template_field}",
+                            )
                         )
                 if fill_method == "resolution_profile":
                     if not profile_id:
@@ -6963,8 +8065,14 @@ class ConfigStore:
         for policy_id in self._duplicates(policy_ids):
             errors.append(f"Дублируется escalation policy_id: {policy_id}")
         for policy in payload["policies"]:
-            if policy["major_incident"]["affected_users_threshold"] < 10:
-                errors.append(f"{policy['policy_id']} Major Incident threshold должен быть не меньше 10.")
+            if not policy.get("handoff_conditions"):
+                errors.append(f"{policy['policy_id']} handoff_conditions должен быть непустым.")
+            handoff_package = set(policy.get("handoff_package") or [])
+            if not handoff_package:
+                errors.append(f"{policy['policy_id']} handoff_package должен быть непустым.")
+            for required_item in ("slots", "user_notification"):
+                if required_item not in handoff_package:
+                    errors.append(f"{policy['policy_id']} handoff package должен содержать {required_item}.")
         return errors
 
     def _draft_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -7147,10 +8255,6 @@ def default_interaction_channels() -> dict[str, Any]:
                 ),
                 "technical_profile": normalize_channel_technical_profile(None, channel_id="messenger_bot"),
                 "channel_parameters": normalize_channel_parameters(None, channel_id="messenger_bot"),
-                "question_delivery": {
-                    "action_type": "ask_end_user",
-                    "message_template": "{question}",
-                },
                 "waiting_policy": {
                     "first_reminder_after_seconds": 180,
                     "discussion_timeout_seconds": 480,
@@ -7160,21 +8264,6 @@ def default_interaction_channels() -> dict[str, Any]:
                     "pause_sla_on_client_wait": True,
                     "client_wait_auto_close_after_hours": 24,
                 },
-                "incomplete_discussion_action": {
-                    "action_type": "create_draft",
-                    "message_template": "Создать черновик заявки и сохранить контекст клиентского уточнения.",
-                },
-                "escalation_action": {
-                    "action_type": "call_specialist",
-                    "message_template": "Позвать специалиста в диалог с полным контекстом сценария.",
-                },
-                "action_profiles": default_channel_action_profiles({
-                    "channel_id": "messenger_bot",
-                    "escalation_action": {
-                        "action_type": "call_specialist",
-                        "message_template": "Позвать специалиста в диалог с полным контекстом сценария.",
-                    },
-                }),
                 "enabled": True,
             },
             {
@@ -7189,10 +8278,6 @@ def default_interaction_channels() -> dict[str, Any]:
                 ),
                 "technical_profile": normalize_channel_technical_profile(None, channel_id="service_desk"),
                 "channel_parameters": normalize_channel_parameters(None, channel_id="service_desk"),
-                "question_delivery": {
-                    "action_type": "save_context",
-                    "message_template": "Сохранить вопрос в контексте заявки: {question}",
-                },
                 "waiting_policy": {
                     "first_reminder_after_seconds": 3600,
                     "discussion_timeout_seconds": 14400,
@@ -7202,21 +8287,6 @@ def default_interaction_channels() -> dict[str, Any]:
                     "pause_sla_on_client_wait": True,
                     "client_wait_auto_close_after_hours": 24,
                 },
-                "incomplete_discussion_action": {
-                    "action_type": "save_context",
-                    "message_template": "Сохранить контекст и ожидать следующего обновления заявки.",
-                },
-                "escalation_action": {
-                    "action_type": "create_work_order",
-                    "message_template": "Создать наряд ответственному специалисту с пакетом эскалации.",
-                },
-                "action_profiles": default_channel_action_profiles({
-                    "channel_id": "service_desk",
-                    "escalation_action": {
-                        "action_type": "create_work_order",
-                        "message_template": "Создать наряд ответственному специалисту с пакетом эскалации.",
-                    },
-                }),
                 "enabled": True,
             },
             {
@@ -7231,10 +8301,6 @@ def default_interaction_channels() -> dict[str, Any]:
                 ),
                 "technical_profile": normalize_channel_technical_profile(None, channel_id="debug"),
                 "channel_parameters": normalize_channel_parameters(None, channel_id="debug"),
-                "question_delivery": {
-                    "action_type": "show_debug_message",
-                    "message_template": "{question}",
-                },
                 "waiting_policy": {
                     "first_reminder_after_seconds": 0,
                     "discussion_timeout_seconds": 0,
@@ -7244,96 +8310,69 @@ def default_interaction_channels() -> dict[str, Any]:
                     "pause_sla_on_client_wait": True,
                     "client_wait_auto_close_after_hours": 24,
                 },
-                "incomplete_discussion_action": {
-                    "action_type": "debug_stop",
-                    "message_template": "Остановить dry-run и показать оператору недостающий контекст клиентского уточнения.",
-                },
-                "escalation_action": {
-                    "action_type": "debug_stop",
-                    "message_template": "Остановить сценарий и показать причину эскалации оператору.",
-                },
-                "action_profiles": default_channel_action_profiles({
-                    "channel_id": "debug",
-                    "escalation_action": {
-                        "action_type": "debug_stop",
-                        "message_template": "Остановить сценарий и показать причину эскалации оператору.",
-                    },
-                }),
                 "enabled": True,
             },
         ],
     }
 
 
-def default_channel_action_profiles(channel: dict[str, Any]) -> list[dict[str, Any]]:
-    channel_id = channel.get("channel_id")
-    legacy_escalation_action = channel.get("escalation_action") or {
-        "action_type": "debug_stop",
-        "message_template": "Остановить сценарий и показать причину эскалации оператору.",
-    }
-    if channel_id == "messenger_bot":
-        return [
-            _channel_action_profile("standard_handoff", "Эскалация: подключить оператора к чату", "standard_handoff", legacy_escalation_action),
-            _channel_action_profile("no_answer", "Клиент не ответил: создать черновик", "no_answer", {
-                "action_type": "create_draft",
-                "message_template": "Создать черновик заявки и сохранить контекст клиентского уточнения.",
-            }),
-            _channel_action_profile("major_incident", "Major Incident: оповестить дежурных", "major_incident", {
-                "action_type": "notify_on_call",
-                "message_template": "Оповестить дежурную команду и приложить пакет Major Incident.",
-            }),
-            _channel_action_profile("policy_blocked", "Политика заблокировала автоисполнение", "policy_blocked", legacy_escalation_action),
-        ]
-    if channel_id == "service_desk":
-        return [
-            _channel_action_profile("standard_handoff", "Эскалация: создать наряд", "standard_handoff", legacy_escalation_action),
-            _channel_action_profile("no_answer", "Клиент не ответил: создать наряд", "no_answer", {
-                "action_type": "create_work_order",
-                "message_template": "Создать наряд по незавершенному уточнению и приложить контекст.",
-            }),
-            _channel_action_profile("major_incident", "Major Incident: создать наряд дежурной группе", "major_incident", {
-                "action_type": "create_work_order",
-                "message_template": "Создать срочный наряд дежурной группе с пакетом Major Incident.",
-            }),
-            _channel_action_profile("policy_blocked", "Политика заблокировала автоисполнение", "policy_blocked", legacy_escalation_action),
-        ]
-    return [
-        _channel_action_profile("standard_handoff", "Отладка: эскалация оператору", "standard_handoff", legacy_escalation_action),
-        _channel_action_profile("no_answer", "Отладка: клиент не ответил", "no_answer", {
-            "action_type": "debug_stop",
-            "message_template": "Остановить dry-run из-за отсутствия ответа клиента.",
-        }),
-        _channel_action_profile("major_incident", "Отладка: Major Incident", "major_incident", {
-            "action_type": "debug_stop",
-            "message_template": "Остановить сценарий и показать оператору причину Major Incident.",
-        }),
-        _channel_action_profile("policy_blocked", "Отладка: policy blocked", "policy_blocked", legacy_escalation_action),
-    ]
+SENSITIVE_CHANNEL_DEBUG_PARTS = {
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "credential",
+    "hmac",
+}
 
 
-def _channel_action_profile(
-    profile_id: str,
-    display_name: str,
-    event_type: str,
-    action: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "profile_id": profile_id,
-        "display_name": display_name,
-        "event_type": event_type,
-        "action": action,
-    }
+def is_sensitive_channel_debug_ref(value: str | None) -> bool:
+    normalized = str(value or "").lower()
+    return any(part in normalized for part in SENSITIVE_CHANNEL_DEBUG_PARTS)
 
 
-def resolve_channel_action_profiles(
-    channel: dict[str, Any] | None,
-) -> dict[str, dict[str, Any]]:
-    if not channel:
-        return {}
-    return {
-        profile["event_type"]: profile
-        for profile in channel.get("action_profiles", [])
-    }
+def channel_debug_parameter_state(
+    interaction_channel: dict[str, Any] | None,
+    channel_variables: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(interaction_channel, dict):
+        return []
+    channel_id = str(interaction_channel.get("channel_id") or "").strip()
+    values = (channel_variables.get(channel_id) or {}) if isinstance(channel_variables, dict) else {}
+    result: list[dict[str, Any]] = []
+    for parameter in interaction_channel.get("channel_parameters", []):
+        if not isinstance(parameter, dict):
+            continue
+        parameter_id = str(parameter.get("parameter_id") or "").strip()
+        if not parameter_id:
+            continue
+        source = str(parameter.get("source") or "").strip()
+        is_secret = (
+            bool(parameter.get("secret"))
+            or is_sensitive_channel_debug_ref(parameter_id)
+            or is_sensitive_channel_debug_ref(source)
+        )
+        has_value = parameter_id in values and values.get(parameter_id) not in (None, "", [], {})
+        if is_secret:
+            status = "secret"
+        elif has_value:
+            status = "resolved"
+        elif source:
+            status = "missing"
+        else:
+            status = "unmapped"
+        item = {
+            "parameter_id": parameter_id,
+            "display_name": parameter.get("display_name") or parameter_id,
+            "direction": parameter.get("direction") or "input",
+            "source": source,
+            "status": status,
+        }
+        if has_value and not is_secret:
+            item["value"] = copy.deepcopy(values[parameter_id])
+        result.append(item)
+    return result
 
 
 def _slot(
@@ -7800,8 +8839,8 @@ def default_classification_routes() -> dict[str, Any]:
         (
             "network_issue",
             "P1",
-            "major_incident",
-            "Немедленная проверка массовости и запуск процедуры Major Incident при затронутых пользователях.",
+            "human_review",
+            "Передача сетевого обращения оператору для ручной проверки приоритета и масштаба.",
             "escalation_required",
             [
                 classification_rule("не работает vpn", match_type="phrase", weight=0.9, explanation="Прямой сетевой симптом VPN."),
@@ -7955,12 +8994,8 @@ def default_escalation_policies() -> dict[str, Any]:
                     "two_tool_errors",
                     "iteration_limit",
                     "confidence_below_050",
-                    "affected_users_threshold",
                     "policy_blocked",
                 ],
-                "major_incident": {
-                    "affected_users_threshold": 10,
-                },
                 "handoff_package": [
                     "slots",
                     "react_history",

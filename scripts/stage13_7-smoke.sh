@@ -29,7 +29,6 @@ cleanup() {
 trap cleanup EXIT
 
 BASE_URL="${BASE_URL}" "${PYTHON_BIN}" - <<'PY'
-import copy
 import json
 import os
 import time
@@ -76,23 +75,25 @@ else:
     raise SystemExit(f"healthz did not become ready: {last_error}")
 
 admin_js = request("/admin/static/app.js", parse_json=False)
-assert "Профили действий канала" in admin_js, admin_js[:500]
+assert "Профили действий канала" not in admin_js, admin_js[:500]
 assert "Профили канала" not in admin_js, admin_js[:500]
 assert "profile_major_incident" not in admin_js, admin_js[:500]
+assert "Major Incident" not in admin_js, admin_js[:500]
+assert "major_incident" not in admin_js, admin_js[:500]
 assert "channel_profile_mapping" not in admin_js, admin_js[:500]
 assert "Оповещать дежурных" not in admin_js, admin_js[:500]
+assert "notify_on_call" not in admin_js, admin_js[:500]
 print("UI блока 5 не содержит mapping профилей")
 
 escalations_active = request("/admin/config/active/escalation_policies")
 for policy in escalations_active["payload"]["policies"]:
     assert "channel_profile_mapping" not in policy, policy
-    assert "notify_on_call" not in policy["major_incident"], policy
+    assert "major_incident" not in policy, policy
+    assert "affected_users_threshold" not in policy.get("handoff_conditions", []), policy
 
 channels_active = request("/admin/config/active/interaction_channels")
 debug = next(channel for channel in channels_active["payload"]["channels"] if channel["channel_id"] == "debug")
-event_types = [profile["event_type"] for profile in debug["action_profiles"]]
-for event_type in ["standard_handoff", "no_answer", "major_incident", "policy_blocked"]:
-    assert event_types.count(event_type) == 1, debug
+assert "action_profiles" not in debug, debug
 
 simulation = request(
     "/admin/scenarios/network_issue/simulate",
@@ -101,28 +102,9 @@ simulation = request(
         "text": "VPN недоступен, больше 20 пользователей",
     },
 )
-profiles = simulation["channel_action_profiles"]
-assert set(["standard_handoff", "no_answer", "major_incident", "policy_blocked"]) <= set(profiles), simulation
-assert profiles["major_incident"]["action"]["action_type"] == "debug_stop", simulation
-print("dry-run вычисляет профили по event_type канала")
-
-bad_channels = copy.deepcopy(channels_active["payload"])
-bad_debug = next(channel for channel in bad_channels["channels"] if channel["channel_id"] == "debug")
-duplicate = copy.deepcopy(next(profile for profile in bad_debug["action_profiles"] if profile["event_type"] == "major_incident"))
-duplicate["profile_id"] = "major_incident_duplicate"
-bad_debug["action_profiles"].append(duplicate)
-draft = request(
-    "/admin/config/drafts",
-    {
-        "domain": "interaction_channels",
-        "payload": bad_channels,
-        "operator_id": "admin-stage13_7-duplicate",
-        "base_version_id": channels_active["active_version_id"],
-    },
-)
-validated = request(f"/admin/config/drafts/{draft['draft_id']}/validate", {"operator_id": "admin-stage13_7-duplicate"})
-assert validated["validation"]["status"] == "invalid", validated
-assert any("несколько action profile" in error and "major_incident" in error for error in validated["validation"]["errors"]), validated
+assert "channel_action_profiles" not in simulation, simulation
+assert simulation["escalation_action"]["action_type"] == "debug_stop", simulation
+print("dry-run вычисляет fallback эскалации по каналу")
 
 print("Smoke-проверка этапа 13.7 завершена.")
 PY

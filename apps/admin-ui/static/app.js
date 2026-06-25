@@ -3,25 +3,28 @@ const adminInterfaceLanguage = 'ru';
 const state = {
   activeView: 'dashboard',
   actorId: 'admin-1',
-  scenarioId: 'password_reset',
+  scenarioId: '',
   scenarioOperation: 'modify',
-  slotSchemaId: 'slot.password_reset',
+  slotSchemaId: '',
   slotSchemaOperation: 'modify',
-  routeId: 'route.password_reset',
+  routeId: '',
   routeOperation: 'modify',
-  policyId: 'policy.password_reset',
+  policyId: '',
   policyOperation: 'modify',
-  promptPackId: 'prompt.password_reset',
+  promptPackId: '',
   promptPackOperation: 'modify',
   interactionChannelId: 'debug',
   interactionChannelOperation: 'modify',
-  resolutionProfileId: 'profile.password_reset.login_from_ad',
+  resolutionProfileId: '',
   resolutionOperation: 'modify',
-  resolutionSlotScenarioId: 'password_reset',
+  resolutionSlotScenarioId: '',
   resolutionSlotProfileId: '',
   resolutionEnrichmentEditIndex: 0,
+  maintenanceSlotSchemaId: '',
   legacyCleanupPreview: null,
   legacyCleanupRequest: null,
+  orphanRepairPreview: null,
+  orphanRepairRequest: null,
   integrationEndpointId: 'mock',
   integrationEndpointOperation: 'modify',
   toolCatalogName: 'start_systemcenter_runbook',
@@ -32,7 +35,7 @@ const state = {
   operationBindingEndpointId: 'mock',
   operationBindingOperationId: 'start_systemcenter_runbook',
   orchestrationGraphView: 'scenario',
-  orchestrationGraphScenarioId: 'password_reset',
+  orchestrationGraphScenarioId: '',
   orchestrationGraphSelectedNodeId: 'slot_filling',
   orchestrationGraphZoom: 0.78,
   orchestrationGraphPanX: 24,
@@ -82,6 +85,18 @@ const configDraftFormDomains = {
   'system-prompts-editor': 'model_routing',
 };
 
+const configDraftCollectionMeta = {
+  service_scenarios: { collectionKey: 'scenarios', idKey: 'scenario_id' },
+  slot_schemas: { collectionKey: 'slot_schemas', idKey: 'slot_schema_id' },
+  attribute_resolution_profiles: { collectionKey: 'profiles', idKey: 'profile_id' },
+  classification_routes: { collectionKey: 'routes', idKey: 'route_id' },
+  orchestrator_policy: { collectionKey: 'policies', idKey: 'policy_id' },
+  prompt_packs: { collectionKey: 'packs', idKey: 'prompt_pack_id' },
+  interaction_channels: { collectionKey: 'channels', idKey: 'channel_id' },
+  integration_endpoints: { collectionKey: 'endpoints', idKey: 'endpoint_id' },
+  tools: { collectionKey: 'tools', idKey: 'tool_name' },
+};
+
 const configDraftDeleteForms = new Set([
   'interaction-channel-delete',
   'scenario-delete',
@@ -94,7 +109,7 @@ const configDraftDeleteForms = new Set([
   'tool-catalog-delete',
 ]);
 
-const configDraftActions = new Set(['save', 'validate', 'activate']);
+const configDraftActions = new Set(['save', 'validate', 'activate', 'activate_bundle']);
 
 const viewTitles = {
   dashboard: 'Панель обзора',
@@ -106,8 +121,9 @@ const viewTitles = {
   scenarioReact: '3. ReAct-планирование',
   scenarioPrompts: 'Промпты',
   interactionChannels: 'Каналы взаимодействия',
-  resolution: 'Разрешение слотов',
+  resolution: 'Профили разрешения',
   knowledge: 'База знаний',
+  configMaintenance: 'Обслуживание конфигурации',
   systemPrompts: 'Системные промпты',
   integrations: 'Интеграции',
   reactCalls: 'ReAct-вызовы ИИ',
@@ -172,7 +188,6 @@ const visibleLabels = {
   auto_agent: 'автоагент',
   agent_with_confirmation: 'агент + подтверждение',
   human_review: 'человек + подсказка',
-  major_incident: 'Major Incident',
   approver: 'согласующий',
   online_interactive: 'онлайн-интерактивный',
   offline_interactive: 'офлайн-интерактивный',
@@ -184,7 +199,6 @@ const visibleLabels = {
   create_draft: 'создать черновик',
   create_work_order: 'создать наряд',
   call_specialist: 'позвать специалиста',
-  notify_on_call: 'оповестить дежурных',
   debug_stop: 'остановить с сообщением',
   standard_handoff: 'эскалация оператору',
   no_answer: 'нет ответа клиента',
@@ -399,7 +413,9 @@ async function api(path, options = {}) {
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message = body.detail?.message || body.detail?.errors?.join('; ') || response.statusText;
-    throw new Error(message);
+    const error = new Error(message);
+    error.detail = body.detail;
+    throw error;
   }
   return body;
 }
@@ -524,6 +540,10 @@ function currentConfigSubmitAction() {
 
 function isConfigActivateAction() {
   return currentConfigSubmitAction() === 'activate';
+}
+
+function isConfigValidationOrActivationAction() {
+  return ['validate', 'activate'].includes(currentConfigSubmitAction());
 }
 
 function formConfigDraftAction(form, submitter) {
@@ -723,6 +743,8 @@ async function renderView(view) {
     await renderResolutionProfiles();
   } else if (view === 'knowledge') {
     await renderKnowledge();
+  } else if (view === 'configMaintenance') {
+    await renderConfigMaintenance();
   } else if (view === 'systemPrompts') {
     await renderSystemPrompts();
   } else if (view === 'integrations' || view === 'tools') {
@@ -786,8 +808,16 @@ async function renderOrchestrationGraph() {
 async function loadOrchestrationGraphContext() {
   const overview = await api('/admin/scenarios');
   const scenarios = overview.scenarios || [];
-  if (!scenarios.some((scenario) => scenario.scenario_id === state.orchestrationGraphScenarioId)) {
-    state.orchestrationGraphScenarioId = state.scenarioId || scenarios[0]?.scenario_id || '';
+  if (state.orchestrationGraphView === 'scenario') {
+    if (!scenarios.some((scenario) => scenario.scenario_id === state.orchestrationGraphScenarioId)) {
+      state.orchestrationGraphScenarioId = scenarios[0]?.scenario_id || '';
+    }
+    if (!state.scenarioId || !scenarios.some((scenario) => scenario.scenario_id === state.scenarioId)) {
+      state.scenarioId = state.orchestrationGraphScenarioId;
+    }
+    if (!state.orchestrationGraphScenarioId) {
+      state.orchestrationGraphView = 'base';
+    }
   }
   const params = new URLSearchParams({
     view: state.orchestrationGraphView,
@@ -1161,40 +1191,51 @@ async function loadScenarioContext() {
     endpointsConfig,
   ] = await Promise.all([
     api('/admin/scenarios'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/slot_schemas'),
-    api('/admin/config/active/classification_routes'),
-    api('/admin/config/active/orchestrator_policy'),
-    api('/admin/config/active/prompt_packs'),
-    api('/admin/config/active/interaction_channels'),
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/integration_endpoints'),
+    loadDraftAwareCollection('service_scenarios'),
+    loadDraftAwareCollection('slot_schemas'),
+    loadDraftAwareCollection('classification_routes'),
+    loadDraftAwareCollection('orchestrator_policy'),
+    loadDraftAwareCollection('prompt_packs'),
+    loadDraftAwareCollection('interaction_channels'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadDraftAwareCollection('tools'),
+    loadDraftAwareCollection('integration_endpoints'),
   ]);
-  const scenarios = overview.scenarios || [];
+  void overview;
+  const scenarios = serviceScenariosConfig.items || [];
   if (!scenarios.some((scenario) => scenario.scenario_id === state.scenarioId)) {
     state.scenarioId = scenarios[0]?.scenario_id || '';
   }
-  const detail = state.scenarioId
-    ? await api(`/admin/scenarios/${encodeURIComponent(state.scenarioId)}`)
+  const selectedScenario = scenarios.find((scenario) => scenario.scenario_id === state.scenarioId) || null;
+  let activeDetail = null;
+  if (state.scenarioId && !selectedScenario?.__draft_only) {
+    activeDetail = await api(`/admin/scenarios/${encodeURIComponent(state.scenarioId)}`);
+  }
+  const detail = selectedScenario
+    ? {
+      ...(activeDetail || {}),
+      scenario: selectedScenario,
+      readiness: activeDetail?.readiness || { status: selectedScenario.__draft_source ? 'draft' : 'н/д' },
+    }
     : null;
-  state.lastData.resolutionProfiles = resolutionProfilesConfig.payload?.profiles || [];
-  state.lastData.toolCatalog = toolsConfig.payload?.tools || [];
-  state.lastData.integrationEndpoints = endpointsConfig.payload?.endpoints || [];
-  state.lastData.interactionChannels = interactionChannelsConfig.payload?.channels || [];
+  state.lastData.resolutionProfiles = resolutionProfilesConfig.items || [];
+  state.lastData.toolCatalog = toolsConfig.items || [];
+  state.lastData.integrationEndpoints = endpointsConfig.items || [];
+  state.lastData.interactionChannels = interactionChannelsConfig.items || [];
+  state.lastData.serviceScenarios = scenarios;
   return {
-    overview,
+    overview: { ...overview, scenarios },
     scenarios,
     detail,
-    serviceScenarios: serviceScenariosConfig.payload?.scenarios || [],
-    slotSchemas: slotSchemasConfig.payload?.slot_schemas || [],
-    routes: routesConfig.payload?.routes || [],
-    policies: policiesConfig.payload?.policies || [],
-    promptPacks: promptPacksConfig.payload?.packs || [],
-    interactionChannels: interactionChannelsConfig.payload?.channels || [],
-    resolutionProfiles: resolutionProfilesConfig.payload?.profiles || [],
-    tools: toolsConfig.payload?.tools || [],
-    endpoints: endpointsConfig.payload?.endpoints || [],
+    serviceScenarios: scenarios,
+    slotSchemas: slotSchemasConfig.items || [],
+    routes: routesConfig.items || [],
+    policies: policiesConfig.items || [],
+    promptPacks: promptPacksConfig.items || [],
+    interactionChannels: interactionChannelsConfig.items || [],
+    resolutionProfiles: resolutionProfilesConfig.items || [],
+    tools: toolsConfig.items || [],
+    endpoints: endpointsConfig.items || [],
   };
 }
 
@@ -1203,7 +1244,7 @@ function scenarioToolbar(context) {
     .map(
       (scenario) => `<option value="${escapeHtml(scenario.scenario_id)}" ${
         scenario.scenario_id === state.scenarioId ? 'selected' : ''
-      }>${escapeHtml(scenario.display_name)}</option>`,
+      }>${escapeHtml(labelWithDraftState(scenario, scenario.display_name || scenario.scenario_id))}</option>`,
     )
     .join('');
   return `<div class="toolbar compact">
@@ -1253,14 +1294,14 @@ function usagePanel(scenarios, referenceKey, referenceId) {
 
 async function renderScenarioSlots() {
   const [active, scenariosConfig, resolutionProfilesConfig, policiesConfig] = await Promise.all([
-    api('/admin/config/active/slot_schemas'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/orchestrator_policy'),
+    loadDraftAwareCollection('slot_schemas'),
+    loadDraftAwareCollection('service_scenarios'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadConfigEditPayload('orchestrator_policy'),
   ]);
-  const slotSchemas = active.payload?.slot_schemas || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
-  const resolutionProfiles = resolutionProfilesConfig.payload?.profiles || [];
+  const slotSchemas = active.items || [];
+  const scenarios = scenariosConfig.items || [];
+  const resolutionProfiles = resolutionProfilesConfig.items || [];
   const confidenceDefaults = policiesConfig.payload?.confidence_defaults || {};
   state.lastData.resolutionProfiles = resolutionProfiles;
   state.lastData.confidenceDefaults = confidenceDefaults;
@@ -1296,13 +1337,14 @@ async function renderScenarioSlots() {
 
 async function renderScenarioClassification() {
   const [active, scenariosConfig, channelsConfig] = await Promise.all([
-    api('/admin/config/active/classification_routes'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/interaction_channels'),
+    loadDraftAwareCollection('classification_routes'),
+    loadDraftAwareCollection('service_scenarios'),
+    loadDraftAwareCollection('interaction_channels'),
   ]);
-  const routes = active.payload?.routes || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
-  state.lastData.interactionChannels = channelsConfig.payload?.channels || [];
+  const routes = active.items || [];
+  const scenarios = scenariosConfig.items || [];
+  state.lastData.interactionChannels = channelsConfig.items || [];
+  state.lastData.serviceScenarios = scenarios;
   if (!routes.some((route) => route.route_id === state.routeId)) {
     state.routeId = routes[0]?.route_id || '';
   }
@@ -1316,7 +1358,7 @@ async function renderScenarioClassification() {
         items: routes,
         idKey: 'route_id',
         selectedId: state.routeId,
-        labelKey: 'display_name',
+        labelKey: routeReferenceLabel,
         actionPrefix: 'route',
         operation: state.routeOperation,
       })}
@@ -1328,11 +1370,11 @@ async function renderScenarioClassification() {
 
 async function renderScenarioReact() {
   const [active, scenariosConfig] = await Promise.all([
-    api('/admin/config/active/orchestrator_policy'),
-    api('/admin/config/active/service_scenarios'),
+    loadDraftAwareCollection('orchestrator_policy'),
+    loadDraftAwareCollection('service_scenarios'),
   ]);
-  const policies = active.payload?.policies || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
+  const policies = active.items || [];
+  const scenarios = scenariosConfig.items || [];
   if (!policies.some((policy) => policy.policy_id === state.policyId)) {
     state.policyId = policies[0]?.policy_id || '';
   }
@@ -1407,12 +1449,12 @@ async function renderScenarioTools() {
 
 async function renderScenarioPrompts() {
   const [active, scenariosConfig, orchestratorPolicyConfig] = await Promise.all([
-    api('/admin/config/active/prompt_packs'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/orchestrator_policy'),
+    loadDraftAwareCollection('prompt_packs'),
+    loadDraftAwareCollection('service_scenarios'),
+    loadConfigEditPayload('orchestrator_policy'),
   ]);
-  const packs = active.payload?.packs || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
+  const packs = active.items || [];
+  const scenarios = scenariosConfig.items || [];
   const confidenceDefaults = orchestratorPolicyConfig.payload?.confidence_defaults || {};
   if (!packs.some((pack) => pack.prompt_pack_id === state.promptPackId)) {
     state.promptPackId = packs[0]?.prompt_pack_id || '';
@@ -1422,7 +1464,7 @@ async function renderScenarioPrompts() {
     .map(
       (pack) => `<option value="${escapeHtml(pack.prompt_pack_id)}" ${
         pack.prompt_pack_id === state.promptPackId ? 'selected' : ''
-      }>${escapeHtml(promptPackLabel(pack))}</option>`,
+      }>${escapeHtml(labelWithDraftState(pack, promptPackLabel(pack)))}</option>`,
     )
     .join('');
   const editor = renderPromptPackEditor({
@@ -1453,11 +1495,11 @@ async function renderScenarioPrompts() {
 
 async function renderInteractionChannels() {
   const [active, scenariosConfig] = await Promise.all([
-    api('/admin/config/active/interaction_channels'),
-    api('/admin/config/active/service_scenarios'),
+    loadDraftAwareCollection('interaction_channels'),
+    loadDraftAwareCollection('service_scenarios'),
   ]);
-  const channels = active.payload?.channels || [];
-  const scenarios = scenariosConfig.payload?.scenarios || [];
+  const channels = active.items || [];
+  const scenarios = scenariosConfig.items || [];
   state.lastData.interactionChannels = channels;
   if (!channels.some((channel) => channel.channel_id === state.interactionChannelId)) {
     state.interactionChannelId = channels[0]?.channel_id || '';
@@ -1492,25 +1534,12 @@ function channelCreateTemplate(source, channels) {
     capabilities: normalizeChannelCapabilities(template.capabilities, template.channel_id || 'debug', template.mode || 'debug'),
     technical_profile: normalizeChannelTechnicalProfile(template.technical_profile, template.channel_id || 'debug'),
     channel_parameters: normalizeChannelParameters(template.channel_parameters, template.channel_id || 'debug'),
-    question_delivery: template.question_delivery || {
-      action_type: 'show_debug_message',
-      message_template: '{question}',
-    },
     waiting_policy: normalizeChannelWaitingPolicy(template.waiting_policy || {
       first_reminder_after_seconds: 0,
       discussion_timeout_seconds: 0,
       sla_elapsed_percent_threshold: 0,
       on_no_answer: 'debug_stop',
     }),
-    incomplete_discussion_action: template.incomplete_discussion_action || {
-      action_type: 'debug_stop',
-      message_template: 'Остановить сценарий и показать недостающий контекст.',
-    },
-    escalation_action: template.escalation_action || {
-      action_type: 'debug_stop',
-      message_template: 'Остановить сценарий и показать причину эскалации.',
-    },
-    action_profiles: template.action_profiles || defaultChannelActionProfiles(template.channel_id || 'debug'),
     enabled: template.enabled ?? true,
   };
 }
@@ -1620,10 +1649,61 @@ function normalizeChannelWaitingPolicy(waitingPolicy = {}) {
   };
 }
 
+function defaultChannelHandoffAction(channel = {}) {
+  if (channel.channel_id === 'service_desk' || channel.mode === 'offline_interactive') {
+    return {
+      action_type: 'create_work_order',
+      message_template: 'Создать наряд ответственному специалисту с пакетом эскалации.',
+    };
+  }
+  if (channel.channel_id === 'messenger_bot' || channel.mode === 'online_interactive') {
+    return {
+      action_type: 'call_specialist',
+      message_template: 'Позвать специалиста в диалог с полным контекстом сценария.',
+    };
+  }
+  return {
+    action_type: 'debug_stop',
+    message_template: 'Остановить сценарий и показать причину эскалации оператору.',
+  };
+}
+
+function renderDebugChannelReadonly(channel) {
+  const capabilities = normalizeChannelCapabilities(channel.capabilities, channel.channel_id, channel.mode);
+  const technicalProfile = normalizeChannelTechnicalProfile(channel.technical_profile, channel.channel_id);
+  const channelParameters = normalizeChannelParameters(channel.channel_parameters, channel.channel_id);
+  const handoffAction = defaultChannelHandoffAction(channel);
+  const parameterRows = channelParameters.map((parameter) => [
+    escapeHtml(parameter.display_name || parameter.parameter_id),
+    escapeHtml(parameter.direction || 'input'),
+    escapeHtml(parameter.source || 'н/д'),
+  ]);
+  return `
+    <div class="scenario-editor panel" data-debug-channel-readonly>
+      <div>
+        <div class="metric-label">Системный канал</div>
+        <div class="scenario-title">${escapeHtml(channel.display_name || 'Отладочный канал')}</div>
+        <div class="meta">Поведение в dry-run выбирается из отлаживаемого реального канала сценария. Этот канал нельзя редактировать или удалить.</div>
+      </div>
+      <div class="grid two">
+        ${metric('Режим', escapeHtml(visibleLabels[channel.mode] || channel.mode || 'debug'))}
+        ${metric('Транспорт', escapeHtml(technicalProfile.transport || 'none'))}
+        ${metric('Вопросы клиенту', badge(capabilities.supports_client_questions ? 'enabled' : 'disabled'))}
+        ${metric('Создание задач', badge(capabilities.supports_work_order_creation ? 'enabled' : 'disabled'))}
+        ${metric('Действие по умолчанию при эскалации', escapeHtml(visibleLabels[handoffAction.action_type] || handoffAction.action_type))}
+      </div>
+      ${parameterRows.length ? table(['Параметр', 'Направление', 'Источник'], parameterRows) : '<div class="empty">Служебный debug-канал не задает параметры реального транспорта.</div>'}
+    </div>
+  `;
+}
+
 function renderInteractionChannelEditor({ channel, channels, scenarios }) {
   if (state.interactionChannelOperation === 'delete') {
     if (!channel?.channel_id) {
       return '<div class="empty">Нет выбранного канала для удаления</div>';
+    }
+    if (channel.channel_id === 'debug') {
+      return renderDebugChannelReadonly(channel);
     }
     return `
       <form class="scenario-editor panel" data-form="interaction-channel-delete">
@@ -1642,16 +1722,21 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
   if (!current?.channel_id) {
     return '<div class="empty">Канал взаимодействия не выбран</div>';
   }
+  if (current.channel_id === 'debug' && state.interactionChannelOperation !== 'create') {
+    return renderDebugChannelReadonly(current);
+  }
   const waitingPolicy = normalizeChannelWaitingPolicy(current.waiting_policy);
   const capabilities = normalizeChannelCapabilities(current.capabilities, current.channel_id, current.mode);
   const technicalProfile = normalizeChannelTechnicalProfile(current.technical_profile, current.channel_id);
   const channelParameters = normalizeChannelParameters(current.channel_parameters, current.channel_id);
+  const handoffAction = defaultChannelHandoffAction(current);
   const noAnswerActions = channelNoAnswerActions(current.mode, capabilities);
   const noAnswerAction = noAnswerActions.includes(waitingPolicy.on_no_answer)
     ? waitingPolicy.on_no_answer
     : (noAnswerActions[0] || 'debug_stop');
   return `
     <form class="scenario-editor panel" data-form="interaction-channel-editor">
+      ${draftInfoPanel(current)}
       <input type="hidden" name="channel_id" value="${escapeHtml(current.channel_id)}">
       <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
       <label>Описание<textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea></label>
@@ -1660,6 +1745,10 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
         <label>Канал включен<select name="enabled">${booleanOptions(current.enabled)}</select></label>
       </div>
       ${renderChannelCapabilities(capabilities)}
+      <div class="slot-schema-derived">
+        <div class="metric-label">Действие по умолчанию при эскалации</div>
+        <div class="meta">${escapeHtml(visibleLabels[handoffAction.action_type] || handoffAction.action_type)}. Конкретные вопросы клиенту и передача оператору настраиваются в сценарных блоках, а не в канале.</div>
+      </div>
       ${renderChannelTechnicalProfile(technicalProfile)}
       ${renderChannelParameters(channelParameters)}
       <fieldset class="launch-editor">
@@ -1674,14 +1763,6 @@ function renderInteractionChannelEditor({ channel, channels, scenarios }) {
           <label>Ожидание приостанавливает SLA<select name="pause_sla_on_client_wait">${booleanOptions(waitingPolicy.pause_sla_on_client_wait)}</select></label>
           <label>Автозакрытие ожидания клиента, часов<input name="client_wait_auto_close_after_hours" type="number" min="1" max="168" value="${escapeHtml(waitingPolicy.client_wait_auto_close_after_hours)}"></label>
         </div>
-        ${renderChannelActionFields('question_delivery', 'Как задать вопрос клиенту', current.question_delivery, current.mode, capabilities)}
-        ${renderChannelActionFields('incomplete_discussion_action', 'Что делать с незавершенным уточнением', current.incomplete_discussion_action, current.mode, capabilities)}
-      </fieldset>
-      <fieldset class="launch-editor">
-        <legend>Эскалация оператору</legend>
-        <div class="meta">Этот блок используется, когда AI останавливает самостоятельную обработку и передает оператору пакет контекста.</div>
-        ${renderChannelActionFields('escalation_action', 'Базовое действие эскалации оператору', current.escalation_action, current.mode, capabilities)}
-        ${renderChannelActionProfiles(current.action_profiles || [], current.mode, capabilities)}
       </fieldset>
       ${channelUsagePanel(scenarios, current.channel_id)}
       <div class="scenario-editor-actions">
@@ -1769,71 +1850,6 @@ function renderChannelParameters(parameters = []) {
   `;
 }
 
-function renderChannelActionProfiles(profiles, mode = 'debug', capabilities = {}) {
-  return `
-    <div class="nested-editor">
-      <div class="metric-label">Профили эскалации и таймаутов</div>
-      <div class="meta">Профиль связывает логическое событие из блока "5. Решение и эскалация" с реальным действием канала.</div>
-      <div id="channelProfileCards">${(profiles || []).map((profile) => renderChannelProfileCard(profile, mode, capabilities)).join('')}</div>
-      <button type="button" data-action="channel-profile-add">Добавить профиль</button>
-    </div>
-  `;
-}
-
-function renderChannelProfileCard(profile = {}, mode = 'debug', capabilities = {}) {
-  const action = profile.action || {};
-  return `
-    <fieldset class="launch-editor" data-channel-profile-card>
-      <legend>${escapeHtml(profile.display_name || 'Профиль действия')}</legend>
-      <input type="hidden" name="profile_id" value="${escapeHtml(profile.profile_id || 'custom_profile')}">
-      <label>Название<input name="display_name" value="${escapeHtml(profile.display_name || '')}" autocomplete="off"></label>
-      <div class="grid two">
-        <label>Тип события<select name="event_type">${optionList(['standard_handoff', 'no_answer', 'major_incident', 'policy_blocked', 'debug_stop'], profile.event_type || 'standard_handoff')}</select></label>
-        <label>Действие канала<select name="action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop', capabilities)}</select></label>
-      </div>
-      <label>Шаблон сообщения<textarea name="message_template" rows="3">${escapeHtml(action.message_template || '')}</textarea></label>
-      <button class="danger" type="button" data-action="channel-profile-remove">Удалить профиль</button>
-    </fieldset>
-  `;
-}
-
-function renderChannelActionFields(prefix, title, action = {}, mode = 'debug', capabilities = {}) {
-  return `
-    <fieldset class="launch-editor">
-      <legend>${escapeHtml(title)}</legend>
-      <div class="grid two">
-        <label>Действие канала<select name="${escapeHtml(prefix)}_action_type">${channelActionTypeOptions(mode, action.action_type || 'debug_stop', capabilities)}</select></label>
-      </div>
-      <label>Шаблон сообщения<textarea name="${escapeHtml(prefix)}_message_template" rows="3">${escapeHtml(action.message_template || '')}</textarea></label>
-    </fieldset>
-  `;
-}
-
-function channelActionTypes(mode = '', capabilities = {}) {
-  const effectiveCapabilities = Object.keys(capabilities || {}).length
-    ? capabilities
-    : defaultChannelCapabilities('', mode);
-  if (mode === 'online_interactive') {
-    return [
-      effectiveCapabilities.supports_client_questions ? 'ask_end_user' : null,
-      'create_draft',
-      'call_specialist',
-      'notify_on_call',
-    ].filter(Boolean);
-  }
-  if (mode === 'offline_interactive') {
-    return [
-      effectiveCapabilities.supports_operator_questions ? 'ask_operator' : null,
-      'save_context',
-      effectiveCapabilities.supports_work_order_creation ? 'create_work_order' : null,
-    ].filter(Boolean);
-  }
-  if (mode === 'debug') {
-    return ['show_debug_message', 'debug_stop'];
-  }
-  return ['show_debug_message', 'debug_stop'];
-}
-
 function channelNoAnswerActions(mode = '', capabilities = {}) {
   const effectiveCapabilities = Object.keys(capabilities || {}).length
     ? capabilities
@@ -1848,37 +1864,6 @@ function channelNoAnswerActions(mode = '', capabilities = {}) {
     return ['debug_stop'];
   }
   return ['debug_stop'];
-}
-
-function channelActionTypeOptions(mode, selected, capabilities = {}) {
-  const actions = channelActionTypes(mode, capabilities);
-  const effectiveSelected = actions.includes(selected) ? selected : (actions[0] || 'debug_stop');
-  return optionList(actions, effectiveSelected);
-}
-
-function defaultChannelActionProfiles(channelId) {
-  if (channelId === 'messenger_bot') {
-    return [
-      { profile_id: 'standard_handoff', display_name: 'Эскалация: подключить оператора к чату', event_type: 'standard_handoff', action: { action_type: 'call_specialist', message_template: 'Позвать специалиста в диалог с полным контекстом сценария.' } },
-      { profile_id: 'no_answer', display_name: 'Клиент не ответил: создать черновик', event_type: 'no_answer', action: { action_type: 'create_draft', message_template: 'Создать черновик заявки и сохранить контекст диалога.' } },
-      { profile_id: 'major_incident', display_name: 'Major Incident: оповестить дежурных', event_type: 'major_incident', action: { action_type: 'notify_on_call', message_template: 'Оповестить дежурную команду и приложить пакет Major Incident.' } },
-      { profile_id: 'policy_blocked', display_name: 'Политика заблокировала автоисполнение', event_type: 'policy_blocked', action: { action_type: 'call_specialist', message_template: 'Позвать специалиста для ручной проверки.' } },
-    ];
-  }
-  if (channelId === 'service_desk') {
-    return [
-      { profile_id: 'standard_handoff', display_name: 'Эскалация: создать наряд', event_type: 'standard_handoff', action: { action_type: 'create_work_order', message_template: 'Создать наряд ответственному специалисту с пакетом эскалации.' } },
-      { profile_id: 'no_answer', display_name: 'Клиент не ответил: создать наряд', event_type: 'no_answer', action: { action_type: 'create_work_order', message_template: 'Создать наряд по незавершенному уточнению и приложить контекст.' } },
-      { profile_id: 'major_incident', display_name: 'Major Incident: создать наряд дежурной группе', event_type: 'major_incident', action: { action_type: 'create_work_order', message_template: 'Создать срочный наряд дежурной группе с пакетом Major Incident.' } },
-      { profile_id: 'policy_blocked', display_name: 'Политика заблокировала автоисполнение', event_type: 'policy_blocked', action: { action_type: 'create_work_order', message_template: 'Создать наряд для ручной проверки.' } },
-    ];
-  }
-  return [
-    { profile_id: 'standard_handoff', display_name: 'Отладка: эскалация оператору', event_type: 'standard_handoff', action: { action_type: 'debug_stop', message_template: 'Остановить сценарий и показать причину эскалации оператору.' } },
-    { profile_id: 'no_answer', display_name: 'Отладка: клиент не ответил', event_type: 'no_answer', action: { action_type: 'debug_stop', message_template: 'Остановить dry-run из-за отсутствия ответа клиента.' } },
-    { profile_id: 'major_incident', display_name: 'Отладка: Major Incident', event_type: 'major_incident', action: { action_type: 'debug_stop', message_template: 'Остановить сценарий и показать оператору причину Major Incident.' } },
-    { profile_id: 'policy_blocked', display_name: 'Отладка: policy blocked', event_type: 'policy_blocked', action: { action_type: 'debug_stop', message_template: 'Остановить сценарий и показать блокировку policy.' } },
-  ];
 }
 
 function channelUsagePanel(scenarios, channelId) {
@@ -1926,6 +1911,7 @@ function renderScenarioEditor({
     .join('');
   return `
     <form class="scenario-editor panel" data-form="scenario-editor">
+      ${draftInfoPanel(scenario)}
       <input type="hidden" name="scenario_id" value="${escapeHtml(scenario.scenario_id || '')}">
       <input type="hidden" name="existing_tags" value="${escapeHtml(JSON.stringify(scenario.tags || []))}">
       <input type="hidden" name="orchestrator_policy_id" value="${escapeHtml(scenario.orchestrator_policy_id || reactPolicy.policy_id || '')}">
@@ -1937,7 +1923,7 @@ function renderScenarioEditor({
       <label>Описание<textarea name="description" rows="4">${escapeHtml(scenario.description || '')}</textarea></label>
       <div class="grid two">
         <label>Схема слотов<select name="slot_schema_id">${referenceOptions(slotSchemas, 'slot_schema_id', scenario.slot_schema_id, 'display_name')}</select></label>
-        <label>Маршрут классификации<select name="classification_route_id">${referenceOptions(routes, 'route_id', scenario.classification_route_id, 'display_name')}</select></label>
+        <label>Маршрут классификации<select name="classification_route_id">${referenceOptions(routes, 'route_id', scenario.classification_route_id, routeReferenceLabel)}</select></label>
         <label>Пакет промптов
           <select name="prompt_pack_id">${referenceOptions(promptPacks, 'prompt_pack_id', scenario.prompt_pack_id, (pack) => promptPackLabel(pack))}</select>
           <span class="field-help">Связь сценария с пакетом. Содержимое обязательных блоков редактируется в меню "Сценарии обработки -> Промпты".</span>
@@ -1994,27 +1980,25 @@ async function renderResolutionProfiles() {
   const [
     active,
     slotSchemasConfig,
-    slotSchemaDraft,
     scenariosConfig,
     toolsConfig,
     endpointsConfig,
     modelRoutingConfig,
   ] = await Promise.all([
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/slot_schemas'),
-    loadLatestConfigDraft('slot_schemas'),
-    api('/admin/config/active/service_scenarios'),
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/model_routing'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadDraftAwareCollection('slot_schemas'),
+    loadDraftAwareCollection('service_scenarios'),
+    loadDraftAwareCollection('tools'),
+    loadDraftAwareCollection('integration_endpoints'),
+    loadConfigEditPayload('model_routing'),
   ]);
-  const profiles = active.payload?.profiles || [];
-  const activeSlotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
-  const slotSchemaDraftContext = mergeDraftSlotSchemas(activeSlotSchemas, slotSchemaDraft);
+  const profiles = active.items || [];
+  const activeSlotSchemas = slotSchemasConfig.activePayload?.slot_schemas || [];
+  const slotSchemaDraftContext = { slotSchemas: slotSchemasConfig.items || [], draft: slotSchemasConfig.draft };
   const slotSchemas = slotSchemaDraftContext.slotSchemas;
-  const scenarios = scenariosConfig.payload?.scenarios || [];
-  const tools = toolsConfig.payload?.tools || [];
-  const endpoints = endpointsConfig.payload?.endpoints || [];
+  const scenarios = scenariosConfig.items || [];
+  const tools = toolsConfig.items || [];
+  const endpoints = endpointsConfig.items || [];
   state.lastData.resolutionProfiles = profiles;
   state.lastData.slotSchemas = slotSchemas;
   state.lastData.activeSlotSchemas = activeSlotSchemas;
@@ -2031,7 +2015,7 @@ async function renderResolutionProfiles() {
     .map(
       (profile) => `<option value="${escapeHtml(profile.profile_id)}" ${
         profile.profile_id === state.resolutionProfileId ? 'selected' : ''
-      }>${escapeHtml(profile.display_name)}</option>`,
+      }>${escapeHtml(labelWithDraftState(profile, profile.display_name || profile.profile_id))}</option>`,
     )
     .join('');
   const editor = renderResolutionProfileEditor({
@@ -2060,40 +2044,128 @@ async function renderResolutionProfiles() {
   syncResolutionTargetSlotCustom(elements.viewContent);
   syncAllResolutionOutputSlotCustom(elements.viewContent);
   syncResolutionLlmMode(elements.viewContent);
+  syncResolutionFillsSlotsMode(elements.viewContent);
   document.getElementById('resolutionProfileSelect')?.addEventListener('change', (event) => {
     state.resolutionProfileId = event.target.value;
     renderResolutionProfiles().catch((error) => setNotice(error.message || String(error), 'error'));
   });
 }
 
-async function loadLatestConfigDraft(domain) {
+function isWorkingConfigDraftForActiveVersion(draft, activeVersionId) {
+  const workingStatuses = new Set(['draft', 'valid', 'regression_passed']);
+  const currentVersionId = String(activeVersionId || '').trim();
+  return Boolean(
+    draft
+      && draft.created_by === state.actorId
+      && workingStatuses.has(draft.status)
+      && draft.payload
+      && currentVersionId
+      && draft.base_version_id === currentVersionId,
+  );
+}
+
+async function loadLatestConfigDraft(domain, activeVersionId) {
   const result = await api(`/admin/config/drafts?domain=${encodeURIComponent(domain)}&limit=20`);
-  return (result.drafts || []).find((draft) =>
-    draft.created_by === state.actorId
-    && draft.status !== 'activated'
-    && draft.payload,
-  ) || null;
+  return (result.drafts || []).find((draft) => isWorkingConfigDraftForActiveVersion(draft, activeVersionId)) || null;
+}
+
+async function loadConfigEditPayload(domain) {
+  const active = await api(`/admin/config/active/${domain}`);
+  const draft = await loadLatestConfigDraft(domain, active.active_version_id || '');
+  return {
+    active,
+    draft,
+    payload: stripDraftMetadata(cloneJson(draft?.payload || active.payload || {})),
+    activePayload: active.payload || {},
+    activeVersionId: active.active_version_id || '',
+  };
+}
+
+async function loadDraftAwareCollection(domain) {
+  const meta = configDraftCollectionMeta[domain];
+  if (!meta) {
+    throw new Error(`Для домена ${domain} не задана коллекция черновиков.`);
+  }
+  const context = await loadConfigEditPayload(domain);
+  const activeItems = context.activePayload?.[meta.collectionKey] || [];
+  const draftItems = context.draft?.payload?.[meta.collectionKey];
+  const items = context.draft
+    ? (
+      domain === 'slot_schemas'
+        ? mergeDraftSlotSchemas(activeItems, context.draft).slotSchemas
+        : draftAwareCollectionItems(activeItems, Array.isArray(draftItems) ? draftItems : [], meta.idKey, context.draft)
+    )
+    : activeItems;
+  return {
+    ...context,
+    items,
+    collectionKey: meta.collectionKey,
+    idKey: meta.idKey,
+  };
+}
+
+function draftAwareCollectionItems(activeItems = [], draftItems = [], idKey, draft = null) {
+  if (!draft) {
+    return activeItems;
+  }
+  const activeById = Object.fromEntries((activeItems || []).map((item) => [item[idKey], item]));
+  return (draftItems || []).map((draftItem) => annotateDraftItem(draftItem, activeById[draftItem[idKey]], idKey, draft));
+}
+
+function annotateDraftItem(draftItem, activeItem, idKey, draft) {
+  const item = cloneJson(draftItem);
+  item.__draft_source = true;
+  item.__draft_only = !activeItem;
+  item.__draft_id = draft.draft_id;
+  item.__draft_status = draft.status;
+  item.__draft_updated_at = draft.updated_at;
+  item.__draft_identity = item[idKey] || '';
+  return item;
+}
+
+function draftLabelSuffix(item) {
+  if (!item?.__draft_source) return '';
+  return item.__draft_only ? ' (только в черновике)' : ' (черновик)';
+}
+
+function labelWithDraftState(item, label) {
+  return `${label || 'н/д'}${draftLabelSuffix(item)}`;
+}
+
+function draftInfoPanel(itemOrDraft, label = 'Редактируется черновик') {
+  const draftId = itemOrDraft?.__draft_id || itemOrDraft?.draft_id;
+  if (!draftId) return '';
+  const status = itemOrDraft.__draft_status || itemOrDraft.status || 'draft';
+  const updatedAt = itemOrDraft.__draft_updated_at || itemOrDraft.updated_at || '';
+  return `
+    <div class="config-draft-status" data-type="info">
+      ${escapeHtml(label)}: ${escapeHtml(draftId)} · статус ${escapeHtml(status)}${updatedAt ? ` · обновлен ${escapeHtml(updatedAt)}` : ''}.
+      Активная версия не изменена.
+    </div>
+  `;
+}
+
+function stripDraftMetadata(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripDraftMetadata(item));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !key.startsWith('__draft'))
+        .map(([key, item]) => [key, stripDraftMetadata(item)]),
+    );
+  }
+  return value;
 }
 
 function mergeDraftSlotSchemas(activeSlotSchemas = [], draft = null) {
-  if (!draft?.payload?.slot_schemas?.length) {
+  if (!draft?.payload?.slot_schemas) {
     return { slotSchemas: activeSlotSchemas, draft: null };
   }
   const activeById = slotSchemaById(activeSlotSchemas);
-  const draftById = slotSchemaById(draft.payload.slot_schemas || []);
-  const seen = new Set();
-  const slotSchemas = (activeSlotSchemas || []).map((activeSchema) => {
-    seen.add(activeSchema.slot_schema_id);
-    const draftSchema = draftById[activeSchema.slot_schema_id];
-    return draftSchema
-      ? annotateDraftSlotSchema(draftSchema, activeById[activeSchema.slot_schema_id], draft)
-      : activeSchema;
-  });
-  for (const draftSchema of draft.payload.slot_schemas || []) {
-    if (!seen.has(draftSchema.slot_schema_id)) {
-      slotSchemas.push(annotateDraftSlotSchema(draftSchema, null, draft));
-    }
-  }
+  const slotSchemas = (draft.payload.slot_schemas || [])
+    .map((draftSchema) => annotateDraftSlotSchema(draftSchema, activeById[draftSchema.slot_schema_id], draft));
   return { slotSchemas, draft };
 }
 
@@ -2175,6 +2247,120 @@ function legacyCleanupScenarioText(slotSchema, scenarios) {
   return names.length ? names.join(', ') : 'сценарии не найдены';
 }
 
+function orphanResolutionProfileLinks(slotSchema, profiles = []) {
+  const profileIds = new Set((profiles || []).map((profile) => profile.profile_id).filter(Boolean));
+  const result = {
+    orphanSlots: [],
+    orphanStageLinks: [],
+  };
+  for (const stage of slotSchemaStagesForEditor(slotSchema || {})) {
+    if (stage.resolution_profile_id && !profileIds.has(stage.resolution_profile_id)) {
+      result.orphanStageLinks.push({
+        stage_id: stage.stage_id,
+        display_name: stage.display_name || stage.stage_id,
+        missing_profile_id: stage.resolution_profile_id,
+      });
+    }
+    for (const slot of stage.slots || []) {
+      const fillMethod = normalizeSlotFillMethod(slot.fill_method || legacyFillMethod(slot.source));
+      if (fillMethod === 'resolution_profile' && slot.resolution_profile_id && !profileIds.has(slot.resolution_profile_id)) {
+        result.orphanSlots.push({
+          stage_id: stage.stage_id,
+          slot_id: slot.slot_id,
+          display_name: slot.display_name || slot.slot_id,
+          missing_profile_id: slot.resolution_profile_id,
+        });
+      }
+    }
+  }
+  return result;
+}
+
+function orphanRepairPreviewPanel(slotSchemaId) {
+  const result = state.orphanRepairPreview;
+  if (!result || result.summary?.slot_schema_id !== slotSchemaId) {
+    return '';
+  }
+  const summary = result.summary || {};
+  const list = (items, key, emptyText) => {
+    if (!items?.length) return `<li>${escapeHtml(emptyText)}</li>`;
+    return items.map((item) => {
+      const label = item.display_name || item[key] || item.slot_id || item.stage_id || '';
+      const detail = item.missing_profile_id ? ` -> ${item.missing_profile_id}` : '';
+      return `<li>${escapeHtml(`${label}${detail}`)}</li>`;
+    }).join('');
+  };
+  const blocked = result.status === 'blocked';
+  return `
+    <div class="slot-schema-derived ${blocked ? 'danger-panel' : ''}">
+      <div class="metric-label">${blocked ? 'Исправление заблокировано' : 'Предпросмотр исправления'}</div>
+      <div class="grid two">
+        <div>
+          <strong>Слоты, переводимые в ручное заполнение</strong>
+          <ul>${list(summary.orphan_slots_repaired, 'slot_id', 'висячих ссылок в слотах нет')}</ul>
+        </div>
+        <div>
+          <strong>Ссылки профилей на уровне этапов</strong>
+          <ul>${list(summary.orphan_stage_links_cleared, 'stage_id', 'висячих ссылок этапов нет')}</ul>
+        </div>
+        <div>
+          <strong>Затронутые сценарии</strong>
+          <ul>${list(summary.affected_scenarios, 'scenario_id', 'сценарии не найдены')}</ul>
+        </div>
+      </div>
+      ${(result.blocked_reasons || []).length ? `
+        <div class="meta">Причины: ${escapeHtml(result.blocked_reasons.join('; '))}</div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function renderOrphanResolutionProfileRepairPanel({ slotSchema, profiles = [], scenarios = [] }) {
+  if (!slotSchema) return '';
+  const links = orphanResolutionProfileLinks(slotSchema, profiles);
+  const total = links.orphanSlots.length + links.orphanStageLinks.length;
+  const slotRows = links.orphanSlots.map((item) => `
+    <li>${escapeHtml(item.display_name || item.slot_id)} <small>${escapeHtml(item.slot_id)} -> ${escapeHtml(item.missing_profile_id)}</small></li>
+  `).join('');
+  const stageRows = links.orphanStageLinks.map((item) => `
+    <li>${escapeHtml(item.display_name || item.stage_id)} <small>${escapeHtml(item.stage_id)} -> ${escapeHtml(item.missing_profile_id)}</small></li>
+  `).join('');
+  return `
+    <details class="launch-editor legacy-cleanup" data-orphan-repair-panel ${total ? 'open' : ''}>
+      <summary>Висячие ссылки профилей разрешения</summary>
+      <input type="hidden" name="orphan_repair_slot_schema_id" value="${escapeHtml(slotSchema.slot_schema_id)}">
+      <div class="meta">
+        Исправляет ситуацию, когда слот или этап ссылается на профиль разрешения, которого уже нет.
+        Слоты сохраняются, но переводятся в ручное заполнение оператором. Сценарии: ${escapeHtml(legacyCleanupScenarioText(slotSchema, scenarios))}.
+      </div>
+      ${total ? `
+        <div class="slot-schema-derived danger-panel">
+          <div class="metric-label">Найдены висячие ссылки: ${total}</div>
+          <div class="grid two">
+            <div>
+              <strong>Слоты</strong>
+              <ul>${slotRows || '<li>нет</li>'}</ul>
+            </div>
+            <div>
+              <strong>Этапы</strong>
+              <ul>${stageRows || '<li>нет</li>'}</ul>
+            </div>
+          </div>
+        </div>
+      ` : '<div class="slot-schema-derived"><div class="metric-label">Висячие ссылки не найдены</div><div class="meta">Активные слоты и этапы не ссылаются на отсутствующие профили разрешения.</div></div>'}
+      ${orphanRepairPreviewPanel(slotSchema.slot_schema_id)}
+      <label class="checkbox-line">
+        <input type="checkbox" name="orphan_repair_confirm" value="true" ${total ? '' : 'disabled'}>
+        <span>Подтверждаю перевод слотов с отсутствующим профилем в ручное заполнение</span>
+      </label>
+      <div class="scenario-editor-actions">
+        <button type="button" data-action="orphan-repair-preview" ${total ? '' : 'disabled'}>Предпросмотр исправления</button>
+        <button class="danger" type="button" data-action="orphan-repair-apply" ${total ? '' : 'disabled'}>Применить исправление</button>
+      </div>
+    </details>
+  `;
+}
+
 function legacyCleanupPreviewPanel(slotSchemaId) {
   const result = state.legacyCleanupPreview;
   if (!result || result.summary?.slot_schema_id !== slotSchemaId) {
@@ -2214,7 +2400,7 @@ function legacyCleanupPreviewPanel(slotSchemaId) {
   `;
 }
 
-function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], profile = null }) {
+function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], profile = null, title = 'Связи слотов и профилей' }) {
   if (!slotSchema) return '';
   const schemaSlotIds = new Set((slotSchema.slots || []).map((slot) => slot.slot_id));
   const remembered = state.legacyCleanupRequest?.slot_schema_id === slotSchema.slot_schema_id
@@ -2230,7 +2416,7 @@ function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], p
     profileMatchesSlotSchema(item, slotSchema) || selectedProfileIds.has(item.profile_id),
   );
   if (!candidateProfiles.length && !(slotSchema.slots || []).length) {
-    return '';
+    return '<div class="empty">В выбранной схеме нет слотов и связанных профилей для обслуживания.</div>';
   }
   const slotRows = (slotSchema.slots || []).map((slot) => `
     <label class="checkbox-line">
@@ -2253,11 +2439,11 @@ function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], p
   }).join('');
   return `
     <details class="launch-editor legacy-cleanup" data-legacy-cleanup-panel open>
-      <summary>Очистка legacy-связок слотов и профилей</summary>
+      <summary>${escapeHtml(title)}</summary>
       <input type="hidden" name="cleanup_slot_schema_id" value="${escapeHtml(slotSchema.slot_schema_id)}">
       <div class="meta">
-        Используйте этот блок, когда обычное удаление слота или профиля упирается в циклическую ссылку.
-        Очистка одной операцией меняет схему слотов и профили разрешения. Сценарии: ${escapeHtml(legacyCleanupScenarioText(slotSchema, scenarios))}.
+        Используйте этот инструмент, когда нужно удалить слот или профиль вместе со связанными правилами разрешения.
+        Операция одним применением обновляет схему слотов и профили разрешения. Сценарии: ${escapeHtml(legacyCleanupScenarioText(slotSchema, scenarios))}.
       </div>
       <div class="grid two">
         <div>
@@ -2280,6 +2466,35 @@ function renderLegacyCleanupPanel({ slotSchema, profiles = [], scenarios = [], p
       </div>
     </details>
   `;
+}
+
+function addProvisionalResolutionSlots(slots, profile) {
+  const known = new Set((slots || []).map((slot) => slot.slot_id).filter(Boolean));
+  const outputRules = profileOutputRules(profile);
+  const outputBySlotId = new Map(outputRules.map((rule) => [rule.slot_id, rule]));
+  const slotIds = [
+    profile?.target_slot_id,
+    ...outputRules.map((rule) => rule.slot_id),
+  ].filter(Boolean);
+  for (const slotId of slotIds) {
+    if (!slotId || known.has(slotId)) continue;
+    const rule = outputBySlotId.get(slotId) || {};
+    slots.push({
+      slot_id: slotId,
+      display_name: humanizeTechnicalKey(slotId),
+      priority_group: 'context',
+      required: Boolean(rule.required_for_success),
+      fill_method: 'resolution_profile',
+      resolution_profile_id: profile?.profile_id || '',
+      scenario_ids: [],
+      scenario_names: [],
+      missing_scenario_names: [],
+      __draft_source: true,
+      __draft_only: true,
+      __unsaved: true,
+    });
+    known.add(slotId);
+  }
 }
 
 function buildResolutionSlotContext(profile, slotSchemas, scenarios) {
@@ -2319,7 +2534,8 @@ function buildResolutionSlotContext(profile, slotSchemas, scenarios) {
     scenario_names: selectedScenario ? [selectedScenario.display_name || selectedScenario.scenario_id] : [],
     missing_scenario_names: [],
   }));
-  const draftOnlySlotIds = new Set(slots.filter((slot) => slot.__draft_only).map((slot) => slot.slot_id));
+  addProvisionalResolutionSlots(slots, profile);
+  const draftOnlySlotIds = new Set(slots.filter((slot) => slot.__draft_only || slot.__unsaved).map((slot) => slot.slot_id));
   return {
     selectedScenario,
     schema,
@@ -2408,14 +2624,14 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
   }
   options.push(`<option value="__custom__" ${customSelected ? 'selected' : ''}>Новый слот: указать ключ ниже</option>`);
   return `
-    <label>Целевой слот
+    <label>Основной слот результата
       <select name="target_slot_id" data-resolution-target-slot>${options.join('')}</select>
-      <span class="field-help">Для slot-level профиля выберите основной слот. Для stage-level профиля оставьте "без целевого слота".</span>
+      <span class="field-help">Необязательная подсказка для отображения главного результата. Реальный список заполняемых слотов задается ниже в "Выходные слоты и порядок заполнения".</span>
     </label>
     <label data-resolution-target-slot-custom ${customSelected ? '' : 'hidden'}>
       Ключ нового слота
       <input name="target_slot_id_custom" value="" autocomplete="off" placeholder="user_login">
-      <span class="field-help">Используется только для первого создания профиля до добавления слота в схему. После создания слота выберите его из списка.</span>
+      <span class="field-help">Используется только если основной слот результата еще не добавлен в схему слотов.</span>
     </label>
   `;
 }
@@ -2475,8 +2691,8 @@ function resolutionDraftSlotWarningPanel(slotContext, profile, outputRules) {
   }
   return `
     <div class="slot-schema-derived warning-panel">
-      <div class="metric-label">Слот из черновика схемы</div>
-      <div class="meta">${escapeHtml(`Слоты ${draftSlotIds.join(', ')} есть только в черновике схемы слотов. Профиль можно сохранить как черновик; для валидации и активации сначала активируйте схему слотов.`)}</div>
+      <div class="metric-label">Слот из черновика</div>
+      <div class="meta">${escapeHtml(`Слоты ${draftSlotIds.join(', ')} есть только в черновике схемы слотов или текущей форме. Профиль можно сохранить как черновик; для валидации и активации используйте пакет профиля и схемы слотов.`)}</div>
     </div>
   `;
 }
@@ -2493,13 +2709,6 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <div class="scenario-title">${escapeHtml(profile.display_name)}</div>
         </div>
         ${resolutionProfileUsagePanel(slotSchemas, scenarios, profile.profile_id)}
-        ${renderLegacyCleanupPanel({
-          slotSchema: (slotSchemas || []).find((schema) => schema.slot_schema_id === profile.slot_schema_id)
-            || (slotSchemas || []).find((schema) => profileCleanupSlotIds(profile, schema).length),
-          profiles,
-          scenarios,
-          profile,
-        })}
         <button class="danger" type="submit">Удалить профиль</button>
       </form>
     `;
@@ -2524,6 +2733,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
   const outputRules = profileOutputRules(current);
   const llmScript = current.llm_resolution_script || {};
   const useLlmAfterSteps = current.use_llm_after_steps !== false;
+  const fillsOutputSlots = Boolean((outputRules || []).length || current.target_slot_id);
   const contextTools = toolsForScenario(
     tools,
     scenarios,
@@ -2531,7 +2741,8 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
     enrichmentSteps.map((step) => step.react_call),
   );
 	  return `
-	    <form class="scenario-editor panel" data-form="resolution-profile-editor">
+    <form class="scenario-editor panel" data-form="resolution-profile-editor">
+	      ${draftInfoPanel(current)}
 	      <input type="hidden" name="profile_id" value="${escapeHtml(current.profile_id || '')}">
 	      <input type="hidden" name="slot_schema_id" value="${escapeHtml(slotContext.schema?.slot_schema_id || current.slot_schema_id || '')}">
 	      <div class="grid two">
@@ -2545,7 +2756,6 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <select name="resolution_slot_scenario_id" data-resolution-slot-scenario>${resolutionScenarioOptions(scenarios, slotContext.selectedScenario?.scenario_id || '')}</select>
           <span class="field-help">Список целевых и выходных слотов строится из схемы слотов выбранного сценария.</span>
         </label>
-        ${resolutionTargetSlotField(slotContext, current.target_slot_id || '')}
         <label>Лимит попыток
           <input name="max_attempts" type="number" min="1" max="10" value="${escapeHtml(current.max_attempts || 1)}">
           <span class="field-help">Сколько раз можно уточнять признаки и повторять операцию разрешения.</span>
@@ -2554,7 +2764,17 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <input type="checkbox" name="use_llm_after_steps" value="true" data-resolution-use-llm ${useLlmAfterSteps ? 'checked' : ''}>
           <span>Использовать LLM после шагов</span>
         </label>
+        <label class="checkbox-line">
+          <input type="checkbox" name="fills_output_slots" value="true" data-resolution-fills-slots ${fillsOutputSlots ? 'checked' : ''}>
+          <span>Профиль заполняет слоты</span>
+        </label>
       </div>
+      <details class="launch-editor" data-resolution-slot-fill-section ${fillsOutputSlots ? '' : 'hidden'}>
+        <summary>Дополнительно</summary>
+        <div class="grid two">
+          ${resolutionTargetSlotField(slotContext, current.target_slot_id || '')}
+        </div>
+      </details>
       ${reactScopeWarningPanel(enrichmentSteps, slotContext.selectedScenario)}
       <fieldset class="launch-editor enrichment-builder">
         <legend>Обогащение контекста</legend>
@@ -2564,7 +2784,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
         </div>
         <button type="button" data-action="enrichment-step-add">Добавить шаг обогащения</button>
       </fieldset>
-      <fieldset class="launch-editor">
+      <fieldset class="launch-editor" data-resolution-slot-fill-section ${fillsOutputSlots ? '' : 'hidden'}>
         <legend>Выходные слоты и порядок заполнения</legend>
         <div class="meta">Профиль может заполнить только выбранные слоты сценария. Порядок определяет, в какой последовательности LLM-правило должно пытаться сформировать значения.</div>
         <div class="parameter-binding-list" data-resolution-output-list>
@@ -2614,7 +2834,8 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
       </fieldset>
       ${resolutionProfileUsagePanel(slotSchemas, scenarios, current.profile_id)}
       <div class="scenario-editor-actions">
-        <button class="primary" type="submit">${state.resolutionOperation === 'create' ? 'Создать профиль' : 'Сохранить профиль'}</button>
+        <button class="primary" type="submit" data-config-draft-action="activate">${state.resolutionOperation === 'create' ? 'Активировать профиль' : 'Активировать профиль'}</button>
+        <button class="primary" type="submit" data-config-draft-action="activate_bundle">Активировать пакет</button>
       </div>
     </form>
   `;
@@ -2642,12 +2863,22 @@ function profileOutputSlotIds(profile = {}) {
     .filter(Boolean);
 }
 
+function normalizeResolutionOutputSourceHint(value = '') {
+  const hint = String(value || '').trim();
+  if (!hint) return '';
+  if (/^(paramReAct|step)\./.test(hint)) {
+    return `\${${hint}}`;
+  }
+  return hint;
+}
+
 function profileOutputRules(profile = {}) {
+  const hasExplicitOutputRules = Object.prototype.hasOwnProperty.call(profile, 'output_slots_order');
   const rules = (profile.output_slots_order || []).map((rule, index) => ({
     slot_id: rule.slot_id || '',
     order: rule.order || index + 1,
     required_for_success: rule.required_for_success ?? rule.slot_id === profile.target_slot_id,
-    source_hint: rule.source_hint || rule.slot_id || '',
+    source_hint: normalizeResolutionOutputSourceHint(rule.source_hint || rule.slot_id || ''),
     fallback: rule.fallback || (rule.slot_id === profile.target_slot_id ? 'ask_clarification' : 'leave_empty'),
   }));
   if (!rules.length) {
@@ -2661,7 +2892,7 @@ function profileOutputRules(profile = {}) {
       });
     }
   }
-  if (profile.target_slot_id && !rules.some((rule) => rule.slot_id === profile.target_slot_id)) {
+  if (!hasExplicitOutputRules && profile.target_slot_id && !rules.some((rule) => rule.slot_id === profile.target_slot_id)) {
     rules.unshift({
       slot_id: profile.target_slot_id,
       order: 1,
@@ -3173,7 +3404,6 @@ function resultFieldsFromTool(tool) {
 }
 
 function renderResolutionOutputRows(rules, slotContext) {
-  const rows = rules.length ? rules : [{ slot_id: '', order: 1, required_for_success: true, source_hint: '', fallback: 'ask_clarification' }];
   return `
     <div class="parameter-binding-header resolution-output-header">
       <span>Слот</span>
@@ -3183,32 +3413,43 @@ function renderResolutionOutputRows(rules, slotContext) {
       <span>Если не заполнен</span>
       <span></span>
     </div>
-    ${rows.map((rule) => renderResolutionOutputRow(rule, slotContext)).join('')}
+    ${rules.length ? rules.map((rule) => renderResolutionOutputRow(rule, slotContext)).join('') : resolutionOutputEmptyStateHtml()}
   `;
 }
 
-function resolutionOutputSlotOptions(slotContext, selectedSlotId) {
+function resolutionOutputEmptyStateHtml() {
+  return '<div class="empty compact" data-resolution-output-empty>Выходные слоты не выбраны. Добавьте слот только если профиль должен записывать результат в схему слотов.</div>';
+}
+
+function resolutionOutputSlotOptions(slotContext, selectedSlotId, options = {}) {
   const slots = slotContext.slots || [];
   const selectedExists = slots.some((slot) => slot.slot_id === selectedSlotId);
-  const customSelected = !selectedSlotId && !slots.length;
-  const options = [
+  const customSelected = options.customSelected ?? (!selectedSlotId && !slots.length);
+  const optionItems = [
     `<option value="" ${!selectedSlotId && slots.length ? 'selected' : ''}>${slots.length ? 'выберите слот' : 'нет существующих слотов'}</option>`,
     ...slots.map((slot) => `<option value="${escapeHtml(slot.slot_id)}" ${
       slot.slot_id === selectedSlotId ? 'selected' : ''
     }>${escapeHtml(slotOptionLabel(slot, slotContext))}</option>`),
   ];
-  if (selectedSlotId && !selectedExists) {
-    options.unshift(
+  if (selectedSlotId && !selectedExists && !customSelected) {
+    optionItems.unshift(
       `<option value="${escapeHtml(selectedSlotId)}" selected>${escapeHtml(`Слот пока не найден в выбранной схеме: ${selectedSlotId}`)}</option>`,
     );
   }
-  options.push(`<option value="__custom__" ${customSelected ? 'selected' : ''}>Новый слот: указать ключ ниже</option>`);
-  return options.join('');
+  optionItems.push(`<option value="__custom__" ${customSelected ? 'selected' : ''}>Новый слот: указать ключ ниже</option>`);
+  return optionItems.join('');
 }
 
 function renderResolutionOutputRow(rule = {}, slotContext = { slots: [] }, options = {}) {
-  const customSelected = options.customSelected ?? (!rule.slot_id && !(slotContext.slots || []).length);
-  const slotOptionsHtml = options.slotOptionsHtml || resolutionOutputSlotOptions(slotContext, rule.slot_id || '');
+  const slots = slotContext.slots || [];
+  const selectedExists = Boolean(rule.slot_id) && slots.some((slot) => slot.slot_id === rule.slot_id);
+  const customSelected = options.customSelected ?? ((Boolean(rule.slot_id) && !selectedExists) || (!rule.slot_id && !slots.length));
+  const customSlotValue = options.customSlotValue ?? (customSelected ? rule.slot_id || '' : '');
+  const slotOptionsHtml = options.slotOptionsHtml || resolutionOutputSlotOptions(
+    slotContext,
+    customSelected ? '' : rule.slot_id || '',
+    { customSelected },
+  );
   const fallbackOptions = [
     ['ask_clarification', 'уточнить у клиента'],
     ['operator_handoff', 'эскалировать оператору'],
@@ -3223,7 +3464,7 @@ function renderResolutionOutputRow(rule = {}, slotContext = { slots: [] }, optio
           <select data-resolution-output-slot>${slotOptionsHtml}</select>
         </label>
         <label data-resolution-output-slot-custom ${customSelected ? '' : 'hidden'}>Ключ нового выходного слота
-          <input data-resolution-output-slot-custom-value value="" autocomplete="off" placeholder="user_login">
+          <input data-resolution-output-slot-custom-value value="${escapeHtml(customSlotValue)}" autocomplete="off" placeholder="user_login">
           <span class="field-help">Используется для первого создания профиля, если выходной слот еще не добавлен в схему слотов.</span>
         </label>
       </div>
@@ -3234,8 +3475,8 @@ function renderResolutionOutputRow(rule = {}, slotContext = { slots: [] }, optio
         <select data-resolution-output-required>${booleanOptions(rule.required_for_success ?? false)}</select>
       </label>
       <label>Источник значения
-        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="login">
-        <span class="field-help">Поле или путь в результате последнего шага, например login или 0.user_login. Если LLM после шагов выключена, значение берется напрямую по этому пути.</span>
+        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="${escapeHtml('${step.step1.react.get_user.output.login}')}">
+        <span class="field-help">Для многошаговых профилей используйте ${escapeHtml('${step.<step_id>.react.<вызов>.output.<поле>}')}. Голое имя поля, например subject, читается из последнего шага.</span>
       </label>
       <label>Если не заполнен
         <select data-resolution-output-fallback>${fallbackOptions}</select>
@@ -3261,7 +3502,7 @@ function slotResolutionPromptTemplate(config = state.lastData.modelConfig || {})
 }
 
 function renderSlotResolutionPromptTemplate(template, profile = {}) {
-  const outputSlots = profileOutputSlotIds(profile).join(', ') || profile.target_slot_id || 'целевой слот';
+  const outputSlots = profileOutputSlotIds(profile).join(', ') || profile.target_slot_id || 'слот результата';
   const stepRefs = profileEnrichmentSteps(profile)
     .map((step, index) => {
       const stepId = normalizeEnrichmentStepId(step.step_id, index);
@@ -3315,6 +3556,30 @@ function resolutionProfileCreateTemplate(source, profiles) {
   };
 }
 
+function defaultResolutionProfileDescription(profile = {}, slots = []) {
+  const profileName = profile.display_name || profile.profile_id || 'профиль разрешения';
+  const slotNames = (slots || [])
+    .map((slot) => slot.display_name || slot.slot_id)
+    .filter(Boolean);
+  const slotText = slotNames.length
+    ? ` для слотов: ${slotNames.join(', ')}`
+    : '';
+  return `Профиль разрешения "${profileName}"${slotText}.`;
+}
+
+function ensureResolutionProfileDescription(profile, slots = []) {
+  if (!String(profile?.description || '').trim()) {
+    profile.description = defaultResolutionProfileDescription(profile, slots);
+  }
+  return profile;
+}
+
+function ensureResolutionProfilesHaveDescriptions(profiles = []) {
+  for (const profile of profiles || []) {
+    ensureResolutionProfileDescription(profile);
+  }
+}
+
 function currentResolutionProfileById(profileId) {
   return (state.lastData.resolutionProfiles || [])
     .find((profile) => profile.profile_id === profileId) || null;
@@ -3340,12 +3605,21 @@ function formatScenarioNames(scenarios, scenarioIds) {
   return (scenarioIds || []).map((scenarioId) => byId[scenarioId] || scenarioId).join(', ') || 'н/д';
 }
 
+function routeReferenceLabel(route = {}) {
+  const id = route?.route_id || '';
+  const displayName = route?.display_name || '';
+  if (displayName && id && displayName !== id) {
+    return `${displayName} (${id})`;
+  }
+  return displayName || id || 'н/д';
+}
+
 function referenceOptions(items, idKey, selected, labelKey) {
   return (items || [])
     .map((item) => {
       const value = item[idKey];
       const rawLabel = typeof labelKey === 'function' ? labelKey(item) : item[labelKey];
-      const label = rawLabel || humanizeTechnicalKey(value);
+      const label = labelWithDraftState(item, rawLabel || humanizeTechnicalKey(value));
       return `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     })
     .join('');
@@ -3367,7 +3641,7 @@ function multiReferenceOptions(items, idKey, selectedValues, labelKey) {
     .map((item) => {
       const value = item[idKey];
       const rawLabel = typeof labelKey === 'function' ? labelKey(item) : item[labelKey];
-      const label = rawLabel || humanizeTechnicalKey(value);
+      const label = labelWithDraftState(item, rawLabel || humanizeTechnicalKey(value));
       return `<option value="${escapeHtml(value)}" ${selected.has(value) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     })
     .join('');
@@ -3553,12 +3827,8 @@ function defaultEscalationPolicyForScenario(scenario, policyId = '') {
       'two_tool_errors',
       'iteration_limit',
       'confidence_below_050',
-      'affected_users_threshold',
       'policy_blocked',
     ],
-    major_incident: {
-      affected_users_threshold: 10,
-    },
     handoff_package: [
       'slots',
       'react_history',
@@ -3683,6 +3953,7 @@ function renderSlotSchemaEditor({ slotSchema, slotSchemas, scenarios, resolution
     .join('');
   return `
     <form class="scenario-editor panel" data-form="slot-schema-editor">
+      ${draftInfoPanel(current)}
       <input type="hidden" name="slot_schema_id" value="${escapeHtml(current.slot_schema_id)}">
       <label>Название<input name="display_name" value="${escapeHtml(current.display_name)}" autocomplete="off"></label>
       <div class="slot-schema-derived">
@@ -3695,7 +3966,6 @@ function renderSlotSchemaEditor({ slotSchema, slotSchemas, scenarios, resolution
       </div>
       <div class="slot-stage-list" data-slot-stage-list>${stageCards}</div>
       <button type="button" data-action="slot-stage-add">Добавить этап</button>
-      ${renderLegacyCleanupPanel({ slotSchema: current, profiles: resolutionProfiles, scenarios })}
       ${usagePanel(scenarios, 'slot_schema_id', current.slot_schema_id)}
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.slotSchemaOperation === 'create' ? 'Создать схему слотов' : 'Сохранить слоты'}</button>
@@ -3778,6 +4048,9 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
   const keyLabel = slot.slot_id || 'Ключ не задан';
   const requiredLabel = required ? 'обязательный' : 'необязательный';
   const profile = resolutionProfiles.find((item) => item.profile_id === slot.resolution_profile_id);
+  const missingProfileId = fillMethod === 'resolution_profile' && slot.resolution_profile_id && !profile
+    ? slot.resolution_profile_id
+    : '';
   const methodLabel = profile?.display_name || visibleLabels[fillMethod] || fillMethod;
   const slotConfidenceSummary = hasConfidenceOverrides(slot.confidence_overrides || {})
     ? 'Пороги извлечения моделью: включено переопределение'
@@ -3786,16 +4059,21 @@ function renderSlotCard(slot = {}, order = '', open = false, resolutionProfiles 
     ? `<div class="slot-schema-derived">
         <div class="metric-label">Выбранный профиль разрешения</div>
         <div class="meta">
-          ${escapeHtml(profile.display_name)}. Целевой слот: ${escapeHtml(profile.target_slot_id || 'н/д')}.
+          ${escapeHtml(profile.display_name)}. Основной слот результата: ${escapeHtml(profile.target_slot_id || 'н/д')}.
           Выходы: ${escapeHtml(formatList(profileOutputSlotIds(profile)))}.
           Если слот не заполнен: ${escapeHtml(visibleLabels[profile.human_resolution_policy?.action] || profile.human_resolution_policy?.action || 'н/д')}.
           Сообщение: ${escapeHtml(profile.human_resolution_policy?.message_template || profile.fallback?.question || 'н/д')}.
         </div>
       </div>`
-    : `<div class="slot-schema-derived">
-        <div class="metric-label">Профиль разрешения не выбран</div>
-        <div class="meta">Если готового профиля еще нет, оставьте поле профиля пустым и сохраните слот: система создаст черновик профиля для этого слота. Затем настройте его в меню "Разрешение слотов".</div>
-      </div>`;
+    : missingProfileId
+      ? `<div class="slot-schema-derived danger-panel">
+          <div class="metric-label">Профиль разрешения отсутствует</div>
+          <div class="meta">Слот ссылается на ${escapeHtml(missingProfileId)}, но такого профиля нет в активной конфигурации. Исправьте связь в "Настройки" -> обслуживание конфигурации или выберите другой способ заполнения.</div>
+        </div>`
+      : `<div class="slot-schema-derived">
+          <div class="metric-label">Профиль разрешения не выбран</div>
+          <div class="meta">Если готового профиля еще нет, оставьте поле профиля пустым и сохраните слот: система создаст черновик профиля для этого слота. Затем настройте его в меню "Профили разрешения".</div>
+        </div>`;
   const openAttribute = open ? ' open' : '';
   return `
     <details class="slot-card" data-slot-card${openAttribute}>
@@ -4057,7 +4335,7 @@ function resolutionProfileOptions(profiles, selected, slotId) {
   });
   for (const profile of filtered) {
     options.push(
-      `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === selected ? 'selected' : ''}>${escapeHtml(profile.display_name)}</option>`,
+      `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === selected ? 'selected' : ''}>${escapeHtml(labelWithDraftState(profile, profile.display_name || profile.profile_id))}</option>`,
     );
   }
   return options.join('');
@@ -4067,7 +4345,7 @@ function stageResolutionProfileOptions(profiles, selected) {
   const options = ['<option value="">без профиля</option>'];
   for (const profile of profiles || []) {
     options.push(
-      `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === selected ? 'selected' : ''}>${escapeHtml(profile.display_name || profile.profile_id)}</option>`,
+      `<option value="${escapeHtml(profile.profile_id)}" ${profile.profile_id === selected ? 'selected' : ''}>${escapeHtml(labelWithDraftState(profile, profile.display_name || profile.profile_id))}</option>`,
     );
   }
   return options.join('');
@@ -4075,8 +4353,13 @@ function stageResolutionProfileOptions(profiles, selected) {
 
 function routeCreateTemplate(source, routes) {
   const template = source || routes[0] || {};
+  const linkedScenario = (state.lastData.serviceScenarios || [])
+    .find((scenario) => scenario.classification_route_id === template.route_id);
+  const routeIdBase = linkedScenario?.scenario_id
+    ? `route.${linkedScenario.scenario_id}`
+    : (template.route_id || 'route.custom');
   return {
-    route_id: nextConfigItemId(template.route_id || 'route.custom', routes, 'route_id'),
+    route_id: nextConfigItemId(routeIdBase, routes, 'route_id'),
     display_name: '',
     priority: template.priority || 'P3',
     route: template.route || 'agent_with_confirmation',
@@ -4118,11 +4401,12 @@ function renderRouteEditor({ route, routes, scenarios }) {
   }
   return `
     <form class="scenario-editor panel" data-form="route-editor">
+      ${draftInfoPanel(current)}
       <input type="hidden" name="route_id" value="${escapeHtml(current.route_id)}">
       <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
       <div class="grid two">
         <label>Приоритет<select name="priority">${optionList(['P1', 'P2', 'P3', 'P4'], current.priority)}</select></label>
-        <label>Решение маршрутизации<select name="route">${optionList(['auto_agent', 'agent_with_confirmation', 'human_review', 'major_incident', 'approver'], current.route)}</select></label>
+        <label>Решение маршрутизации<select name="route">${optionList(['auto_agent', 'agent_with_confirmation', 'human_review', 'approver'], current.route)}</select></label>
         <label>Состояние workflow<input name="workflow_state_id" value="${escapeHtml(current.workflow_state_id || '')}" autocomplete="off"></label>
         <label>До N категорий при низкой уверенности
           <input name="top_categories_on_low_confidence" type="number" min="1" max="5" value="${escapeHtml(current.top_categories_on_low_confidence || 3)}">
@@ -4178,6 +4462,7 @@ function renderPolicyEditor({ policy, policies, scenarios }) {
   }
   return `
     <form class="scenario-editor panel" data-form="policy-editor">
+      ${draftInfoPanel(current)}
       <input type="hidden" name="policy_id" value="${escapeHtml(current.policy_id)}">
       <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
       <div class="grid two">
@@ -4253,7 +4538,7 @@ function toolCatalogOptions(tools, selectedToolName) {
   return selectOptions(
     (tools || []).map((tool) => ({
       value: tool.tool_name,
-      label: tool.description ? `${tool.tool_name} — ${tool.description}` : tool.tool_name,
+      label: labelWithDraftState(tool, tool.description ? `${tool.tool_name} — ${tool.description}` : tool.tool_name),
     })),
     selected,
     'Каталог ReAct-вызовов пуст',
@@ -4421,8 +4706,8 @@ function referenceHelperWaitItems() {
 function referenceHelperStageItems() {
   return [
     ['0.input_text', '0. Текст обращения'],
-    ['0.slot_values', '0. Слоты после нормализации'],
-    ['1.resolution_state', '1. Разрешение слотов'],
+    ['0.slot_values', 'Этапы сценария: слоты после нормализации'],
+    ['1.resolution_state', 'Профили разрешения: состояние разрешения'],
     ['2.classification', '2. Классификация'],
     ['2.confidence', '2. Confidence'],
     ['5.final_decision', '5. Финальное решение'],
@@ -4461,10 +4746,11 @@ function referenceHelperStepItems(previousSteps = []) {
 }
 
 function isReferenceAutocompleteTextarea(target) {
-  if (target?.tagName !== 'TEXTAREA') return false;
+  if (!['TEXTAREA', 'INPUT'].includes(target?.tagName || '')) return false;
   return target?.matches?.(
     [
       '[data-enrichment-configuration-instruction]',
+      '[data-resolution-output-source]',
       '[name="llm_resolution_script_text"]',
       '[name="human_resolution_message_template"]',
       '[name="message_template"]',
@@ -4536,6 +4822,36 @@ function allKnownSlotsForReferences() {
   return Array.from(seen.values());
 }
 
+function currentSlotSchemaSlotsFromForm(form) {
+  const schemaId = form?.querySelector('[name="slot_schema_id"]')?.value?.trim() || state.slotSchemaId;
+  const knownSchema = (state.lastData.slotSchemas || [])
+    .find((schema) => schema.slot_schema_id === schemaId) || {};
+  const knownSlotIds = new Set((knownSchema.slots || []).map((slot) => slot.slot_id).filter(Boolean));
+  const slots = [];
+  const seen = new Set();
+  form?.querySelectorAll('[data-slot-card]')?.forEach((card) => {
+    const value = (name) => card.querySelector(`[name="${name}"]`)?.value?.trim() || '';
+    const slotId = value('slot_id');
+    if (!slotId || seen.has(slotId)) return;
+    const fillMethod = normalizeSlotFillMethod(value('fill_method'));
+    slots.push({
+      slot_id: slotId,
+      display_name: value('display_name') || humanizeTechnicalKey(slotId),
+      priority_group: value('priority_group') || 'context',
+      required: parseBoolean(value('required')),
+      fill_method: fillMethod,
+      scenario_ids: [],
+      scenario_names: [],
+      missing_scenario_names: [],
+      __draft_source: true,
+      __draft_only: !knownSlotIds.has(slotId),
+      __unsaved: !knownSlotIds.has(slotId),
+    });
+    seen.add(slotId);
+  });
+  return slots.length ? slots : allKnownSlotsForReferences();
+}
+
 function allKnownChannelsForReferences() {
   return state.lastData.interactionChannels || [];
 }
@@ -4554,6 +4870,19 @@ function genericReferenceAutocompleteContext() {
 function referenceAutocompleteContextForTextarea(textarea, fragment = null) {
   const form = textarea.closest('form');
   if (!form) return genericReferenceAutocompleteContext();
+  if (
+    form.dataset.form === 'slot-schema-editor'
+    && textarea.matches('[name="user_question"], [name="extraction_instruction"], [name="operator_hint"]')
+  ) {
+    return {
+      slots: currentSlotSchemaSlotsFromForm(form),
+      channels: allKnownChannelsForReferences(),
+      tools: [],
+      selectedTool: null,
+      parameterTools: [],
+      previousSteps: [],
+    };
+  }
   if (textarea.matches('[data-enrichment-configuration-instruction]')) {
     const card = textarea.closest('[data-enrichment-step-card]');
     const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
@@ -4598,6 +4927,19 @@ function referenceAutocompleteContextForTextarea(textarea, fragment = null) {
       tools,
       selectedTool: null,
       parameterTools: referenceParameterTools(tools, null, referencedTools),
+      previousSteps: steps,
+    };
+  }
+  if (textarea.matches('[data-resolution-output-source]')) {
+    const slotContext = currentResolutionSlotContextFromForm(form);
+    const steps = safeEnrichmentStepsFromForm(form);
+    const tools = currentResolutionToolsFromForm(form, steps);
+    return {
+      slots: slotContext.slots || [],
+      channels: allKnownChannelsForReferences(),
+      tools,
+      selectedTool: null,
+      parameterTools: [],
       previousSteps: steps,
     };
   }
@@ -4681,7 +5023,7 @@ function parseBindingString(binding) {
 function slotOptionLabel(slot, slotContext) {
   const base = `${slot.display_name || slot.slot_id} (${slot.slot_id})`;
   const flags = [
-    slot.__draft_only ? 'черновик' : '',
+    slot.__unsaved ? 'новый в форме' : slot.__draft_only ? 'черновик' : '',
     slot.required ? 'обязательный' : 'необязательный',
     visibleLabels[slot.fill_method] || slot.fill_method,
     visibleLabels[slot.priority_group] || slot.priority_group,
@@ -4739,6 +5081,7 @@ function renderPromptPackEditor({ promptPack, packs, scenarios }) {
   `).join('');
   return `
     <form class="scenario-editor panel" data-form="prompt-pack-editor">
+      ${draftInfoPanel(current)}
       <input type="hidden" name="prompt_pack_id" value="${escapeHtml(current.prompt_pack_id)}">
       <input type="hidden" name="status" value="${escapeHtml(current.status || 'draft')}">
       <input type="hidden" name="active_version" value="${escapeHtml(current.active_version || 'v1')}">
@@ -5280,23 +5623,23 @@ async function renderKnowledge() {
 
 async function loadExecutionCatalogContext({ includeAudit = false } = {}) {
   const requests = [
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/integration_endpoints'),
+    loadDraftAwareCollection('tools'),
+    loadDraftAwareCollection('integration_endpoints'),
     api('/admin/config/active/n8n_workflows'),
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/interaction_channels'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadDraftAwareCollection('interaction_channels'),
   ];
   if (includeAudit) {
     requests.push(api('/admin/security/audit?limit=30'));
   }
   const [toolsActive, endpointsActive, n8nActive, resolutionActive, channelsActive, audit] = await Promise.all(requests);
   const context = {
-    tools: toolsActive.payload?.tools || [],
-    endpoints: endpointsActive.payload?.endpoints || [],
+    tools: toolsActive.items || [],
+    endpoints: endpointsActive.items || [],
     workflows: n8nActive.payload?.workflows || [],
     matrices: [],
-    resolutionProfiles: resolutionActive.payload?.profiles || [],
-    channels: channelsActive.payload?.channels || [],
+    resolutionProfiles: resolutionActive.items || [],
+    channels: channelsActive.items || [],
     audit: audit || { events: [] },
   };
   state.lastData.toolCatalog = context.tools;
@@ -5474,7 +5817,7 @@ function endpointGroupedOptions(endpoints, selectedId) {
   }
   return groups.map(({ adapterType, items }) => `
     <optgroup label="${escapeHtml(visibleLabels[adapterType] || adapterType)}">
-      ${items.map((endpoint) => `<option value="${escapeHtml(endpoint.endpoint_id)}" ${endpoint.endpoint_id === selectedId ? 'selected' : ''}>${escapeHtml(endpointLabel(endpoint))}</option>`).join('')}
+      ${items.map((endpoint) => `<option value="${escapeHtml(endpoint.endpoint_id)}" ${endpoint.endpoint_id === selectedId ? 'selected' : ''}>${escapeHtml(labelWithDraftState(endpoint, endpointLabel(endpoint)))}</option>`).join('')}
     </optgroup>
   `).join('');
 }
@@ -5973,6 +6316,7 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
     .join('');
   return `
     <form class="scenario-editor panel" data-form="integration-endpoint-editor">
+      ${draftInfoPanel(current)}
       <div class="grid two">
         <label>Техническое имя подключения
           <input name="endpoint_id" value="${escapeHtml(current.endpoint_id)}" autocomplete="off" ${state.integrationEndpointOperation === 'modify' ? 'readonly' : ''}>
@@ -6398,6 +6742,7 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
   const retry = policy.retry || {};
   return `
     <form class="scenario-editor panel" data-form="tool-catalog-editor">
+      ${draftInfoPanel(current)}
       <div class="grid two">
         <label>Техническое имя ReAct-вызова
           <input name="tool_name" value="${escapeHtml(current.tool_name)}" autocomplete="off" ${state.toolCatalogOperation === 'modify' ? 'readonly' : ''}>
@@ -6475,6 +6820,7 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
   const unbindDisabled = !currentBinding;
   return `
     <form class="scenario-editor panel" data-form="operation-binding-editor">
+      ${draftInfoPanel(tool)}
       <div class="slot-schema-derived">
         <div class="metric-label">ReAct-вызов ИИ</div>
         <div class="meta">${escapeHtml(reactCallLabel(tool))}</div>
@@ -6638,8 +6984,22 @@ function schemaRequired(schema = {}) {
   return Array.isArray(schema.required) ? schema.required : [];
 }
 
+function schemaCompositionBranches(schema = {}) {
+  return ['allOf', 'anyOf', 'oneOf']
+    .flatMap((key) => (Array.isArray(schema[key]) ? schema[key] : []))
+    .filter((branch) => branch && typeof branch === 'object');
+}
+
 function schemaProperties(schema = {}) {
-  return schema.properties || {};
+  const result = { ...(schema.properties || {}) };
+  for (const branch of schemaCompositionBranches(schema)) {
+    for (const [name, property] of Object.entries(schemaProperties(branch))) {
+      if (!(name in result)) {
+        result[name] = property;
+      }
+    }
+  }
+  return result;
 }
 
 function schemaType(schema = {}) {
@@ -6664,12 +7024,13 @@ function schemaAtPath(schema = {}, path = '') {
 
 function schemaResultFieldNames(schema = {}, prefix = '') {
   const names = [];
-  for (const name of Object.keys(schemaProperties(schema))) {
+  const properties = schemaProperties(schema);
+  for (const name of Object.keys(properties)) {
     const path = prefix ? `${prefix}.${name}` : name;
     names.push(path);
-    const property = schemaProperties(schema)[name] || {};
+    const property = properties[name] || {};
     const nestedSchema = schemaType(property) === 'array' ? (property.items || {}) : property;
-    if (['object', 'array'].includes(schemaType(property)) && Object.keys(schemaProperties(nestedSchema)).length) {
+    if (['object', 'array'].includes(schemaType(property)) || Object.keys(schemaProperties(nestedSchema)).length) {
       names.push(...schemaResultFieldNames(nestedSchema, path));
     }
   }
@@ -6708,9 +7069,41 @@ function operationResponseFieldNames(operation = {}, resultMapping = {}) {
   ]));
 }
 
+const systemOperationParameters = new Set(['invocation']);
+
+function snakeCaseName(value = '') {
+  return String(value || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+}
+
+function schemaMarksAlias(schema = {}) {
+  const description = String(schema?.description || '').trim().toLowerCase();
+  return description.startsWith('alias')
+    || description.includes('alias accepted')
+    || description.includes('alias, принимаемый');
+}
+
+function isEndpointParameterAlias(name, names, schema = {}) {
+  const value = String(name || '');
+  if (schemaMarksAlias(schema) && !value.includes('_')) {
+    return true;
+  }
+  if (!/[A-Z]/.test(value)) {
+    return false;
+  }
+  const canonicalName = snakeCaseName(value);
+  return canonicalName !== value && names.has(canonicalName);
+}
+
+function isVisibleReactEndpointParameter(name, names, schema = {}) {
+  return !systemOperationParameters.has(name) && !isEndpointParameterAlias(name, names, schema);
+}
+
 function defaultVisibleParameterMapping(operation = {}) {
   const result = {};
-  for (const parameterName of operationParameterNames(operation, {})) {
+  const names = new Set(operationParameterNames(operation, {}));
+  const properties = schemaProperties(operation.request_schema || defaultOperationRequestSchema());
+  for (const parameterName of names) {
+    if (!isVisibleReactEndpointParameter(parameterName, names, properties[parameterName])) continue;
     result[parameterName] = `react:${parameterName}`;
   }
   return result;
@@ -6749,7 +7142,10 @@ function visibleContractFromBinding(operation = {}, binding = {}) {
   const parameterRequired = [];
   const requestSchema = operation.request_schema || defaultOperationRequestSchema();
   const requestRequired = new Set(schemaRequired(requestSchema));
+  const endpointNames = new Set(operationParameterNames(operation, binding.parameter_mapping || {}));
+  const endpointProperties = schemaProperties(requestSchema);
   for (const [endpointParameter, sourceRef] of Object.entries(binding.parameter_mapping || {})) {
+    if (!isVisibleReactEndpointParameter(endpointParameter, endpointNames, endpointProperties[endpointParameter])) continue;
     const parsed = parseBindingString(sourceRef);
     if (parsed.source !== 'react' || !parsed.value) continue;
     parameterProperties[parsed.value] = schemaPropertyForName(requestSchema, endpointParameter, parsed.value);
@@ -6981,17 +7377,11 @@ function operationBindingCompatibilityPanel(compatibility) {
 }
 
 function toolUsage(toolName, matrices, resolutionProfiles, channels) {
+  void channels;
   const refs = [];
   for (const profile of resolutionProfiles || []) {
     if ((profile.enrichment_steps || []).some((step) => step.react_call === toolName)) {
       refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
-    }
-  }
-  for (const channel of channels || []) {
-    for (const [label, action] of channelActionEntries(channel)) {
-      if (action.tool_name === toolName) {
-        refs.push(`Канал "${channel.display_name || channel.channel_id}", ${label}`);
-      }
     }
   }
   return refs;
@@ -7006,6 +7396,7 @@ function operationBindingUnbindDisabledReason(currentBinding, usage) {
 }
 
 function toolBindingUsage(toolName, endpointId, operationId, matrices, resolutionProfiles, channels) {
+  void channels;
   const refs = [];
   if (!toolName || !endpointId || !operationId) {
     return refs;
@@ -7019,30 +7410,7 @@ function toolBindingUsage(toolName, endpointId, operationId, matrices, resolutio
       refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
     }
   }
-  for (const channel of channels || []) {
-    for (const [label, action] of channelActionEntries(channel)) {
-      if (
-        action.tool_name === toolName
-        && action.endpoint_id === endpointId
-        && action.operation_id === operationId
-      ) {
-        refs.push(`Канал "${channel.display_name || channel.channel_id}", ${label}`);
-      }
-    }
-  }
   return refs;
-}
-
-function channelActionEntries(channel) {
-  const result = [
-    ['доставка вопроса', channel.question_delivery || {}],
-    ['незавершенное обсуждение', channel.incomplete_discussion_action || {}],
-    ['эскалация', channel.escalation_action || {}],
-  ];
-  for (const profile of channel.action_profiles || []) {
-    result.push([`профиль действия "${profile.display_name || profile.profile_id}"`, profile.action || {}]);
-  }
-  return result;
 }
 
 async function renderWorkflow() {
@@ -7066,10 +7434,10 @@ async function renderWorkflow() {
 async function renderModels() {
   const [models, active] = await Promise.all([
     api('/admin/models/config'),
-    api('/admin/config/active/model_routing'),
+    loadConfigEditPayload('model_routing'),
   ]);
   const config = normalizeModelConfig(active.payload || models);
-  state.modelRoutingBaseVersionId = active.active_version_id || '';
+  state.modelRoutingBaseVersionId = active.activeVersionId || '';
   state.lastData.modelConfig = config;
   const providerIds = modelProviderIds(config);
   const activeProvider = config.providers[config.active_provider] || config.providers[providerIds[0]];
@@ -7077,7 +7445,8 @@ async function renderModels() {
   elements.viewContent.innerHTML = [
     section(
       'Настройка моделей',
-      `<form class="scenario-editor panel" data-form="model-routing-editor">
+      `${draftInfoPanel(active.draft)}
+      <form class="scenario-editor panel" data-form="model-routing-editor">
         <div class="slot-schema-derived">
           <div class="metric-label">Подключения LiteLLM</div>
           <div class="meta">Каждое подключение описывает alias, модель и переменную окружения с ключом. Секрет можно ввести при сохранении; после сохранения значение очищается и показывается только статус. Новое подключение сначала сохраните, затем выберите его для маршрутов или сделайте активным.</div>
@@ -7118,7 +7487,7 @@ async function renderModels() {
             ${modelRouteField(config, 'classification', 'Классификация')}
             ${modelRouteField(config, 'summarization', 'Суммаризация')}
             ${modelRouteField(config, 'tool_selection', 'Выбор ReAct-вызовов')}
-            ${modelRouteField(config, 'slot_resolution', 'Разрешение слотов')}
+            ${modelRouteField(config, 'slot_resolution', 'Профили разрешения')}
           </div>
         </fieldset>
         <fieldset class="launch-editor">
@@ -7299,17 +7668,18 @@ function modelRouteField(config, routeKey, label) {
 }
 
 async function renderSystemPrompts() {
-  const active = await api('/admin/config/active/model_routing');
+  const active = await loadConfigEditPayload('model_routing');
   const config = normalizeModelConfig(active.payload || {});
-  state.modelRoutingBaseVersionId = active.active_version_id || '';
+  state.modelRoutingBaseVersionId = active.activeVersionId || '';
   state.lastData.modelConfig = config;
   elements.viewContent.innerHTML = [
     section(
       'Системные промпты',
-      `<form class="scenario-editor panel" data-form="system-prompts-editor">
+      `${draftInfoPanel(active.draft)}
+      <form class="scenario-editor panel" data-form="system-prompts-editor">
         <div class="slot-schema-derived">
-          <div class="metric-label">Разрешение слотов</div>
-          <div class="meta">Шаблон применяется к новым или пустым LLM-правилам в "Разрешение слотов". Уже сохраненные профили хранят свой итоговый prompt для воспроизводимости.</div>
+          <div class="metric-label">Профили разрешения</div>
+          <div class="meta">Шаблон применяется к новым или пустым LLM-правилам в "Профили разрешения". Уже сохраненные профили хранят свой итоговый prompt для воспроизводимости.</div>
         </div>
         <label>Prompt slot resolution
           <textarea name="slot_resolution_prompt" rows="9">${escapeHtml(slotResolutionPromptTemplate(config))}</textarea>
@@ -7321,6 +7691,61 @@ async function renderSystemPrompts() {
       </form>`,
     ),
   ].join('');
+}
+
+async function renderConfigMaintenance() {
+  const [slotSchemasConfig, resolutionProfilesConfig, scenariosConfig] = await Promise.all([
+    api('/admin/config/active/slot_schemas'),
+    api('/admin/config/active/attribute_resolution_profiles'),
+    api('/admin/config/active/service_scenarios'),
+  ]);
+  const slotSchemas = slotSchemasConfig.payload?.slot_schemas || [];
+  const profiles = resolutionProfilesConfig.payload?.profiles || [];
+  const scenarios = scenariosConfig.payload?.scenarios || [];
+  const requestedSchemaId = state.legacyCleanupRequest?.slot_schema_id || '';
+  if (requestedSchemaId && slotSchemas.some((schema) => schema.slot_schema_id === requestedSchemaId)) {
+    state.maintenanceSlotSchemaId = requestedSchemaId;
+  }
+  if (!slotSchemas.some((schema) => schema.slot_schema_id === state.maintenanceSlotSchemaId)) {
+    state.maintenanceSlotSchemaId = '';
+  }
+  const selected = slotSchemas.find((schema) => schema.slot_schema_id === state.maintenanceSlotSchemaId) || null;
+  const slotSchemaOptions = [
+    `<option value="" ${state.maintenanceSlotSchemaId ? '' : 'selected'}>выберите схему слотов</option>`,
+    ...slotSchemas.map((schema) => {
+      const label = schema.display_name || schema.slot_schema_id;
+      return `<option value="${escapeHtml(schema.slot_schema_id)}" ${schema.slot_schema_id === state.maintenanceSlotSchemaId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }),
+  ].join('');
+  elements.viewContent.innerHTML = [
+    section(
+      'Обслуживание конфигурации',
+      `<div class="slot-schema-derived">
+        <div class="metric-label">Административные операции</div>
+        <div class="meta">
+          Здесь собраны действия, которые меняют несколько связанных конфигурационных доменов одной операцией.
+          Они не являются ошибкой сценария и не влияют на обычное редактирование бизнес-логики.
+        </div>
+      </div>
+      <div class="toolbar compact">
+        <label>Схема слотов<select id="maintenanceSlotSchemaSelect">${slotSchemaOptions}</select></label>
+      </div>
+      ${selected
+        ? [
+            renderOrphanResolutionProfileRepairPanel({ slotSchema: selected, profiles, scenarios }),
+            renderLegacyCleanupPanel({ slotSchema: selected, profiles, scenarios }),
+          ].join('')
+        : '<div class="empty">Выберите схему слотов, чтобы обслужить связанные слоты и профили разрешения.</div>'}`,
+    ),
+  ].join('');
+  document.getElementById('maintenanceSlotSchemaSelect')?.addEventListener('change', (event) => {
+    state.maintenanceSlotSchemaId = event.target.value;
+    state.legacyCleanupPreview = null;
+    state.legacyCleanupRequest = null;
+    state.orphanRepairPreview = null;
+    state.orphanRepairRequest = null;
+    renderConfigMaintenance().catch((error) => setNotice(error.message || String(error), 'error'));
+  });
 }
 
 function modelSecretStatusLabel(providerId, provider = {}, runtime = {}) {
@@ -8325,60 +8750,123 @@ async function deleteScenarioForm() {
   await applyScenarioMutation('delete', { scenario_id: state.scenarioId });
 }
 
-async function ensureResolutionProfilesForSlots(slots) {
-  const slotsWithoutProfile = slots.filter((slot) =>
-    slot.fill_method === 'resolution_profile' && !slot.resolution_profile_id,
-  );
-  if (!slotsWithoutProfile.length) {
-    return;
+async function prepareResolutionProfilesForSlotSchemaBundle(slots) {
+  const resolutionSlots = slots.filter((slot) => slot.fill_method === 'resolution_profile');
+  if (!resolutionSlots.length) {
+    return null;
   }
 
-  const active = await api('/admin/config/active/attribute_resolution_profiles');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('attribute_resolution_profiles');
+  const payload = active.payload;
   const profiles = payload.profiles || [];
-  let changed = false;
+  const activeProfiles = active.activePayload?.profiles || [];
+  const activeProfilesById = new Map(
+    activeProfiles
+      .filter((profile) => profile.profile_id)
+      .map((profile) => [profile.profile_id, profile]),
+  );
+  const profilesById = new Map(
+    profiles
+      .filter((profile) => profile.profile_id)
+      .map((profile) => [profile.profile_id, profile]),
+  );
+  const missingProfileGroups = new Map();
+  const slotsWithoutProfile = [];
+  const bundleProfileIds = new Set();
+  let profilePayloadChanged = false;
 
-  for (const slot of slotsWithoutProfile) {
+  for (const slot of resolutionSlots) {
+    const profileId = String(slot.resolution_profile_id || '').trim();
+    const activeProfile = profileId ? activeProfilesById.get(profileId) : null;
+    if (activeProfile && profileOutputSlotIds(activeProfile).includes(slot.slot_id)) {
+      continue;
+    }
+    const workingProfile = profileId ? profilesById.get(profileId) : null;
+    if (workingProfile) {
+      bundleProfileIds.add(profileId);
+      continue;
+    }
+    if (profileId) {
+      if (!missingProfileGroups.has(profileId)) {
+        missingProfileGroups.set(profileId, []);
+      }
+      missingProfileGroups.get(profileId).push(slot);
+      bundleProfileIds.add(profileId);
+      continue;
+    }
+    const existingActiveProfile = activeProfiles.find((profile) => profileOutputSlotIds(profile).includes(slot.slot_id));
+    if (existingActiveProfile) {
+      slot.resolution_profile_id = existingActiveProfile.profile_id;
+      continue;
+    }
     const existingProfile = profiles.find((profile) => profileOutputSlotIds(profile).includes(slot.slot_id));
     if (existingProfile) {
       slot.resolution_profile_id = existingProfile.profile_id;
+      bundleProfileIds.add(existingProfile.profile_id);
       continue;
     }
+    slotsWithoutProfile.push(slot);
+  }
+
+  for (const [profileId, groupedSlots] of missingProfileGroups.entries()) {
+    const profile = resolutionProfileBootstrapTemplate(groupedSlots, profiles, profileId);
+    profiles.push(profile);
+    profilesById.set(profile.profile_id, profile);
+    for (const slot of groupedSlots) {
+      slot.resolution_profile_id = profile.profile_id;
+    }
+    bundleProfileIds.add(profile.profile_id);
+    profilePayloadChanged = true;
+  }
+
+  for (const slot of slotsWithoutProfile) {
     const profile = resolutionProfileBootstrapTemplate(slot, profiles);
     profiles.push(profile);
+    profilesById.set(profile.profile_id, profile);
     slot.resolution_profile_id = profile.profile_id;
-    changed = true;
+    bundleProfileIds.add(profile.profile_id);
+    profilePayloadChanged = true;
   }
 
-  if (!changed) {
-    return;
+  ensureResolutionProfilesHaveDescriptions(profiles);
+  if (!profilePayloadChanged && !bundleProfileIds.size) {
+    return null;
   }
   payload.profiles = profiles;
-  await activateConfigPayload('attribute_resolution_profiles', payload, active.active_version_id);
-  state.lastData.resolutionProfiles = profiles;
+  return {
+    domain: 'attribute_resolution_profiles',
+    payload,
+    baseVersionId: active.activeVersionId,
+    profileIds: Array.from(bundleProfileIds),
+  };
 }
 
-function resolutionProfileBootstrapTemplate(slot, profiles) {
-  const profileId = nextBootstrapProfileId(slot.slot_id, profiles);
-  const slotName = slot.display_name || humanizeTechnicalKey(slot.slot_id);
-  const question = slot.fallback_question
-    || slot.user_question
-    || `Уточните значение поля "${slotName}".`;
+function resolutionProfileBootstrapTemplate(slotOrSlots, profiles, preferredProfileId = '') {
+  const slotList = (Array.isArray(slotOrSlots) ? slotOrSlots : [slotOrSlots]).filter(Boolean);
+  const targetSlot = slotList.find((slot) => slot.required) || slotList[0] || {};
+  const profileId = preferredProfileId || nextBootstrapProfileId(targetSlot.slot_id, profiles);
+  const slotName = targetSlot.display_name || humanizeTechnicalKey(targetSlot.slot_id || 'attribute');
+  const slotNames = slotList.map((slot) => slot.display_name || humanizeTechnicalKey(slot.slot_id));
+  const question = slotList.length > 1
+    ? `Уточните данные для заполнения: ${slotNames.join(', ')}.`
+    : targetSlot.fallback_question
+      || targetSlot.user_question
+      || `Уточните значение поля "${slotName}".`;
   const profile = {
     profile_id: profileId,
     display_name: `Разрешение: ${slotName}`,
     status: 'active',
-    description: `Черновик профиля разрешения для слота ${slot.slot_id}. Настройте шаги обогащения и режим LLM в разделе "Разрешение слотов".`,
-    target_slot_id: slot.slot_id,
+    description: `Черновик профиля разрешения для слота ${targetSlot.slot_id || 'attribute'}. Настройте шаги обогащения и режим LLM в разделе "Профили разрешения".`,
+    target_slot_id: targetSlot.slot_id,
     use_llm_after_steps: true,
     enrichment_steps: [],
-    output_slots_order: [{
+    output_slots_order: slotList.map((slot, index) => ({
       slot_id: slot.slot_id,
-      order: 1,
-      required_for_success: true,
+      order: index + 1,
+      required_for_success: Boolean(slot.required) || slot.slot_id === targetSlot.slot_id,
       source_hint: slot.slot_id,
       fallback: 'ask_clarification',
-    }],
+    })),
     llm_resolution_script: {
       script_text: '',
       response_contract: defaultResolutionResponseContract(),
@@ -8399,6 +8887,7 @@ function resolutionProfileBootstrapTemplate(slot, profiles) {
     },
     max_attempts: 1,
   };
+  ensureResolutionProfileDescription(profile, slotList);
   profile.llm_resolution_script.script_text = defaultResolutionScriptText(profile);
   return profile;
 }
@@ -8423,9 +8912,8 @@ async function saveSlotSchemaForm(form) {
   const data = new FormData(form);
   const stages = parseSlotStages(form);
   const slots = stages.flatMap((stage) => stage.slots);
-  if (isConfigActivateAction()) {
-    await ensureResolutionProfilesForSlots(slots);
-  }
+  const profileBundle = await prepareResolutionProfilesForSlotSchemaBundle(slots);
+  ensureResolutionProfileSlotsLinked(slots);
   const slotSchema = {
     slot_schema_id: String(data.get('slot_schema_id') || '').trim(),
     display_name: String(data.get('display_name') || '').trim(),
@@ -8443,17 +8931,20 @@ async function saveSlotSchemaForm(form) {
       .map((slot) => slot.slot_id),
     slots: slots.map(({ question_order: _questionOrder, ...slot }) => slot),
   };
-  await applyConfigItemMutation({
-    domain: 'slot_schemas',
-    collectionKey: 'slot_schemas',
-    idKey: 'slot_schema_id',
-    item: slotSchema,
-    operation: state.slotSchemaOperation,
-    referenceKey: 'slot_schema_id',
-    stateIdKey: 'slotSchemaId',
-    stateOperationKey: 'slotSchemaOperation',
-    successNoun: 'Схема слотов',
-  });
+  await applySlotSchemaMutation(state.slotSchemaOperation, slotSchema, profileBundle);
+}
+
+function ensureResolutionProfileSlotsLinked(slots) {
+  const missing = (slots || []).find((slot) =>
+    slot.fill_method === 'resolution_profile' && !String(slot.resolution_profile_id || '').trim(),
+  );
+  if (!missing) {
+    return;
+  }
+  throw new Error(
+    `Для слота "${missing.display_name || missing.slot_id}" выберите профиль разрешения `
+    + 'или сохраните схему слотов пакетом с автосозданием профиля.',
+  );
 }
 
 async function deleteSlotSchemaForm() {
@@ -8700,11 +9191,17 @@ async function savePolicyForm(form) {
 
 async function saveConfidenceDefaultsForm(form) {
   const data = new FormData(form);
-  const active = await api('/admin/config/active/orchestrator_policy');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('orchestrator_policy');
+  const payload = active.payload;
   payload.confidence_defaults = parseConfidenceThresholdsFromForm(data, 'system_confidence', { required: true });
-  await submitConfigPayload('orchestrator_policy', payload, active.active_version_id, {
+  await submitConfigPayload('orchestrator_policy', payload, active.activeVersionId, {
     successMessage: (version) => `Системные пороги уверенности сохранены. Активирована версия ${version.version_id}.`,
+    onDraftSaved: async () => {
+      await renderScenarioReact();
+    },
+    onDraftValidated: async () => {
+      await renderScenarioReact();
+    },
     onActivated: async () => {
       await renderScenarioReact();
     },
@@ -8743,8 +9240,8 @@ async function ensureScenarioReactPolicy(scenario, settings) {
     throw new Error('Ошибок ReAct-вызовов подряд до эскалации не может быть больше лимита итераций.');
   }
 
-  const active = await api('/admin/config/active/orchestrator_policy');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('orchestrator_policy');
+  const payload = active.payload;
   const policies = payload.policies || [];
   let policyId = String(scenario.orchestrator_policy_id || '').trim();
   if (!policyId) {
@@ -8770,7 +9267,7 @@ async function ensureScenarioReactPolicy(scenario, settings) {
     policies.push(nextPolicy);
   }
   payload.policies = policies;
-  await activateConfigPayload('orchestrator_policy', payload, active.active_version_id);
+  await activateConfigPayload('orchestrator_policy', payload, active.activeVersionId);
   return policyId;
 }
 
@@ -8800,7 +9297,6 @@ async function saveInteractionChannelForm(form) {
     capabilities: parseChannelCapabilities(data),
     technical_profile: parseChannelTechnicalProfile(data),
     channel_parameters: parseChannelParameters(form),
-    question_delivery: parseChannelAction(data, 'question_delivery'),
     waiting_policy: {
       first_reminder_after_seconds: parseInt(data.get('first_reminder_after_seconds'), 10),
       discussion_timeout_seconds: parseInt(data.get('discussion_timeout_seconds'), 10),
@@ -8810,9 +9306,6 @@ async function saveInteractionChannelForm(form) {
       pause_sla_on_client_wait: parseBoolean(data.get('pause_sla_on_client_wait')),
       client_wait_auto_close_after_hours: parseInt(data.get('client_wait_auto_close_after_hours'), 10),
     },
-    incomplete_discussion_action: parseChannelAction(data, 'incomplete_discussion_action'),
-    escalation_action: parseChannelAction(data, 'escalation_action'),
-    action_profiles: parseChannelProfileCards(form),
     enabled: parseBoolean(data.get('enabled')),
   };
   await applyInteractionChannelMutation(state.interactionChannelOperation, channel);
@@ -8825,10 +9318,6 @@ function parseChannelCapabilities(data) {
     supports_work_order_creation: data.has('supports_work_order_creation'),
     supports_async_result: data.has('supports_async_result'),
   };
-}
-
-function currentChannelCapabilitiesFromForm(form) {
-  return parseChannelCapabilities(new FormData(form));
 }
 
 function parseChannelTechnicalProfile(data) {
@@ -8881,40 +9370,6 @@ async function deleteInteractionChannelForm() {
   await applyInteractionChannelMutation('delete', { channel_id: state.interactionChannelId });
 }
 
-function parseChannelAction(data, prefix) {
-  const action = {
-    action_type: String(data.get(`${prefix}_action_type`) || '').trim(),
-  };
-  for (const field of ['tool_name', 'endpoint_id', 'operation_id', 'message_template']) {
-    const value = String(data.get(`${prefix}_${field}`) || '').trim();
-    if (value) {
-      action[field] = value;
-    }
-  }
-  return action;
-}
-
-function parseChannelProfileCards(form) {
-  return Array.from(form.querySelectorAll('[data-channel-profile-card]')).map((card, index) => {
-    const value = (name) => card.querySelector(`[name="${name}"]`)?.value?.trim() || '';
-    const profile = {
-      profile_id: value('profile_id') || `custom_profile_${index + 1}`,
-      display_name: value('display_name'),
-      event_type: value('event_type'),
-      action: {
-        action_type: value('action_type'),
-      },
-    };
-    for (const field of ['tool_name', 'endpoint_id', 'operation_id', 'message_template']) {
-      const fieldValue = value(field);
-      if (fieldValue) {
-        profile.action[field] = fieldValue;
-      }
-    }
-    return profile;
-  });
-}
-
 async function savePromptPackForm(form) {
   const data = new FormData(form);
   const promptPack = {
@@ -8949,6 +9404,12 @@ async function saveModelRoutingForm(form) {
   const secretText = secretUpdateCount ? ` Обновлено секретов: ${secretUpdateCount}; для LiteLLM может потребоваться перезапуск.` : '';
   await submitConfigPayload('model_routing', payload, state.modelRoutingBaseVersionId, {
     successMessage: (version) => `Настройки моделей сохранены. Активирована версия ${version.version_id}.${secretText}`,
+    onDraftSaved: async () => {
+      await renderModels();
+    },
+    onDraftValidated: async () => {
+      await renderModels();
+    },
     onActivated: async () => {
       await renderModels();
     },
@@ -8957,7 +9418,7 @@ async function saveModelRoutingForm(form) {
 
 async function saveSystemPromptsForm(form) {
   const data = new FormData(form);
-  const active = await api('/admin/config/active/model_routing');
+  const active = await loadConfigEditPayload('model_routing');
   const config = normalizeModelConfig(active.payload || {});
   const slotResolutionPrompt = String(data.get('slot_resolution_prompt') || '').trim();
   if (!slotResolutionPrompt) {
@@ -8973,8 +9434,14 @@ async function saveSystemPromptsForm(form) {
       },
     },
   };
-  await submitConfigPayload('model_routing', payload, active.active_version_id, {
+  await submitConfigPayload('model_routing', payload, active.activeVersionId, {
     successMessage: (version) => `Системные промпты сохранены. Активирована версия ${version.version_id}.`,
+    onDraftSaved: async () => {
+      await renderSystemPrompts();
+    },
+    onDraftValidated: async () => {
+      await renderSystemPrompts();
+    },
     onActivated: async () => {
       await renderSystemPrompts();
     },
@@ -9068,7 +9535,7 @@ function modelPayloadFromForm(data) {
 }
 
 async function switchModelProvider(providerId) {
-  const active = await api('/admin/config/active/model_routing');
+  const active = await loadConfigEditPayload('model_routing');
   const config = normalizeModelConfig(active.payload || state.lastData.modelConfig || {});
   const provider = config.providers?.[providerId];
   if (!provider) {
@@ -9108,7 +9575,7 @@ async function switchModelProvider(providerId) {
   } else {
     payload.fallbacks = [];
   }
-  const version = await activateConfigPayload('model_routing', payload, active.active_version_id);
+  const version = await activateConfigPayload('model_routing', payload, active.activeVersionId);
   setNotice(`Активное подключение переключено на ${provider.display_name}. Активирована версия ${version.version_id}.`, 'success');
   await renderModels();
 }
@@ -9145,15 +9612,35 @@ async function saveResolutionProfileForm(form) {
   if (!humanResolutionMessage) {
     throw new Error('Укажите сообщение для уточнения у клиента или эскалации оператору.');
   }
-  const selectedTargetSlotId = String(data.get('target_slot_id') || '').trim();
-  const customTargetSlotId = String(data.get('target_slot_id_custom') || '').trim();
-  const targetSlotId = selectedTargetSlotId === '__custom__'
-    ? customTargetSlotId
-    : selectedTargetSlotId;
-  if (targetSlotId && !/^[a-z][a-z0-9_.-]*$/.test(targetSlotId)) {
-    throw new Error('Ключ целевого слота должен начинаться с латинской буквы и содержать только латиницу, цифры, _, - или точку.');
+  const fillsOutputSlots = form.querySelector('[data-resolution-fills-slots]')?.checked === true;
+  const profileDescription = String(data.get('description') || '').trim();
+  if (!profileDescription) {
+    throw new Error('Заполните описание профиля разрешения.');
   }
-  const outputRules = parseResolutionOutputRules(form, targetSlotId);
+  let targetSlotId = '';
+  let outputRules = [];
+  if (fillsOutputSlots) {
+    const selectedTargetSlotId = String(data.get('target_slot_id') || '').trim();
+    const customTargetSlotId = String(data.get('target_slot_id_custom') || '').trim();
+    targetSlotId = selectedTargetSlotId === '__custom__'
+      ? customTargetSlotId
+      : selectedTargetSlotId;
+    if (targetSlotId && !/^[a-z][a-z0-9_.-]*$/.test(targetSlotId)) {
+      throw new Error('Ключ целевого слота должен начинаться с латинской буквы и содержать только латиницу, цифры, _, - или точку.');
+    }
+    outputRules = parseResolutionOutputRules(form, targetSlotId);
+  }
+  const effectiveTargetSlotId = fillsOutputSlots && outputRules.length ? targetSlotId : '';
+  if (!effectiveTargetSlotId) {
+    const targetSelect = form.querySelector('[data-resolution-target-slot]');
+    const targetCustom = form.querySelector('[name="target_slot_id_custom"]');
+    if (targetSelect) {
+      targetSelect.value = '';
+    }
+    if (targetCustom) {
+      targetCustom.value = '';
+    }
+  }
   const slotContext = currentResolutionSlotContextFromForm(form);
   const enrichmentSteps = parseEnrichmentSteps(form);
   const existingProfile = currentResolutionProfileById(String(data.get('profile_id') || '').trim());
@@ -9161,7 +9648,7 @@ async function saveResolutionProfileForm(form) {
     profile_id: String(data.get('profile_id') || '').trim(),
 	    display_name: String(data.get('display_name') || '').trim(),
 	    status: existingProfile?.status || 'active',
-	    description: String(data.get('description') || '').trim(),
+	    description: profileDescription,
 	    slot_schema_id: slotContext.schema?.slot_schema_id || String(data.get('slot_schema_id') || '').trim(),
     use_llm_after_steps: form.querySelector('[name="use_llm_after_steps"]')?.checked === true,
     enrichment_steps: enrichmentSteps,
@@ -9176,8 +9663,8 @@ async function saveResolutionProfileForm(form) {
     },
     max_attempts: parseInt(data.get('max_attempts'), 10),
   };
-  if (targetSlotId) {
-    profile.target_slot_id = targetSlotId;
+  if (effectiveTargetSlotId) {
+    profile.target_slot_id = effectiveTargetSlotId;
   }
   if (!profile.llm_resolution_script.script_text) {
     profile.llm_resolution_script.script_text = defaultResolutionScriptText(profile);
@@ -9199,13 +9686,6 @@ async function saveResolutionProfileForm(form) {
   }
   if (Object.keys(profileThresholds).length) {
     profile.confidence_thresholds = profileThresholds;
-  }
-  const draftOnlySlotIds = profileDraftOnlySlotIds(profile, slotContext, outputRules);
-  if (draftOnlySlotIds.length && currentConfigSubmitAction() !== 'save') {
-    throw new Error(
-      `Слоты ${draftOnlySlotIds.join(', ')} есть только в черновике схемы слотов. `
-      + 'Сохраните профиль как черновик или сначала активируйте схему слотов.',
-    );
   }
   await applyResolutionProfileMutation(state.resolutionOperation, profile);
 }
@@ -9247,8 +9727,8 @@ function firstRemainingItemId(items, idKey, removedId) {
 }
 
 async function reassignScenarioReferenceBeforeDeleting(referenceKey, removedId, replacementId, noun) {
-  const scenariosActive = await api('/admin/config/active/service_scenarios');
-  const payload = JSON.parse(JSON.stringify(scenariosActive.payload));
+  const scenariosActive = await loadConfigEditPayload('service_scenarios');
+  const payload = scenariosActive.payload;
   let changed = false;
   for (const scenario of payload.scenarios || []) {
     if (scenario[referenceKey] !== removedId) {
@@ -9261,14 +9741,14 @@ async function reassignScenarioReferenceBeforeDeleting(referenceKey, removedId, 
     changed = true;
   }
   if (changed) {
-    await activateConfigPayload('service_scenarios', payload, scenariosActive.active_version_id);
+    await activateConfigPayload('service_scenarios', payload, scenariosActive.activeVersionId);
   }
 }
 
 async function reassignInteractionChannelBeforeDeleting(channelId, channels) {
   const replacementId = firstRemainingItemId(channels, 'channel_id', channelId);
-  const scenariosActive = await api('/admin/config/active/service_scenarios');
-  const payload = JSON.parse(JSON.stringify(scenariosActive.payload));
+  const scenariosActive = await loadConfigEditPayload('service_scenarios');
+  const payload = scenariosActive.payload;
   let changed = false;
   for (const scenario of payload.scenarios || []) {
     const allowed = scenario.allowed_channel_ids || [];
@@ -9290,7 +9770,7 @@ async function reassignInteractionChannelBeforeDeleting(channelId, channels) {
     changed = true;
   }
   if (changed) {
-    await activateConfigPayload('service_scenarios', payload, scenariosActive.active_version_id);
+    await activateConfigPayload('service_scenarios', payload, scenariosActive.activeVersionId);
   }
 }
 
@@ -9325,9 +9805,119 @@ function refreshSlotSchemaDerivedFields(slotSchema) {
     .map((slot) => slot.slot_id);
 }
 
-async function unlinkResolutionProfileFromSlotSchemas(profileId) {
+function slotIdsFromSlotSchema(slotSchema = {}) {
+  return new Set((slotSchema.stages || [])
+    .flatMap((stage) => stage.slots || [])
+    .concat(slotSchema.slots || [])
+    .map((slot) => slot.slot_id)
+    .filter(Boolean));
+}
+
+function findSlotInSlotSchema(slotSchema = {}, slotId = '') {
+  for (const stage of slotSchema.stages || []) {
+    const slot = (stage.slots || []).find((item) => item.slot_id === slotId);
+    if (slot) return slot;
+  }
+  return (slotSchema.slots || []).find((item) => item.slot_id === slotId) || null;
+}
+
+function ensureSlotSchemaStages(slotSchema = {}) {
+  if (!Array.isArray(slotSchema.stages) || !slotSchema.stages.length) {
+    slotSchema.stages = [{
+      stage_id: 'stage.default',
+      display_name: 'Слоты',
+      order: 1,
+      slots: slotSchema.slots || [],
+    }];
+  }
+  for (const stage of slotSchema.stages) {
+    if (!Array.isArray(stage.slots)) {
+      stage.slots = [];
+    }
+  }
+  return slotSchema.stages.sort((left, right) => Number(left.order || 999) - Number(right.order || 999));
+}
+
+function defaultResolutionProfileSlot(rule, profile) {
+  const slotId = rule.slot_id;
+  return {
+    slot_id: slotId,
+    display_name: humanizeTechnicalKey(slotId),
+    priority_group: 'context',
+    required: Boolean(rule.required_for_success),
+    fill_method: 'resolution_profile',
+    resolution_profile_id: profile.profile_id,
+  };
+}
+
+async function ensureSlotSchemaDraftForResolutionProfile(profile) {
+  if (!profile?.profile_id) {
+    return null;
+  }
   const active = await api('/admin/config/active/slot_schemas');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const payload = stripDraftMetadata(cloneJson(active.payload || {}));
+  const slotSchemas = payload.slot_schemas || [];
+  const outputSlotIds = new Set((profile.output_slots_order || [])
+    .map((rule) => rule.slot_id)
+    .filter(Boolean));
+  let changed = false;
+
+  for (const slotSchema of slotSchemas) {
+    const stages = ensureSlotSchemaStages(slotSchema);
+    let schemaChanged = false;
+    for (const stage of stages) {
+      for (const slot of stage.slots || []) {
+        if (slot.resolution_profile_id === profile.profile_id && !outputSlotIds.has(slot.slot_id)) {
+          schemaChanged = cleanupSlotResolutionProfileReference(slot, profile.profile_id) || schemaChanged;
+        }
+      }
+    }
+    if (schemaChanged) {
+      refreshSlotSchemaDerivedFields(slotSchema);
+      changed = true;
+    }
+  }
+
+  if (!profile.slot_schema_id || !outputSlotIds.size) {
+    return changed ? createConfigDraft('slot_schemas', payload, active.active_version_id || '') : null;
+  }
+
+  const slotSchema = slotSchemas.find((item) => item.slot_schema_id === profile.slot_schema_id);
+  if (!slotSchema) {
+    throw new Error(`Схема слотов для профиля не найдена: ${profile.slot_schema_id}.`);
+  }
+
+  const stages = ensureSlotSchemaStages(slotSchema);
+  const targetStage = stages[stages.length - 1];
+  for (const rule of profile.output_slots_order || []) {
+    const slotId = rule.slot_id;
+    if (!slotId) continue;
+    const existingSlot = findSlotInSlotSchema(slotSchema, slotId);
+    if (!existingSlot) {
+      targetStage.slots.push(defaultResolutionProfileSlot(rule, profile));
+      changed = true;
+      continue;
+    }
+    if (existingSlot.fill_method === 'resolution_profile' && existingSlot.resolution_profile_id !== profile.profile_id) {
+      existingSlot.resolution_profile_id = profile.profile_id;
+      changed = true;
+    }
+    if (rule.required_for_success && existingSlot.required !== true) {
+      existingSlot.required = true;
+      changed = true;
+    }
+  }
+
+  refreshSlotSchemaDerivedFields(slotSchema);
+  if (!changed) {
+    return null;
+  }
+  return createConfigDraft('slot_schemas', payload, active.active_version_id || '');
+}
+
+async function unlinkResolutionProfileFromSlotSchemas(profileId) {
+  const active = await loadConfigEditPayload('slot_schemas');
+  const payload = active.payload;
   let changed = false;
   for (const slotSchema of payload.slot_schemas || []) {
     const stages = slotSchema.stages?.length
@@ -9363,12 +9953,12 @@ async function unlinkResolutionProfileFromSlotSchemas(profileId) {
   if (!changed) {
     return null;
   }
-  return activateConfigPayload('slot_schemas', payload, active.active_version_id);
+  return activateConfigPayload('slot_schemas', payload, active.activeVersionId);
 }
 
 async function applyResolutionProfileMutation(operation, profile) {
-  const active = await api('/admin/config/active/attribute_resolution_profiles');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('attribute_resolution_profiles');
+  const payload = active.payload;
   const profiles = payload.profiles || [];
   const index = profiles.findIndex((item) => item.profile_id === profile.profile_id);
   if (operation === 'create') {
@@ -9392,25 +9982,34 @@ async function applyResolutionProfileMutation(operation, profile) {
   } else {
     throw new Error(`Неизвестная операция с профилем: ${operation}`);
   }
+  ensureResolutionProfilesHaveDescriptions(profiles);
   payload.profiles = profiles;
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('attribute_resolution_profiles', payload, active.active_version_id, {
-    successMessage: (version) => `Профиль ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.resolutionProfileId = profiles[0]?.profile_id || '';
-      } else {
-        state.resolutionProfileId = profile.profile_id;
-        state.resolutionOperation = 'modify';
-      }
-      await renderResolutionProfiles();
-    },
-  });
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.resolutionProfileId = profiles[0]?.profile_id || '';
+    } else {
+      state.resolutionProfileId = profile.profile_id;
+      state.resolutionOperation = 'modify';
+    }
+    await renderResolutionProfiles();
+  };
+  if (operation === 'delete') {
+    await submitConfigPayload('attribute_resolution_profiles', payload, active.activeVersionId, {
+      successMessage: (version) => `Профиль ${actionText}. Активирована версия ${version.version_id}.`,
+      onDraftSaved: syncSelection,
+      onDraftValidated: syncSelection,
+      onActivated: syncSelection,
+    });
+    return;
+  }
+  await submitResolutionProfilePayload(payload, active.activeVersionId, profile, actionText);
+  await syncSelection();
 }
 
 async function applyPromptPackMutation(operation, promptPack) {
-  const active = await api('/admin/config/active/prompt_packs');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('prompt_packs');
+  const payload = active.payload;
   const packs = payload.packs || [];
   const index = packs.findIndex((item) => item.prompt_pack_id === promptPack.prompt_pack_id);
   if (operation === 'create') {
@@ -9441,32 +10040,35 @@ async function applyPromptPackMutation(operation, promptPack) {
   }
   payload.packs = packs;
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('prompt_packs', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.promptPackId = packs[0]?.prompt_pack_id || '';
+    } else {
+      state.promptPackId = promptPack.prompt_pack_id;
+      state.promptPackOperation = 'modify';
+    }
+    await renderScenarioPrompts();
+  };
+  await submitConfigPayload('prompt_packs', payload, active.activeVersionId, {
     successMessage: (version) => `Пакет промптов ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.promptPackId = packs[0]?.prompt_pack_id || '';
-      } else {
-        state.promptPackId = promptPack.prompt_pack_id;
-        state.promptPackOperation = 'modify';
-      }
-      await renderScenarioPrompts();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function applyIntegrationEndpointMutation(operation, endpoint) {
   const [active, toolsActive, n8nActive] = await Promise.all([
-    api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/tools'),
+    loadConfigEditPayload('integration_endpoints'),
+    loadDraftAwareCollection('tools'),
     api('/admin/config/active/n8n_workflows'),
   ]);
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const payload = active.payload;
   const n8nPayload = JSON.parse(JSON.stringify(n8nActive.payload || { schema_version: '1.0', workflows: [] }));
   const endpoints = payload.endpoints || [];
   const endpointId = endpoint.endpoint_id;
   const index = endpoints.findIndex((item) => item.endpoint_id === endpointId);
-  const tools = toolsActive.payload?.tools || [];
+  const tools = toolsActive.items || [];
   const workflows = n8nPayload.workflows || [];
   const clearedWorkflowRefs = [];
   if (operation === 'create') {
@@ -9515,33 +10117,36 @@ async function applyIntegrationEndpointMutation(operation, endpoint) {
   const cleanupText = clearedWorkflowRefs.length
     ? ` Очищены ссылки n8n workflow: ${clearedWorkflowRefs.join(', ')}. Версия workflow: ${workflowsVersion.version_id}.`
     : '';
-  await submitConfigPayload('integration_endpoints', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
+    } else {
+      state.integrationEndpointId = endpointId;
+      state.integrationEndpointOperation = 'modify';
+    }
+    await renderIntegrations();
+  };
+  await submitConfigPayload('integration_endpoints', payload, active.activeVersionId, {
     successMessage: (version) => `Подключение ${actionText}. Активирована версия ${version.version_id}.${cleanupText}`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
-      } else {
-        state.integrationEndpointId = endpointId;
-        state.integrationEndpointOperation = 'modify';
-      }
-      await renderIntegrations();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function applyToolCatalogMutation(operation, tool) {
   const [active, resolutionActive, channelsActive] = await Promise.all([
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/interaction_channels'),
+    loadConfigEditPayload('tools'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadDraftAwareCollection('interaction_channels'),
   ]);
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const payload = active.payload;
   const tools = payload.tools || [];
   const toolName = tool.tool_name;
   const index = tools.findIndex((item) => item.tool_name === toolName);
   const matrices = [];
-  const resolutionProfiles = resolutionActive.payload?.profiles || [];
-  const channels = channelsActive.payload?.channels || [];
+  const resolutionProfiles = resolutionActive.items || [];
+  const channels = channelsActive.items || [];
   if (operation === 'create') {
     if (index >= 0) {
       throw new Error(`ReAct-вызов ИИ уже существует: ${toolName}`);
@@ -9589,17 +10194,20 @@ async function applyToolCatalogMutation(operation, tool) {
   }
   payload.tools = tools;
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('tools', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.toolCatalogName = tools[0]?.tool_name || '';
+    } else {
+      state.toolCatalogName = toolName;
+      state.toolCatalogOperation = 'modify';
+    }
+    await renderReactCalls();
+  };
+  await submitConfigPayload('tools', payload, active.activeVersionId, {
     successMessage: (version) => `ReAct-вызов ИИ ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.toolCatalogName = tools[0]?.tool_name || '';
-      } else {
-        state.toolCatalogName = toolName;
-        state.toolCatalogOperation = 'modify';
-      }
-      await renderReactCalls();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
@@ -9609,12 +10217,12 @@ async function applyOperationBindingMutation({
   binding,
 }) {
   const [active, endpointsActive, resolutionActive, channelsActive] = await Promise.all([
-    api('/admin/config/active/tools'),
-    api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/attribute_resolution_profiles'),
-    api('/admin/config/active/interaction_channels'),
+    loadConfigEditPayload('tools'),
+    loadDraftAwareCollection('integration_endpoints'),
+    loadDraftAwareCollection('attribute_resolution_profiles'),
+    loadDraftAwareCollection('interaction_channels'),
   ]);
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const payload = active.payload;
   const tools = payload.tools || [];
   const tool = tools.find((item) => item.tool_name === toolName);
   if (!tool) {
@@ -9622,9 +10230,9 @@ async function applyOperationBindingMutation({
   }
   const currentBinding = currentToolBinding(tool);
   const matrices = [];
-  const resolutionProfiles = resolutionActive.payload?.profiles || [];
-  const channels = channelsActive.payload?.channels || [];
-  const endpoints = endpointsActive.payload?.endpoints || [];
+  const resolutionProfiles = resolutionActive.items || [];
+  const channels = channelsActive.items || [];
+  const endpoints = endpointsActive.items || [];
   let nextBinding = null;
 
   if (operation === 'bind') {
@@ -9660,29 +10268,32 @@ async function applyOperationBindingMutation({
   }
 
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('tools', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'bind') {
+      await updateOperationBindingReferences(toolName, nextBinding);
+    }
+    state.operationBindingToolName = toolName;
+    state.operationBindingLastToolName = toolName;
+    if (operation === 'unbind') {
+      state.operationBindingEndpointId = '';
+      state.operationBindingOperationId = '';
+    } else {
+      state.operationBindingEndpointId = nextBinding.endpoint_id;
+      state.operationBindingOperationId = nextBinding.operation_id;
+    }
+    await renderOperationBindings();
+  };
+  await submitConfigPayload('tools', payload, active.activeVersionId, {
     successMessage: (version) => `Привязка операции ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'bind') {
-        await updateOperationBindingReferences(toolName, nextBinding);
-      }
-      state.operationBindingToolName = toolName;
-      state.operationBindingLastToolName = toolName;
-      if (operation === 'unbind') {
-        state.operationBindingEndpointId = '';
-        state.operationBindingOperationId = '';
-      } else {
-        state.operationBindingEndpointId = nextBinding.endpoint_id;
-        state.operationBindingOperationId = nextBinding.operation_id;
-      }
-      await renderOperationBindings();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function applyOperationBindingCreateMutation(tool) {
-  const active = await api('/admin/config/active/tools');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('tools');
+  const payload = active.payload;
   const tools = payload.tools || [];
   if (tools.some((item) => item.tool_name === tool.tool_name)) {
     throw new Error(`ReAct-вызов ИИ уже существует: ${tool.tool_name}`);
@@ -9693,47 +10304,31 @@ async function applyOperationBindingCreateMutation(tool) {
   tools.push(tool);
   payload.tools = tools;
   const binding = currentToolBinding(tool);
-  await submitConfigPayload('tools', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    state.toolCatalogName = tool.tool_name;
+    state.operationBindingToolName = tool.tool_name;
+    state.operationBindingLastToolName = tool.tool_name;
+    state.operationBindingMode = 'bind';
+    state.operationBindingEndpointId = binding.endpoint_id;
+    state.operationBindingOperationId = binding.operation_id;
+    await renderOperationBindings();
+  };
+  await submitConfigPayload('tools', payload, active.activeVersionId, {
     successMessage: (version) => `ReAct-вызов ИИ создан и привязан. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      state.toolCatalogName = tool.tool_name;
-      state.operationBindingToolName = tool.tool_name;
-      state.operationBindingLastToolName = tool.tool_name;
-      state.operationBindingMode = 'bind';
-      state.operationBindingEndpointId = binding.endpoint_id;
-      state.operationBindingOperationId = binding.operation_id;
-      await renderOperationBindings();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function updateOperationBindingReferences(toolName, binding) {
-  if (!binding) return;
-  const channelsActive = await api('/admin/config/active/interaction_channels');
-  const updateAction = (action) => {
-    if (action?.tool_name !== toolName) return false;
-    action.endpoint_id = binding.endpoint_id;
-    action.operation_id = binding.operation_id;
-    return true;
-  };
-  const channelsPayload = JSON.parse(JSON.stringify(channelsActive.payload));
-  let channelsChanged = false;
-  for (const channel of channelsPayload.channels || []) {
-    for (const [, action] of channelActionEntries(channel)) {
-      channelsChanged = updateAction(action) || channelsChanged;
-    }
-    for (const profile of channel.action_profiles || []) {
-      channelsChanged = updateAction(profile.action) || channelsChanged;
-    }
-  }
-  if (channelsChanged) {
-    await activateConfigPayload('interaction_channels', channelsPayload, channelsActive.active_version_id);
-  }
+  void toolName;
+  void binding;
 }
 
 async function applyScenarioMutation(operation, scenario) {
-  const active = await api('/admin/config/active/service_scenarios');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('service_scenarios');
+  const payload = active.payload;
   const index = payload.scenarios.findIndex((item) => item.scenario_id === scenario.scenario_id);
   if (operation === 'create') {
     if (index >= 0) {
@@ -9758,23 +10353,26 @@ async function applyScenarioMutation(operation, scenario) {
     return scenarioWithoutConfidenceOverrides;
   });
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('service_scenarios', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.scenarioId = payload.scenarios[0]?.scenario_id || '';
+    } else {
+      state.scenarioId = scenario.scenario_id;
+      state.scenarioOperation = 'modify';
+    }
+    await renderScenarios();
+  };
+  await submitConfigPayload('service_scenarios', payload, active.activeVersionId, {
     successMessage: (version) => `Сценарий ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.scenarioId = payload.scenarios[0]?.scenario_id || '';
-      } else {
-        state.scenarioId = scenario.scenario_id;
-        state.scenarioOperation = 'modify';
-      }
-      await renderScenarios();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function applyInteractionChannelMutation(operation, channel) {
-  const active = await api('/admin/config/active/interaction_channels');
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload('interaction_channels');
+  const payload = active.payload;
   const channels = payload.channels || [];
   const index = channels.findIndex((item) => item.channel_id === channel.channel_id);
   if (operation === 'create') {
@@ -9800,23 +10398,26 @@ async function applyInteractionChannelMutation(operation, channel) {
   }
   payload.channels = channels;
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload('interaction_channels', payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state.interactionChannelId = channels[0]?.channel_id || '';
+    } else {
+      state.interactionChannelId = channel.channel_id;
+      state.interactionChannelOperation = 'modify';
+    }
+    await renderInteractionChannels();
+  };
+  await submitConfigPayload('interaction_channels', payload, active.activeVersionId, {
     successMessage: (version) => `Канал ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state.interactionChannelId = channels[0]?.channel_id || '';
-      } else {
-        state.interactionChannelId = channel.channel_id;
-        state.interactionChannelOperation = 'modify';
-      }
-      await renderInteractionChannels();
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
 }
 
 async function replaceConfigItem(domain, collectionKey, idKey, nextItem, successMessage) {
-  const active = await api(`/admin/config/active/${domain}`);
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload(domain);
+  const payload = active.payload;
   const items = payload[collectionKey] || [];
   const index = items.findIndex((item) => item[idKey] === nextItem[idKey]);
   if (index < 0) {
@@ -9824,7 +10425,7 @@ async function replaceConfigItem(domain, collectionKey, idKey, nextItem, success
   }
   items[index] = nextItem;
   payload[collectionKey] = items;
-  const version = await activateConfigPayload(domain, payload, active.active_version_id);
+  const version = await activateConfigPayload(domain, payload, active.activeVersionId);
   setNotice(`${successMessage}. Активирована версия ${version.version_id}.`, 'success');
   await renderView(state.activeView);
 }
@@ -9840,8 +10441,8 @@ async function applyConfigItemMutation({
   stateOperationKey,
   successNoun,
 }) {
-  const active = await api(`/admin/config/active/${domain}`);
-  const payload = JSON.parse(JSON.stringify(active.payload));
+  const active = await loadConfigEditPayload(domain);
+  const payload = active.payload;
   const items = payload[collectionKey] || [];
   const itemId = item[idKey];
   const index = items.findIndex((current) => current[idKey] === itemId);
@@ -9873,18 +10474,116 @@ async function applyConfigItemMutation({
   }
   payload[collectionKey] = items;
   const actionText = configMutationActionText(operation);
-  await submitConfigPayload(domain, payload, active.active_version_id, {
+  const syncSelection = async () => {
+    if (operation === 'delete') {
+      state[stateIdKey] = items[0]?.[idKey] || '';
+    } else {
+      state[stateIdKey] = itemId;
+      state[stateOperationKey] = 'modify';
+    }
+    await renderView(state.activeView);
+  };
+  await submitConfigPayload(domain, payload, active.activeVersionId, {
     successMessage: (version) => `${successNoun} ${actionText}. Активирована версия ${version.version_id}.`,
-    onActivated: async () => {
-      if (operation === 'delete') {
-        state[stateIdKey] = items[0]?.[idKey] || '';
-      } else {
-        state[stateIdKey] = itemId;
-        state[stateOperationKey] = 'modify';
-      }
-      await renderView(state.activeView);
-    },
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
   });
+}
+
+async function applySlotSchemaMutation(operation, slotSchema, profileBundle) {
+  const active = await loadConfigEditPayload('slot_schemas');
+  const payload = active.payload;
+  const items = payload.slot_schemas || [];
+  const itemId = slotSchema.slot_schema_id;
+  const index = items.findIndex((current) => current.slot_schema_id === itemId);
+  if (operation === 'create') {
+    if (index >= 0) {
+      throw new Error(`Схема слотов уже существует: ${itemId}`);
+    }
+    items.push(slotSchema);
+  } else if (operation === 'modify') {
+    if (index < 0) {
+      throw new Error(`Схема слотов не найдена: ${itemId}`);
+    }
+    items[index] = slotSchema;
+  } else {
+    throw new Error(`Неизвестная операция со схемой слотов: ${operation}`);
+  }
+  payload.slot_schemas = items;
+  const actionText = configMutationActionText(operation);
+  const syncSelection = async () => {
+    state.slotSchemaId = itemId;
+    state.slotSchemaOperation = 'modify';
+    await renderView(state.activeView);
+  };
+
+  if (profileBundle) {
+    await submitSlotSchemaBundlePayload(payload, active.activeVersionId, profileBundle, actionText, syncSelection);
+    return;
+  }
+
+  await submitConfigPayload('slot_schemas', payload, active.activeVersionId, {
+    successMessage: (version) => `Схема слотов ${actionText}. Активирована версия ${version.version_id}.`,
+    onDraftSaved: syncSelection,
+    onDraftValidated: syncSelection,
+    onActivated: syncSelection,
+  });
+}
+
+async function submitSlotSchemaBundlePayload(slotPayload, slotBaseVersionId, profileBundle, actionText, syncSelection) {
+  const action = currentConfigSubmitAction();
+  const slotDraft = await createConfigDraft('slot_schemas', slotPayload, slotBaseVersionId);
+  const profileDraft = await createConfigDraft(
+    'attribute_resolution_profiles',
+    profileBundle.payload,
+    profileBundle.baseVersionId,
+  );
+  const bundleDraftIds = [slotDraft.draft_id, profileDraft.draft_id];
+  if (action === 'save') {
+    const message = `Черновики схемы слотов и профилей сохранены: ${bundleDraftIds.join(', ')}. Активная версия не изменена.`;
+    rememberConfigDraftStatus('slot_schemas', message, 'info');
+    rememberConfigDraftStatus('attribute_resolution_profiles', message, 'info');
+    setNotice(message, 'success');
+    state.lastData.resolutionProfiles = profileBundle.payload.profiles || [];
+    if (typeof syncSelection === 'function') {
+      await syncSelection();
+    }
+    return { mode: 'draft_bundle', draft_ids: bundleDraftIds };
+  }
+  const validation = await validateConfigDraftBundle(bundleDraftIds);
+  if (validation.status !== 'valid') {
+    const message = configBundleValidationMessage(validation);
+    rememberConfigDraftStatus('slot_schemas', message, 'error');
+    rememberConfigDraftStatus('attribute_resolution_profiles', message, 'error');
+    setNotice(message, 'error');
+    if (typeof syncSelection === 'function') {
+      await syncSelection();
+    }
+    return { mode: 'invalid', bundle: validation };
+  }
+
+  if (action === 'validate') {
+    const message = `Пакет схемы слотов и профилей валиден: ${bundleDraftIds.join(', ')}. Активная версия не изменена.`;
+    rememberConfigDraftStatus('slot_schemas', message, 'success');
+    rememberConfigDraftStatus('attribute_resolution_profiles', message, 'success');
+    setNotice(message, 'success');
+    if (typeof syncSelection === 'function') {
+      await syncSelection();
+    }
+    return { mode: 'validated', bundle: validation };
+  }
+
+  const result = await activateConfigDraftBundle(bundleDraftIds);
+  const message = `Пакет схемы слотов и профилей активирован. Версии: ${configBundleVersionText(result)}.`;
+  rememberConfigDraftStatus('slot_schemas', message, 'success');
+  rememberConfigDraftStatus('attribute_resolution_profiles', message, 'success');
+  setNotice(message, 'success');
+  state.lastData.resolutionProfiles = profileBundle.payload.profiles || [];
+  if (typeof syncSelection === 'function') {
+    await syncSelection();
+  }
+  return { mode: 'activated_bundle', bundle: result };
 }
 
 async function createConfigDraft(domain, payload, baseVersionId) {
@@ -9892,7 +10591,7 @@ async function createConfigDraft(domain, payload, baseVersionId) {
     method: 'POST',
     body: JSON.stringify({
       domain,
-      payload,
+      payload: stripDraftMetadata(payload),
       operator_id: state.actorId,
       base_version_id: baseVersionId,
     }),
@@ -9914,10 +10613,78 @@ async function regressConfigDraft(draftId) {
 }
 
 async function activateConfigDraft(draftId) {
-  return api(`/admin/config/drafts/${draftId}/activate`, {
+  const version = await api(`/admin/config/drafts/${draftId}/activate`, {
     method: 'POST',
     body: JSON.stringify({ operator_id: state.actorId }),
   });
+  await cleanupInvalidConfigDraftsForDomains([version.domain]);
+  return version;
+}
+
+async function validateConfigDraftBundle(draftIds) {
+  return api('/admin/config/drafts/bundle/validate', {
+    method: 'POST',
+    body: JSON.stringify({ operator_id: state.actorId, draft_ids: draftIds }),
+  });
+}
+
+async function requireValidConfigDraftBundle(draftIds) {
+  const validation = await validateConfigDraftBundle(draftIds);
+  if (validation.status !== 'valid') {
+    const error = new Error(configBundleValidationMessage(validation));
+    error.validation = validation;
+    throw error;
+  }
+  return validation;
+}
+
+async function activateConfigDraftBundle(draftIds) {
+  await requireValidConfigDraftBundle(draftIds);
+  let result;
+  try {
+    result = await api('/admin/config/drafts/bundle/activate', {
+      method: 'POST',
+      body: JSON.stringify({ operator_id: state.actorId, draft_ids: draftIds, limit: 20 }),
+    });
+  } catch (error) {
+    const validation = error.detail?.validation;
+    if (validation) {
+      const validationError = new Error(configBundleValidationMessage(validation));
+      validationError.validation = validation;
+      throw validationError;
+    }
+    throw error;
+  }
+  await cleanupInvalidConfigDraftsForDomains((result.versions || []).map((version) => version.domain));
+  return result;
+}
+
+async function deleteInvalidConfigDrafts(domain) {
+  const params = new URLSearchParams({
+    domain,
+    operator_id: state.actorId,
+  });
+  return api(`/admin/config/drafts/invalid?${params.toString()}`, {
+    method: 'DELETE',
+  });
+}
+
+async function cleanupInvalidConfigDraftsForDomains(domains) {
+  const uniqueDomains = Array.from(new Set((domains || []).filter(Boolean)));
+  for (const domain of uniqueDomains) {
+    try {
+      const result = await deleteInvalidConfigDrafts(domain);
+      if (result.deleted_count) {
+        rememberConfigDraftStatus(
+          domain,
+          `Удалены невалидные черновики: ${result.deleted_draft_ids.join(', ')}.`,
+          'info',
+        );
+      }
+    } catch (error) {
+      console.warn('Не удалось удалить невалидные черновики', domain, error);
+    }
+  }
 }
 
 async function submitConfigPayload(domain, payload, baseVersionId, options = {}) {
@@ -9927,6 +10694,9 @@ async function submitConfigPayload(domain, payload, baseVersionId, options = {})
     const message = `Черновик сохранен: ${draft.draft_id}. Активная версия не изменена.`;
     rememberConfigDraftStatus(domain, message, 'info');
     setNotice(message, 'success');
+    if (typeof options.onDraftSaved === 'function') {
+      await options.onDraftSaved(draft);
+    }
     return { mode: 'draft', draft };
   }
 
@@ -9935,12 +10705,19 @@ async function submitConfigPayload(domain, payload, baseVersionId, options = {})
     const message = configValidationMessage(domain, validated.validation);
     rememberConfigDraftStatus(domain, message, 'error');
     setNotice(message, 'error');
+    const onDraftInvalid = options.onDraftInvalid || options.onDraftValidated;
+    if (typeof onDraftInvalid === 'function') {
+      await onDraftInvalid(validated);
+    }
     return { mode: 'invalid', draft: validated };
   }
   if (action === 'validate') {
     const message = `Черновик валиден: ${draft.draft_id}. Активная версия не изменена.`;
     rememberConfigDraftStatus(domain, message, 'success');
     setNotice(message, 'success');
+    if (typeof options.onDraftValidated === 'function') {
+      await options.onDraftValidated(validated);
+    }
     return { mode: 'validated', draft: validated };
   }
 
@@ -9977,6 +10754,182 @@ async function activateConfigPayload(domain, payload, baseVersionId) {
   return activateConfigDraft(draft.draft_id);
 }
 
+function configBundleDraftPayload(result, domain) {
+  return (result?.drafts || []).find((draft) => draft.domain === domain)?.payload || {};
+}
+
+function configBundleSlotSchemas(result) {
+  const draftSchemas = configBundleDraftPayload(result, 'slot_schemas')?.slot_schemas;
+  return Array.isArray(draftSchemas) && draftSchemas.length
+    ? draftSchemas
+    : state.lastData.slotSchemas || [];
+}
+
+function configBundleProfiles(result) {
+  const draftProfiles = configBundleDraftPayload(result, 'attribute_resolution_profiles')?.profiles;
+  return Array.isArray(draftProfiles) && draftProfiles.length
+    ? draftProfiles
+    : state.lastData.resolutionProfiles || [];
+}
+
+function findSlotSchemaAndSlot(result, schemaId, slotId) {
+  for (const schema of configBundleSlotSchemas(result)) {
+    if (schema.slot_schema_id !== schemaId) {
+      continue;
+    }
+    for (const stage of slotSchemaStagesForEditor(schema)) {
+      const slot = (stage.slots || []).find((item) => item.slot_id === slotId);
+      if (slot) {
+        return { schema, stage, slot };
+      }
+    }
+    const slot = (schema.slots || []).find((item) => item.slot_id === slotId);
+    if (slot) {
+      return { schema, stage: null, slot };
+    }
+  }
+  return { schema: null, stage: null, slot: null };
+}
+
+function humanizeConfigBundleValidationError(error, result) {
+  const text = String(error || '');
+  const missingProfileMatch = text.match(/^([a-z][a-z0-9_.-]*) slot ([a-z][a-z0-9_.-]*) (?:со способом resolution_profile должен иметь поле resolution_profile_id|должен иметь resolution_profile_id)\.?$/);
+  if (missingProfileMatch) {
+    const [, schemaId, slotId] = missingProfileMatch;
+    const { schema, stage, slot } = findSlotSchemaAndSlot(result, schemaId, slotId);
+    const schemaLabel = schema?.display_name
+      ? `"${schema.display_name}" (${schemaId})`
+      : schemaId;
+    const stageText = stage?.display_name
+      ? `, этап "${stage.display_name}" (${stage.stage_id})`
+      : '';
+    const slotLabel = slot?.display_name
+      ? `"${slot.display_name}" (${slotId})`
+      : slotId;
+    return `Схема слотов ${schemaLabel}${stageText}: для слота ${slotLabel} выбран способ "Профиль разрешения слота", но профиль не указан.`;
+  }
+  const emptyDescriptionMatch = text.match(/^profiles\.(\d+)\.description: '' should be non-empty\.?$/);
+  if (emptyDescriptionMatch) {
+    const profileIndex = Number(emptyDescriptionMatch[1]);
+    const profile = configBundleProfiles(result)[profileIndex];
+    const profileLabel = profile
+      ? `"${profile.display_name || profile.profile_id}" (${profile.profile_id || `строка ${profileIndex + 1}`})`
+      : `строка ${profileIndex + 1}`;
+    return `Профиль разрешения ${profileLabel}: заполните описание.`;
+  }
+  return text;
+}
+
+function configBundleValidationMessage(result) {
+  const errors = [];
+  for (const validation of Object.values(result?.validations || {})) {
+    errors.push(
+      ...(validation?.errors || []).map((error) => humanizeConfigBundleValidationError(error, result)),
+    );
+  }
+  return `Валидация пакета не пройдена: ${errors.length ? errors.join('; ') : 'ошибки не указаны'}`;
+}
+
+function configBundleVersionText(result) {
+  return (result?.versions || [])
+    .map((version) => `${version.domain}: ${version.version_id}`)
+    .join(', ') || 'версии не указаны';
+}
+
+async function activateExistingConfigDraft(domain, draft, successMessage) {
+  const validated = await validateConfigDraft(draft.draft_id);
+  if (validated.validation?.status !== 'valid') {
+    const message = configValidationMessage(domain, validated.validation);
+    rememberConfigDraftStatus(domain, message, 'error');
+    setNotice(message, 'error');
+    return { mode: 'invalid', draft: validated };
+  }
+  if (currentConfigSubmitAction() === 'validate') {
+    const message = `Черновик валиден: ${draft.draft_id}. Активная версия не изменена.`;
+    rememberConfigDraftStatus(domain, message, 'success');
+    setNotice(message, 'success');
+    return { mode: 'validated', draft: validated };
+  }
+  const checked = await regressConfigDraft(draft.draft_id);
+  if (checked.regression?.status === 'failed') {
+    const message = 'Регрессионная проверка не пройдена.';
+    rememberConfigDraftStatus(domain, message, 'error');
+    setNotice(message, 'error');
+    return { mode: 'regression_failed', draft: checked };
+  }
+  const version = await activateConfigDraft(draft.draft_id);
+  const message = typeof successMessage === 'function'
+    ? successMessage(version)
+    : `Конфигурация активирована. Версия ${version.version_id}.`;
+  rememberConfigDraftStatus(domain, message, 'success');
+  setNotice(message, 'success');
+  return { mode: 'activated', version, draft: checked };
+}
+
+async function submitResolutionProfilePayload(payload, baseVersionId, profile, actionText) {
+  const action = currentConfigSubmitAction();
+  ensureResolutionProfilesHaveDescriptions(payload.profiles || []);
+  const slotSchemaDraft = await ensureSlotSchemaDraftForResolutionProfile(profile);
+  const profileDraft = await createConfigDraft('attribute_resolution_profiles', payload, baseVersionId);
+  const bundleDraftIds = slotSchemaDraft?.draft_id
+    ? [slotSchemaDraft.draft_id, profileDraft.draft_id]
+    : [];
+
+  if (action === 'save') {
+    const linkedText = slotSchemaDraft?.draft_id
+      ? ` Связанный черновик схемы слотов: ${slotSchemaDraft.draft_id}.`
+      : '';
+    const message = `Черновик сохранен: ${profileDraft.draft_id}.${linkedText} Активная версия не изменена.`;
+    rememberConfigDraftStatus('attribute_resolution_profiles', message, 'info');
+    if (slotSchemaDraft?.draft_id) {
+      rememberConfigDraftStatus('slot_schemas', `Связанный черновик сохранен: ${slotSchemaDraft.draft_id}.`, 'info');
+    }
+    setNotice(message, 'success');
+    return { mode: 'draft', draft: profileDraft, slotSchemaDraft };
+  }
+
+  if (bundleDraftIds.length) {
+    if (action === 'validate') {
+      const result = await validateConfigDraftBundle(bundleDraftIds);
+      if (result.status !== 'valid') {
+        const message = configBundleValidationMessage(result);
+        rememberConfigDraftStatus('attribute_resolution_profiles', message, 'error');
+        rememberConfigDraftStatus('slot_schemas', message, 'error');
+        setNotice(message, 'error');
+        return { mode: 'invalid', bundle: result };
+      }
+      const message = `Пакет черновиков валиден: ${bundleDraftIds.join(', ')}. Активная версия не изменена.`;
+      rememberConfigDraftStatus('attribute_resolution_profiles', message, 'success');
+      rememberConfigDraftStatus('slot_schemas', message, 'success');
+      setNotice(message, 'success');
+      return { mode: 'validated', bundle: result };
+    }
+    try {
+      const result = await activateConfigDraftBundle(bundleDraftIds);
+      const message = `Пакет профиля и схемы слотов активирован. Версии: ${configBundleVersionText(result)}.`;
+      rememberConfigDraftStatus('attribute_resolution_profiles', message, 'success');
+      rememberConfigDraftStatus('slot_schemas', message, 'success');
+      setNotice(message, 'success');
+      return { mode: 'activated_bundle', bundle: result };
+    } catch (error) {
+      if (error.validation) {
+        const message = error.message || configBundleValidationMessage(error.validation);
+        rememberConfigDraftStatus('attribute_resolution_profiles', message, 'error');
+        rememberConfigDraftStatus('slot_schemas', message, 'error');
+        setNotice(message, 'error');
+        return { mode: 'invalid', bundle: error.validation };
+      }
+      throw error;
+    }
+  }
+
+  return activateExistingConfigDraft(
+    'attribute_resolution_profiles',
+    profileDraft,
+    (version) => `Профиль ${actionText}. Активирована версия ${version.version_id}.`,
+  );
+}
+
 function legacyCleanupRequestFromPanel(panel, dryRun) {
   const slotSchemaId = panel.querySelector('[name="cleanup_slot_schema_id"]')?.value || '';
   const slotIds = Array.from(panel.querySelectorAll('[name="cleanup_slot_id"]:checked'))
@@ -10006,7 +10959,7 @@ function legacyCleanupRequestFromPanel(panel, dryRun) {
 async function runLegacyCleanup(target, dryRun) {
   const panel = target.closest('[data-legacy-cleanup-panel]');
   if (!panel) {
-    throw new Error('Панель очистки legacy-связок не найдена.');
+    throw new Error('Панель обслуживания связей слотов и профилей не найдена.');
   }
   const request = legacyCleanupRequestFromPanel(panel, dryRun);
   const result = await api('/admin/config/legacy-slot-resolution-cleanup', {
@@ -10014,12 +10967,13 @@ async function runLegacyCleanup(target, dryRun) {
     body: JSON.stringify(request),
   });
   state.legacyCleanupRequest = request;
+  state.maintenanceSlotSchemaId = request.slot_schema_id;
   if (dryRun) {
     state.legacyCleanupPreview = result;
     setNotice(
       result.status === 'blocked'
-        ? `Очистка заблокирована: ${(result.blocked_reasons || []).join('; ')}`
-        : 'Предпросмотр очистки построен. Проверьте список изменений перед применением.',
+        ? `Обслуживание связей заблокировано: ${(result.blocked_reasons || []).join('; ')}`
+        : 'Предпросмотр изменений построен. Проверьте список перед применением.',
       result.status === 'blocked' ? 'error' : 'success',
     );
     await renderView(state.activeView);
@@ -10028,8 +10982,71 @@ async function runLegacyCleanup(target, dryRun) {
   state.legacyCleanupPreview = null;
   state.legacyCleanupRequest = null;
   const versions = (result.versions || []).map((version) => version.version_id).join(', ');
-  setNotice(`Legacy-связки очищены. Активированы версии: ${versions}.`, 'success');
+  setNotice(`Связи слотов и профилей обслужены. Активированы версии: ${versions}.`, 'success');
   await renderView(state.activeView);
+}
+
+function orphanRepairRequestFromPanel(panel, dryRun) {
+  const slotSchemaId = panel.querySelector('[name="orphan_repair_slot_schema_id"]')?.value || '';
+  if (!slotSchemaId) {
+    throw new Error('Схема слотов для исправления не определена.');
+  }
+  if (!dryRun && panel.querySelector('[name="orphan_repair_confirm"]')?.checked !== true) {
+    throw new Error('Подтвердите перевод слотов в ручное заполнение.');
+  }
+  return {
+    operator_id: state.actorId,
+    slot_schema_id: slotSchemaId,
+    dry_run: dryRun,
+  };
+}
+
+async function runOrphanResolutionProfileRepair(target, dryRun) {
+  const panel = target.closest('[data-orphan-repair-panel]');
+  if (!panel) {
+    throw new Error('Панель исправления висячих ссылок не найдена.');
+  }
+  const request = orphanRepairRequestFromPanel(panel, dryRun);
+  const result = await api('/admin/config/orphan-resolution-profile-repair', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+  state.orphanRepairRequest = request;
+  state.maintenanceSlotSchemaId = request.slot_schema_id;
+  if (dryRun) {
+    state.orphanRepairPreview = result;
+    setNotice(
+      result.status === 'blocked'
+        ? `Исправление висячих ссылок заблокировано: ${(result.blocked_reasons || []).join('; ')}`
+        : 'Предпросмотр исправления построен. Проверьте список перед применением.',
+      result.status === 'blocked' ? 'error' : 'success',
+    );
+    await renderView(state.activeView);
+    return;
+  }
+  state.orphanRepairPreview = null;
+  state.orphanRepairRequest = null;
+  const versions = (result.versions || []).map((version) => version.version_id).join(', ');
+  setNotice(
+    result.status === 'noop'
+      ? 'Висячие ссылки профилей разрешения не найдены.'
+      : `Висячие ссылки профилей разрешения исправлены. Активированы версии: ${versions}.`,
+    'success',
+  );
+  await renderView(state.activeView);
+}
+
+function configMaintenanceErrorMessage(error) {
+  const message = error?.message || String(error || '');
+  const linkedSlotMarkers = [
+    'используется профилем',
+    'output_slots_order профиля',
+    'останется со ссылкой',
+  ];
+  if (linkedSlotMarkers.some((marker) => message.includes(marker))) {
+    return `${message} Для связанного удаления слотов и профилей используйте "Настройки -> Обслуживание конфигурации".`;
+  }
+  return message;
 }
 
 function parseCsv(value) {
@@ -10246,18 +11263,12 @@ function parseResolutionOutputRules(form, targetSlotId) {
       slot_id: slotId,
       order: parseInt(row.querySelector('[data-resolution-output-order]')?.value || String(rules.length + 1), 10),
       required_for_success: parseBoolean(row.querySelector('[data-resolution-output-required]')?.value),
-      source_hint: row.querySelector('[data-resolution-output-source]')?.value?.trim() || slotId,
+      source_hint: normalizeResolutionOutputSourceHint(row.querySelector('[data-resolution-output-source]')?.value?.trim() || slotId),
       fallback: row.querySelector('[data-resolution-output-fallback]')?.value || (slotId === targetSlotId ? 'ask_clarification' : 'leave_empty'),
     });
   }
-  if (targetSlotId && !rules.some((rule) => rule.slot_id === targetSlotId)) {
-    rules.unshift({
-      slot_id: targetSlotId,
-      order: 1,
-      required_for_success: true,
-      source_hint: targetSlotId,
-      fallback: 'ask_clarification',
-    });
+  if (rules.length && targetSlotId && !rules.some((rule) => rule.slot_id === targetSlotId)) {
+    throw new Error('Основной слот результата должен быть добавлен в список выходных слотов. Если профиль больше не заполняет этот слот, очистите поле "Основной слот результата".');
   }
   return rules
     .sort((left, right) => left.order - right.order)
@@ -10586,22 +11597,82 @@ function currentResolutionOutputRulesFromDom(form) {
       slot_id: slotId || '',
       order: parseInt(row.querySelector('[data-resolution-output-order]')?.value || String(index + 1), 10),
       required_for_success: parseBoolean(row.querySelector('[data-resolution-output-required]')?.value),
-      source_hint: row.querySelector('[data-resolution-output-source]')?.value?.trim() || slotId || '',
+      source_hint: normalizeResolutionOutputSourceHint(row.querySelector('[data-resolution-output-source]')?.value?.trim() || slotId || ''),
       fallback: row.querySelector('[data-resolution-output-fallback]')?.value || 'leave_empty',
     };
   }).filter((rule) => rule.slot_id);
 }
 
+function applyResolutionOutputMappingHints(form, hints = []) {
+  const container = form?.querySelector('[data-resolution-output-list]');
+  if (!container || !Array.isArray(hints) || !hints.length) return 0;
+  setResolutionFillsSlotsMode(form, true);
+  container.querySelector('[data-resolution-output-empty]')?.remove();
+  const slotContext = currentResolutionSlotContextFromForm(form);
+  const selectedTargetSlotId = form?.querySelector('[data-resolution-target-slot]')?.value?.trim() || '';
+  const customTargetSlotId = form?.querySelector('[name="target_slot_id_custom"]')?.value?.trim() || '';
+  const targetSlotId = selectedTargetSlotId === '__custom__' ? customTargetSlotId : selectedTargetSlotId;
+  let applied = 0;
+  for (const hint of hints) {
+    const hintTargetSlotId = String(hint?.target || '').trim();
+    const sourceHint = normalizeResolutionOutputSourceHint(hint?.source_ref || hint?.field || '');
+    if (!hintTargetSlotId || !sourceHint) continue;
+    let row = Array.from(container.querySelectorAll('[data-resolution-output-row]'))
+      .find((candidate) => resolutionOutputRowSlotId(candidate) === hintTargetSlotId);
+    if (!row) {
+      const slotExists = (slotContext.slots || []).some((slot) => slot.slot_id === hintTargetSlotId);
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = renderResolutionOutputRow(
+        {
+          slot_id: hintTargetSlotId,
+          order: container.querySelectorAll('[data-resolution-output-row]').length + 1,
+          required_for_success: hintTargetSlotId === targetSlotId,
+          source_hint: sourceHint,
+          fallback: hintTargetSlotId === targetSlotId ? 'ask_clarification' : 'leave_empty',
+        },
+        slotContext,
+        {
+          customSelected: !slotExists,
+          customSlotValue: slotExists ? '' : hintTargetSlotId,
+        },
+      ).trim();
+      container.appendChild(wrapper.firstElementChild);
+      row = container.lastElementChild;
+      syncResolutionOutputSlotCustom(row);
+    }
+    const sourceInput = row?.querySelector('[data-resolution-output-source]');
+    if (sourceInput && sourceInput.value !== sourceHint) {
+      sourceInput.value = sourceHint;
+    }
+    applied += 1;
+  }
+  return applied;
+}
+
+function setResolutionFillsSlotsMode(form, enabled) {
+  const checkbox = form?.querySelector('[data-resolution-fills-slots]');
+  if (checkbox) {
+    checkbox.checked = Boolean(enabled);
+  }
+  syncResolutionFillsSlotsMode(form);
+}
+
 function currentResolutionSlotContextFromForm(form) {
   const profileId = form?.querySelector('[name="profile_id"]')?.value?.trim() || state.resolutionProfileId;
+  const fillsCheckbox = form?.querySelector('[data-resolution-fills-slots]');
+  const fillsOutputSlots = fillsCheckbox ? fillsCheckbox.checked === true : true;
   const targetSelectValue = form?.querySelector('[data-resolution-target-slot]')?.value?.trim() || '';
   const targetCustomValue = form?.querySelector('[name="target_slot_id_custom"]')?.value?.trim() || '';
-  const targetSlotId = targetSelectValue === '__custom__' ? targetCustomValue : targetSelectValue;
+  const targetSlotId = fillsOutputSlots
+    ? (targetSelectValue === '__custom__' ? targetCustomValue : targetSelectValue)
+    : '';
+  const outputRules = fillsOutputSlots ? currentResolutionOutputRulesFromDom(form) : [];
   return buildResolutionSlotContext(
     {
       profile_id: profileId,
       slot_schema_id: form?.querySelector('[name="slot_schema_id"]')?.value?.trim() || '',
       target_slot_id: targetSlotId,
+      output_slots_order: outputRules,
     },
     state.lastData.slotSchemas || [],
     state.lastData.serviceScenarios || [],
@@ -10759,19 +11830,34 @@ async function compileResolutionStep(target) {
       previous_steps: steps.slice(0, index),
     }),
   });
+  const compiledStructure = result.structure || {};
+  const reactCallChanged = compiledStructure.react_call && compiledStructure.react_call !== current.react_call;
   steps[index] = {
     ...current,
-    ...(result.structure || {}),
+    ...compiledStructure,
   };
+  if (reactCallChanged) {
+    steps[index].endpoint_id = compiledStructure.endpoint_id || '';
+    steps[index].operation_id = compiledStructure.operation_id || '';
+  }
+  const appliedOutputMappings = applyResolutionOutputMappingHints(
+    form,
+    result.references?.output_mapping_hints || [],
+  );
   state.resolutionEnrichmentEditIndex = index;
   rerenderEnrichmentSteps(form, steps);
-  const issues = [...(result.validation_errors || []), ...(result.warnings || [])];
-  setNotice(
-    issues.length
-      ? `Структура шага сформирована с замечаниями: ${issues.join('; ')}`
-      : 'Структура шага сформирована. Проверьте и сохраните профиль.',
-    issues.length ? 'error' : 'success',
-  );
+  const validationErrors = result.validation_errors || [];
+  const warnings = result.warnings || [];
+  if (validationErrors.length) {
+    const warningText = warnings.length ? ` Предупреждения: ${warnings.join('; ')}` : '';
+    setNotice(`Структура шага сформирована с ошибками: ${validationErrors.join('; ')}${warningText}`, 'error');
+  } else if (warnings.length) {
+    setNotice(`Структура шага сформирована с предупреждениями: ${warnings.join('; ')}`, 'warning');
+  } else if (appliedOutputMappings) {
+    setNotice(`Структура шага сформирована. Обновлены поля результата для выходных слотов: ${appliedOutputMappings}.`, 'success');
+  } else {
+    setNotice('Структура шага сформирована. Проверьте и сохраните профиль.', 'success');
+  }
 }
 
 function syncEnrichmentSourceCustom(row) {
@@ -10784,18 +11870,24 @@ function syncEnrichmentSourceCustom(row) {
   }
 }
 
+function resolutionOutputRowSlotId(row) {
+  const selectedSlotId = row?.querySelector?.('[data-resolution-output-slot]')?.value?.trim() || '';
+  const customSlotId = row?.querySelector?.('[data-resolution-output-slot-custom-value]')?.value?.trim() || '';
+  return selectedSlotId === '__custom__' ? customSlotId : selectedSlotId;
+}
+
 function addResolutionOutputRow() {
   const container = document.querySelector('[data-resolution-output-list]');
   if (!container) return;
-  const slotOptionsHtml = container.querySelector('[data-resolution-output-slot]')?.innerHTML
-    || document.querySelector('[name="target_slot_id"]')?.innerHTML
-    || '<option value="">нет существующих слотов</option><option value="__custom__" selected>Новый слот: указать ключ ниже</option>';
+  const form = container.closest('form');
+  setResolutionFillsSlotsMode(form, true);
+  container.querySelector('[data-resolution-output-empty]')?.remove();
   const order = container.querySelectorAll('[data-resolution-output-row]').length + 1;
   const wrapper = document.createElement('div');
   wrapper.innerHTML = renderResolutionOutputRow(
     { slot_id: '', order, required_for_success: false, source_hint: '', fallback: 'leave_empty' },
-    { slots: [] },
-    { slotOptionsHtml, customSelected: false },
+    currentResolutionSlotContextFromForm(form),
+    { customSelected: false },
   ).trim();
   container.appendChild(wrapper.firstElementChild);
   syncResolutionOutputSlotCustom(container.lastElementChild);
@@ -10804,7 +11896,34 @@ function addResolutionOutputRow() {
 function removeResolutionOutputRow(target) {
   const row = target.closest('[data-resolution-output-row]');
   if (!row) return;
+  const form = row.closest('form');
+  const removedSlotId = resolutionOutputRowSlotId(row);
   row.remove();
+  refreshResolutionOutputEmptyState(form);
+  const targetSelect = form?.querySelector('[data-resolution-target-slot]');
+  const targetCustom = form?.querySelector('[name="target_slot_id_custom"]');
+  const targetSlotId = targetSelect?.value === '__custom__'
+    ? targetCustom?.value?.trim() || ''
+    : targetSelect?.value?.trim() || '';
+  if (removedSlotId && removedSlotId === targetSlotId && targetSelect) {
+    targetSelect.value = '';
+    if (targetCustom) {
+      targetCustom.value = '';
+    }
+    syncResolutionTargetSlotCustom(form);
+  }
+}
+
+function refreshResolutionOutputEmptyState(form) {
+  const container = form?.querySelector('[data-resolution-output-list]');
+  if (!container) return;
+  if (container.querySelector('[data-resolution-output-row]')) {
+    container.querySelector('[data-resolution-output-empty]')?.remove();
+    return;
+  }
+  if (!container.querySelector('[data-resolution-output-empty]')) {
+    container.insertAdjacentHTML('beforeend', resolutionOutputEmptyStateHtml());
+  }
 }
 
 function addRouteRuleCard() {
@@ -10861,6 +11980,18 @@ function syncResolutionLlmMode(form = document) {
   const section = form.querySelector?.('[data-resolution-llm-section]');
   if (!checkbox || !section) return;
   section.hidden = !checkbox.checked;
+}
+
+function syncResolutionFillsSlotsMode(form = document) {
+  const checkbox = form.querySelector?.('[data-resolution-fills-slots]');
+  if (!checkbox) return;
+  const enabled = checkbox.checked === true;
+  form.querySelectorAll?.('[data-resolution-slot-fill-section]').forEach((section) => {
+    section.hidden = !enabled;
+    section.querySelectorAll('input, select, textarea, button').forEach((control) => {
+      control.disabled = !enabled;
+    });
+  });
 }
 
 function removeSlotCard(target) {
@@ -11297,41 +12428,6 @@ function syncOperationBindingOperationOptions(form) {
   state.operationBindingOperationId = selectedOperationId;
 }
 
-function addChannelProfileCard() {
-  const container = document.getElementById('channelProfileCards');
-  if (!container) return;
-  const form = container.closest('form');
-  const mode = form?.querySelector('select[name="mode"]')?.value || 'debug';
-  const capabilities = form ? currentChannelCapabilitiesFromForm(form) : {};
-  const defaultActionType = channelActionTypes(mode, capabilities)[0] || 'debug_stop';
-  const existingIds = new Set(
-    Array.from(container.querySelectorAll('input[name="profile_id"]')).map((input) => input.value),
-  );
-  let index = existingIds.size + 1;
-  let profileId = `custom_profile_${index}`;
-  while (existingIds.has(profileId)) {
-    index += 1;
-    profileId = `custom_profile_${index}`;
-  }
-  const wrapper = document.createElement('div');
-  wrapper.innerHTML = renderChannelProfileCard({
-    profile_id: profileId,
-    display_name: '',
-    event_type: 'standard_handoff',
-    action: {
-      action_type: defaultActionType,
-      message_template: 'Остановить сценарий и показать сообщение оператору.',
-    },
-  }, mode, capabilities).trim();
-  container.appendChild(wrapper.firstElementChild);
-}
-
-function removeChannelProfileCard(target) {
-  const card = target.closest('[data-channel-profile-card]');
-  if (!card) return;
-  card.remove();
-}
-
 function nextModelProviderId() {
   const existing = new Set(
     Array.from(document.querySelectorAll('input[name="model_provider_id"]'))
@@ -11389,7 +12485,6 @@ function initEvents() {
       || action === 'launch-remove'
       || action === 'route-rule-remove'
       || action === 'model-provider-remove'
-      || action === 'channel-profile-remove'
       || action === 'endpoint-operation-remove'
       || action === 'endpoint-request-field-remove'
       || action === 'endpoint-response-field-remove'
@@ -11481,6 +12576,10 @@ function initEvents() {
         await runLegacyCleanup(target, true);
       } else if (action === 'legacy-cleanup-apply') {
         await runLegacyCleanup(target, false);
+      } else if (action === 'orphan-repair-preview') {
+        await runOrphanResolutionProfileRepair(target, true);
+      } else if (action === 'orphan-repair-apply') {
+        await runOrphanResolutionProfileRepair(target, false);
       } else if (action === 'endpoint-connection-operation') {
         state.integrationEndpointOperation = target.dataset.operation;
         await renderIntegrations();
@@ -11526,10 +12625,6 @@ function initEvents() {
         addRouteRuleCard();
       } else if (action === 'route-rule-remove') {
         removeRouteRuleCard(target);
-      } else if (action === 'channel-profile-add') {
-        addChannelProfileCard();
-      } else if (action === 'channel-profile-remove') {
-        removeChannelProfileCard(target);
       } else if (action === 'endpoint-operation-add') {
         addEndpointOperationCard();
       } else if (action === 'endpoint-operation-remove') {
@@ -11550,7 +12645,7 @@ function initEvents() {
         await applyEndpointOpenApiImport(target);
       }
     } catch (error) {
-      setNotice(error.message || String(error), 'error');
+      setNotice(configMaintenanceErrorMessage(error), 'error');
     } finally {
       target.disabled = false;
     }
@@ -11682,6 +12777,10 @@ function initEvents() {
       syncResolutionLlmMode(target.closest('form'));
       return;
     }
+    if (target?.matches?.('[data-resolution-fills-slots]')) {
+      syncResolutionFillsSlotsMode(target.closest('form'));
+      return;
+    }
     if (target?.matches?.('[data-resolution-slot-scenario]')) {
       state.resolutionSlotScenarioId = target.value;
       await renderResolutionProfiles();
@@ -11791,7 +12890,7 @@ function initEvents() {
         await renderAudit(filters);
       }
     } catch (error) {
-      setNotice(error.message || String(error), 'error');
+      setNotice(configMaintenanceErrorMessage(error), 'error');
     } finally {
       state.configSubmitAction = previousConfigSubmitAction;
       enhanceConfigDraftForms();

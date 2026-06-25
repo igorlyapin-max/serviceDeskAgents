@@ -39,8 +39,47 @@ SENSITIVE_KEYWORDS = {
     "куки",
     "сессия",
 }
+CHANNEL_SAFE_PARAMETER_IDS = {"task_key", "task_number", "message_key", "message_key_parameter"}
 
 FULL_NAME_RE = re.compile(r"\b[А-ЯЁ][а-яё]+(?:у|а|ой|ому)?\s+[А-ЯЁ][а-яё]+(?:у|а|ой|ому)?\s+[А-ЯЁ][а-яё]+(?:у|а|ой|ому)?\b")
+
+
+def _is_sensitive_channel_parameter(value: str | None) -> bool:
+    normalized = str(value or "").lower()
+    if normalized in CHANNEL_SAFE_PARAMETER_IDS:
+        return False
+    return any(keyword in normalized for keyword in SENSITIVE_KEYWORDS)
+
+
+def _safe_channel_parameter_values(
+    channel: dict[str, Any] | None,
+    values: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(values, dict):
+        return {}
+    declared = {
+        str(parameter.get("parameter_id") or "").strip(): parameter
+        for parameter in (channel or {}).get("channel_parameters", [])
+        if isinstance(parameter, dict) and parameter.get("parameter_id")
+    }
+    result: dict[str, Any] = {}
+    for parameter_id, value in values.items():
+        parameter_id = str(parameter_id or "").strip()
+        if not parameter_id or value in (None, "", [], {}):
+            continue
+        parameter = declared.get(parameter_id) or {}
+        source_sensitive = (
+            _is_sensitive_channel_parameter(parameter.get("source"))
+            and parameter_id not in CHANNEL_SAFE_PARAMETER_IDS
+        )
+        if (
+            parameter.get("secret")
+            or _is_sensitive_channel_parameter(parameter_id)
+            or source_sensitive
+        ):
+            continue
+        result[parameter_id] = copy.deepcopy(value)
+    return result
 
 DEFAULT_SLOT_VALUES = {
     "user_login": "ivanov",
@@ -180,6 +219,7 @@ class DebugRuntime:
         now = utc_now()
         seed = str(payload.get("seed") or f"seed-{uuid.uuid4().hex[:8]}")
         rng = random.Random(seed)
+        raw_channel_parameter_values = payload.get("channel_parameter_values") or {}
         scenario_ids = payload.get("scenario_ids") or [
             scenario["scenario_id"]
             for scenario in self.config_store.scenario_overview()["scenarios"][:1]
@@ -192,6 +232,7 @@ class DebugRuntime:
             "source": payload.get("source") or "scenario_profiles",
             "seed": seed,
             "channel_id": payload.get("channel_id") or "debug",
+            "channel_parameter_values": {},
             "mode": payload.get("mode") or "dry_run",
             "dry_run": payload.get("dry_run", True) is not False,
             "contains_real_data": payload.get("contains_real_data", False) is True,
@@ -216,8 +257,16 @@ class DebugRuntime:
         }
         items: list[dict[str, Any]] = []
         order = 1
+        sanitized_channel_parameter_values: dict[str, Any] | None = None
         for scenario_id in scenario_ids:
             detail = self.config_store.scenario_detail(scenario_id)
+            channel = self.config_store.resolve_simulation_channel(detail["scenario"], run["channel_id"])
+            if sanitized_channel_parameter_values is None:
+                sanitized_channel_parameter_values = _safe_channel_parameter_values(
+                    channel,
+                    raw_channel_parameter_values,
+                )
+                run["channel_parameter_values"] = copy.deepcopy(sanitized_channel_parameter_values)
             for _ in range(count_per_scenario):
                 variant = rng.choice(self._scenario_variants(
                     detail.get("slot_schema", {}).get("slots", []),
@@ -288,7 +337,7 @@ class DebugRuntime:
         if run["status"] not in {"prepared", "paused"}:
             raise DebugRuntimeError("Редактировать поток можно только до запуска или в паузе.")
         item = self.require_simulation_item(run_id, item_id)
-        editable_fields = {
+        editable_fields = [
             "text",
             "channel_id",
             "scenario_id",
@@ -298,15 +347,36 @@ class DebugRuntime:
             "dry_run",
             "excluded",
             "expected_slots",
-        }
+            "channel_parameter_values",
+        ]
         for field in editable_fields:
             if field in patch:
-                item[field] = copy.deepcopy(patch[field])
+                if field == "channel_parameter_values":
+                    item[field] = self._safe_item_channel_parameter_values(item, run, patch[field])
+                else:
+                    item[field] = copy.deepcopy(patch[field])
         item["updated_at"] = utc_now()
         item["status"] = "excluded" if item.get("excluded") else "prepared"
         self._save_simulation_item(item)
         self._refresh_run_counters(run_id)
         return {"schema_version": "1.0", "item": item}
+
+    def _safe_item_channel_parameter_values(
+        self,
+        item: dict[str, Any],
+        run: dict[str, Any],
+        values: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        scenario_id = item.get("scenario_id")
+        channel_id = item.get("channel_id") or run.get("channel_id")
+        channel = None
+        if scenario_id and scenario_id != "auto" and channel_id:
+            try:
+                detail = self.config_store.scenario_detail(scenario_id)
+                channel = self.config_store.resolve_simulation_channel(detail["scenario"], channel_id)
+            except ConfigRegistryError:
+                channel = None
+        return _safe_channel_parameter_values(channel, values)
 
     def start_simulation(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         run = self.require_simulation_run(run_id)
@@ -530,11 +600,31 @@ class DebugRuntime:
             scenario_id = item.get("scenario_id")
             if not scenario_id or scenario_id == "auto":
                 return None
+            channel_id = item.get("channel_id")
+            if not channel_id and item.get("run_id"):
+                try:
+                    run = self.require_simulation_run(item["run_id"])
+                    channel_id = run.get("channel_id")
+                except DebugRuntimeError:
+                    run = {}
+                    channel_id = None
+            else:
+                run = {}
+            channel_parameter_values = item.get("channel_parameter_values")
+            if not isinstance(channel_parameter_values, dict) and item.get("run_id"):
+                if not run:
+                    try:
+                        run = self.require_simulation_run(item["run_id"])
+                    except DebugRuntimeError:
+                        run = {}
+                channel_parameter_values = run.get("channel_parameter_values") or {}
             try:
                 result = self.config_store.simulate_scenario(
                     scenario_id,
                     text=item.get("text") or "",
                     provided_slots=item.get("text_slots") or {},
+                    channel_id=channel_id,
+                    channel_parameter_values=channel_parameter_values or {},
                     run_mode="approval_debug",
                     allow_llm=False,
                     allow_readonly_integrations=True,
@@ -1280,6 +1370,7 @@ class DebugRuntime:
             "scenario_display_name": scenario["display_name"],
             "variant": variant,
             "channel_id": run["channel_id"],
+            "channel_parameter_values": copy.deepcopy(run.get("channel_parameter_values") or {}),
             "text": generation["text"],
             "text_slots": generation["text_slots"],
             "expected_slots": expected_slots,
@@ -1308,6 +1399,7 @@ class DebugRuntime:
             "scenario_display_name": "Нецелевое обращение / вне зоны поддержки",
             "variant": "finance_request_to_it",
             "channel_id": run["channel_id"],
+            "channel_parameter_values": copy.deepcopy(run.get("channel_parameter_values") or {}),
             "text": (
                 "Контактное лицо: Васин Василий Васильевич. "
                 "Мне неверно начислили премию, исправьте расчет Иванову Ивану Ивановичу."
@@ -1613,7 +1705,7 @@ class DebugRuntime:
         except ConfigRegistryError:
             return ""
         route = detail.get("route", {}).get("route")
-        if route in {"major_incident", "human_review"}:
+        if route == "human_review":
             return "escalation"
         return "answer"
 

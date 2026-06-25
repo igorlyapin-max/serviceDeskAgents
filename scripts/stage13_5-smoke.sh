@@ -84,18 +84,23 @@ operator_js = request("/operator/static/app.js", parse_json=False)
 for expected in [
     "renderInteractionChannels",
     "interaction-channel-editor",
+    "data-debug-channel-readonly",
+    "Системный канал",
     "Канал по умолчанию",
     "Разрешенные каналы",
     "Уточнения у клиента",
-    "Что делать с незавершенным уточнением",
-    "Эскалация оператору",
+    "Действие по умолчанию при эскалации",
 ]:
     assert expected in admin_js, expected
-for removed in ["агент + Л1", "Л1 + подсказка", "Л2 + Major Incident", "Пакет Л2", "Пакет Л1"]:
+assert "Что делать с незавершенным уточнением" not in admin_js, admin_js[:500]
+for removed in ["агент + Л1", "Л1 + подсказка", "Major Incident", "major_incident", "Пакет Л2", "Пакет Л1"]:
     assert removed not in admin_js, removed
     assert removed not in operator_js, removed
 assert "Канал:" in operator_js, operator_js[:500]
 assert "Эскалация оператору" in operator_js, operator_js[:500]
+assert "debugChannelSelect" in operator_js, operator_js[:500]
+assert "debugFlowChannel" in operator_js, operator_js[:500]
+assert "channel_parameter_state" in operator_js, operator_js[:500]
 print("assets каналов взаимодействия проверены")
 
 domains = request("/admin/config/domains")
@@ -108,7 +113,11 @@ channel_by_id = {channel["channel_id"]: channel for channel in channels}
 assert {"messenger_bot", "service_desk", "debug"} <= set(channel_by_id), channel_by_id
 assert channel_by_id["messenger_bot"]["mode"] == "online_interactive", channel_by_id["messenger_bot"]
 assert channel_by_id["service_desk"]["waiting_policy"]["sla_elapsed_percent_threshold"] == 30, channel_by_id["service_desk"]
-assert channel_by_id["debug"]["escalation_action"]["action_type"] == "debug_stop", channel_by_id["debug"]
+for channel in channels:
+    assert "question_delivery" not in channel, channel
+    assert "incomplete_discussion_action" not in channel, channel
+    assert "escalation_action" not in channel, channel
+    assert "action_profiles" not in channel, channel
 print("default каналы проверены")
 
 scenario_detail = request("/admin/scenarios/password_reset")
@@ -123,9 +132,35 @@ simulation = request(
     },
 )
 assert simulation["interaction_channel"]["channel_id"] == "debug", simulation
-assert simulation["question_delivery"]["action_type"] == "show_debug_message", simulation
+assert simulation["client_question"]["delivery"]["mode"] == "debug", simulation
 assert simulation["escalation_action"]["action_type"] == "debug_stop", simulation
 print("dry-run канала проверен")
+
+service_desk_simulation = request(
+    "/admin/scenarios/password_reset/simulate",
+    {
+        "operator_id": "admin-stage13_5",
+        "text": "Иванов Иван не может войти в доменную учетную запись",
+        "channel_id": "service_desk",
+    },
+)
+assert service_desk_simulation["interaction_channel"]["channel_id"] == "service_desk", service_desk_simulation
+assert service_desk_simulation["escalation_action"]["action_type"] == "create_work_order", service_desk_simulation
+assert (
+    service_desk_simulation["channel_variables"]["service_desk"]["task_topic"]
+    == "public.ittask.serviceDeskDefault.task"
+), service_desk_simulation
+assert (
+    service_desk_simulation["channel_variables"]["service_desk"]["result_topic"]
+    == "public.ittask.result"
+), service_desk_simulation
+parameter_state = {
+    parameter["parameter_id"]: parameter["status"]
+    for parameter in service_desk_simulation["channel_parameter_state"]
+}
+assert parameter_state["task_topic"] == "resolved", parameter_state
+assert parameter_state["task_key"] == "missing", parameter_state
+print("dry-run реального канала ServiceDesk проверен")
 
 scenarios_active = request("/admin/config/active/service_scenarios")
 bad_scenarios = copy.deepcopy(scenarios_active["payload"])
@@ -157,6 +192,22 @@ draft = request(
 validated = request(f"/admin/config/drafts/{draft['draft_id']}/validate", {"operator_id": "admin-stage13_5-bad-channel"})
 assert validated["validation"]["status"] == "invalid", validated
 assert any("debug" in error for error in validated["validation"]["errors"]), validated
+
+bad_channels = copy.deepcopy(channels_active["payload"])
+debug = next(channel for channel in bad_channels["channels"] if channel["channel_id"] == "debug")
+debug["capabilities"]["supports_async_result"] = True
+draft = request(
+    "/admin/config/drafts",
+    {
+        "domain": "interaction_channels",
+        "payload": bad_channels,
+        "operator_id": "admin-stage13_5-bad-debug-edit",
+        "base_version_id": channels_active["active_version_id"],
+    },
+)
+validated = request(f"/admin/config/drafts/{draft['draft_id']}/validate", {"operator_id": "admin-stage13_5-bad-debug-edit"})
+assert validated["validation"]["status"] == "invalid", validated
+assert any("debug.capabilities" in error for error in validated["validation"]["errors"]), validated
 print("валидация связей каналов проверена")
 
 print("Smoke-проверка этапа 13.5 завершена.")

@@ -136,6 +136,10 @@ http://127.0.0.1:18088/debug
 
 The `/operator` route remains as a local compatibility alias. The interface name is now `Debug Console`.
 
+During dry-run, the console uses the system `debug` channel as a safe wrapper without external execution, but lets the operator select a `Debugged channel` from the scenario's allowed channels. The run copies waiting settings, the technical profile and parameters of the real channel. Client questions and operator escalation are configured in scenario blocks; if the scenario layer does not provide an escalation action, runtime shows the default action for the selected channel. Channel parameter values are shown in `Available Runtime Variables`; missing or sensitive parameters are displayed without exposing the secret.
+
+The `debug` channel is system-managed. Its behavior cannot be edited or removed through the UI; server-side configuration validation blocks these changes as well.
+
 Console areas:
 
 - `Single Run` - manual check of one ticket, slots, the five orchestrator steps and dry-run trace;

@@ -22,7 +22,6 @@
           "display_name",
           "auto_close",
           "handoff_conditions",
-          "major_incident",
           "handoff_package",
           "user_notification_template"
         ],
@@ -55,25 +54,10 @@
                 "two_tool_errors",
                 "iteration_limit",
                 "confidence_below_050",
-                "affected_users_threshold",
                 "policy_blocked"
               ]
             },
             "uniqueItems": true
-          },
-          "major_incident": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "affected_users_threshold"
-            ],
-            "properties": {
-              "affected_users_threshold": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 100000
-              }
-            }
           },
           "handoff_package": {
             "type": "array",

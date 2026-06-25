@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Консоль отладки ServiceDesk</title>
-    <link rel="stylesheet" href="/debug/static/styles.css?v=profile_launch_20260613">
-    <script defer src="/debug/static/theme_plugin.js?v=profile_launch_20260613"></script>
+    <link rel="stylesheet" href="/debug/static/styles.css?v=review_remediation_20260625">
+    <script defer src="/debug/static/theme_plugin.js?v=channel_actions_cleanup_20260615"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -52,40 +52,11 @@
               Сценарий
               <select id="scenarioSelect" name="scenario"></select>
             </label>
-            <label class="checkbox-row span-all">
-              <input id="dryRunToggle" type="checkbox" checked>
-              <span>Тестовый прогон сценария</span>
-            </label>
             <label class="span-all">
-              Режим тестового прогона
-              <select id="testRunMode" name="testRunMode">
-                <option value="config_check">Проверка конфигурации</option>
-                <option value="llm">С моделью</option>
-                <option value="llm_readonly">С моделью и безопасными интеграциями</option>
-                <option value="approval_debug">Отладочный запуск с подтверждениями</option>
-              </select>
+              Отлаживаемый канал
+              <select id="debugChannelSelect" name="debugChannel"></select>
             </label>
-            <details class="run-options span-all">
-              <summary>Разрешения тестового прогона</summary>
-              <div class="run-option-grid">
-                <label class="checkbox-row">
-                  <input id="allowLlmToggle" type="checkbox">
-                  <span>Вызывать модель для извлечения слотов</span>
-                </label>
-                <label class="checkbox-row">
-                  <input id="allowReadonlyToggle" type="checkbox">
-                  <span>Разрешить read-only интеграции</span>
-                </label>
-                <label class="checkbox-row">
-                  <input id="allowMockToggle" type="checkbox">
-                  <span>Разрешить mock-интеграции</span>
-                </label>
-                <label class="checkbox-row">
-                  <input id="allowActionApprovalToggle" type="checkbox">
-                  <span>Доходить до action-вызовов с подтверждением</span>
-                </label>
-              </div>
-            </details>
+            <div id="channelParameterEditor" class="channel-parameter-editor span-all"></div>
             <div class="button-row span-all">
               <button id="loadScenarioButton" type="button">Обновить сценарий</button>
               <button id="enrichButton" type="button">Проверить слоты</button>
@@ -207,6 +178,11 @@
               <input id="debugFlowCount" type="number" min="1" max="100" value="3">
             </label>
             <label>
+              Отлаживаемый канал
+              <select id="debugFlowChannel"></select>
+            </label>
+            <div id="debugFlowChannelParameterEditor" class="channel-parameter-editor span-all"></div>
+            <label>
               Seed
               <input id="debugFlowSeed" value="debug-seed-1" autocomplete="off">
             </label>
@@ -295,6 +271,6 @@
       </main>
     </div>
 
-    <script src="/debug/static/app.js?v=profile_launch_20260613"></script>
+    <script src="/debug/static/app.js?v=operator_full_debug_safe_20260625"></script>
   </body>
 </html>

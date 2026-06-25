@@ -186,6 +186,56 @@ class ExecutionContextTest(unittest.TestCase):
 
         self.assertEqual(rendered, "Topic public.ittask.serviceDeskL1.task; key OPERU-42; token ; api ")
 
+    def test_simulation_context_applies_channel_parameter_overrides(self) -> None:
+        context = build_simulation_variable_context(
+            scenario_id="password_reset",
+            input_text="Сбросить пароль Иванову.",
+            slot_values={},
+            resolution_state={},
+            classification={"priority": "P3"},
+            ready_tool_launches=[],
+            blocked_tool_launches=[],
+            planned_waits=[{"correlation_id": "OPERU-42"}],
+            final_decision="waiting_external_event",
+            interaction_channel={
+                "channel_id": "service_desk",
+                "display_name": "Сервисдеск",
+                "mode": "offline_interactive",
+                "technical_profile": {
+                    "transport": "kafka",
+                    "task_topic": "public.ittask.serviceDeskL1.task",
+                    "result_topic": "public.ittask.result",
+                    "api_token": "secret-token",
+                },
+                "channel_parameters": [
+                    {"parameter_id": "task_key", "source": "kafka.message_key"},
+                    {"parameter_id": "task_number", "source": "kafka.message_key"},
+                    {"parameter_id": "result_message", "source": "TaskResultMessage"},
+                    {"parameter_id": "api_token", "source": "technical_profile.api_token", "secret": True},
+                ],
+            },
+            channel_parameter_values={
+                "task_key": "OPERU-99",
+                "result_message": "Выполнено в ServiceDesk",
+                "api_token": "must-not-render",
+            },
+        )
+
+        rendered = render_template(
+            (
+                "key ${channel.service_desk.task_key}; "
+                "number ${channel.service_desk.task_number}; "
+                "result ${channel.service_desk.result_message}; "
+                "api ${channel.service_desk.api_token}"
+            ),
+            context,
+        )
+
+        self.assertEqual(
+            rendered,
+            "key OPERU-99; number OPERU-99; result Выполнено в ServiceDesk; api ",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

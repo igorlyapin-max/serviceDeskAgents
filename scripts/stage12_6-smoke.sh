@@ -76,13 +76,13 @@ else:
     raise SystemExit(f"healthz did not become ready: {last_error}")
 
 html = request("/admin", parse_json=False)
-assert "Разрешение слотов" in html, html[:300]
-assert "1. Разрешение слотов" in html, html[:300]
-assert "0. Слоты" in html, html[:300]
+assert "Профили разрешения" in html, html[:300]
+assert "Слоты" in html, html[:300]
 assert "Сценарии обработки" in html, html[:300]
 js = request("/admin/static/app.js", parse_json=False)
 for expected in [
     "renderResolutionProfiles",
+    "Этапы сценария: слоты после нормализации",
     "resolution-operation",
     "resolution-profile-editor",
     "attribute_resolution_profiles",

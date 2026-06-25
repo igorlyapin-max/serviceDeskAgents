@@ -16,6 +16,7 @@ from .http_client import urlopen_with_retry
 
 
 RISK_ORDER = ["low", "medium", "high", "critical"]
+SYSTEM_OPERATION_PARAMETERS = {"invocation"}
 SENSITIVE_TRACE_KEYWORDS = (
     "token",
     "password",
@@ -301,13 +302,29 @@ class ToolRegistry:
         return result
 
     @classmethod
+    def _operation_parameters_validation_schema(cls, operation: dict[str, Any]) -> dict[str, Any]:
+        schema = copy_invocation(operation["request_schema"])
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for parameter in SYSTEM_OPERATION_PARAMETERS:
+                properties.pop(parameter, None)
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [
+                parameter
+                for parameter in required
+                if parameter not in SYSTEM_OPERATION_PARAMETERS
+            ]
+        return schema
+
+    @classmethod
     def _validate_operation_parameters(
         cls,
         tool_name: str,
         operation: dict[str, Any],
         operation_parameters: dict[str, Any],
     ) -> None:
-        validator = Draft202012Validator(operation["request_schema"])
+        validator = Draft202012Validator(cls._operation_parameters_validation_schema(operation))
         errors = [
             cls._format_jsonschema_error(error, prefix="operation_parameters")
             for error in sorted(

@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .action_gates import ActionGateConflict, ActionGateNotFound, utc_now
 from .cases import CaseNotFound
@@ -24,7 +24,7 @@ from .config_registry import (
     endpoint_operation_usage_refs,
     tool_usage_refs,
 )
-from .contracts import ContractValidationError
+from .contracts import ContractRegistry, ContractValidationError
 from .debug_runtime import DebugRuntime, DebugRuntimeError
 from .local_env import LocalEnvError, set_local_env_value
 from .metrics import metrics
@@ -71,6 +71,8 @@ log_debug_event(
 
 
 class TicketAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user: str | None = Field(default=None)
     service: str | None = Field(default=None)
     description: str | None = Field(default=None)
@@ -144,11 +146,23 @@ class AdminConfigDraftActionRequest(BaseModel):
     limit: int | None = Field(default=None)
 
 
+class AdminConfigDraftBundleRequest(BaseModel):
+    operator_id: str = Field()
+    draft_ids: list[str] = Field(min_length=2)
+    limit: int | None = Field(default=None)
+
+
 class AdminLegacySlotResolutionCleanupRequest(BaseModel):
     operator_id: str = Field(default="admin-1")
     slot_schema_id: str = Field(min_length=1, max_length=160)
     slot_ids: list[str] | None = Field(default=None)
     profile_ids: list[str] | None = Field(default=None)
+    dry_run: bool = Field(default=True)
+
+
+class AdminOrphanResolutionProfileRepairRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    slot_schema_id: str = Field(min_length=1, max_length=160)
     dry_run: bool = Field(default=True)
 
 
@@ -183,11 +197,14 @@ class AdminScenarioSimulationRequest(BaseModel):
     text: str = Field()
     provided_slots: dict[str, Any] | None = Field(default=None)
     operator_id: str = Field(default="admin-1")
+    channel_id: str | None = Field(default=None)
+    channel_parameter_values: dict[str, Any] | None = Field(default=None)
     run_mode: str | None = Field(default=None)
     allow_llm: bool | None = Field(default=None)
     allow_readonly_integrations: bool | None = Field(default=None)
     allow_mock_integrations: bool | None = Field(default=None)
     allow_action_with_approval: bool | None = Field(default=None)
+    bypass_policy_gates: bool | None = Field(default=None)
 
 
 class AdminModelSecretUpdateRequest(BaseModel):
@@ -205,11 +222,14 @@ class OperatorScenarioSimulationRequest(BaseModel):
     text: str = Field()
     provided_slots: dict[str, Any] | None = Field(default=None)
     operator_id: str = Field(default="operator-1")
+    channel_id: str | None = Field(default=None)
+    channel_parameter_values: dict[str, Any] | None = Field(default=None)
     run_mode: str = Field(default="config_check")
     allow_llm: bool | None = Field(default=None)
     allow_readonly_integrations: bool | None = Field(default=None)
     allow_mock_integrations: bool | None = Field(default=None)
     allow_action_with_approval: bool | None = Field(default=None)
+    bypass_policy_gates: bool | None = Field(default=None)
 
 
 class DebugSimulationPrepareRequest(BaseModel):
@@ -217,6 +237,7 @@ class DebugSimulationPrepareRequest(BaseModel):
     scenario_ids: list[str] | None = Field(default=None)
     count_per_scenario: int = Field(default=1, ge=1, le=100)
     channel_id: str = Field(default="debug")
+    channel_parameter_values: dict[str, Any] | None = Field(default=None)
     seed: str | None = Field(default=None)
     include_wrong_department: bool = Field(default=False)
     mode: str = Field(default="dry_run")
@@ -877,6 +898,7 @@ def build_config_regression(
     *,
     operator_id: str,
     limit: int | None = None,
+    active_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     validation = draft.get("validation")
     if validation is None or validation.get("status") != "valid":
@@ -894,23 +916,25 @@ def build_config_regression(
             ],
         }
 
-    evaluation_cases = workflow.list_evaluation_cases()
-    if not evaluation_cases:
-        return {
-            "schema_version": "1.0",
-            "domain": draft["domain"],
-            "status": "skipped",
-            "run_at": utc_now(),
-            "gates": [
-                {
-                    "gate_id": "evaluation_dataset",
-                    "status": "skipped",
-                    "message": "Подготовленный набор оценочных кейсов пуст; активация разрешена как безопасный bootstrap.",
-                }
-            ],
-        }
+    regression_workflow = build_config_regression_workflow(active_overrides)
+    with config_store.active_payload_overrides(active_overrides):
+        evaluation_cases = regression_workflow.list_evaluation_cases()
+        if not evaluation_cases:
+            return {
+                "schema_version": "1.0",
+                "domain": draft["domain"],
+                "status": "skipped",
+                "run_at": utc_now(),
+                "gates": [
+                    {
+                        "gate_id": "evaluation_dataset",
+                        "status": "skipped",
+                        "message": "Подготовленный набор оценочных кейсов пуст; активация разрешена как безопасный bootstrap.",
+                    }
+                ],
+            }
 
-    result = workflow.run_evaluation(operator_id=operator_id, limit=limit)
+        result = regression_workflow.run_evaluation(operator_id=operator_id, limit=limit)
     failed = int(result.get("summary", {}).get("failed", 0))
     status = "failed" if failed else "passed"
     return {
@@ -928,6 +952,28 @@ def build_config_regression(
             }
         ],
     }
+
+
+def build_config_regression_workflow(
+    active_overrides: dict[str, dict[str, Any]] | None,
+) -> TicketWorkflow:
+    if not active_overrides:
+        return workflow
+    regression_workflow = TicketWorkflow(
+        contracts=ContractRegistry(),
+        action_gate_store=workflow.action_gate_store,
+        knowledge_indexer=workflow.knowledge_indexer,
+        knowledge_retriever=workflow.knowledge_retriever,
+        feedback_store=workflow.feedback_store,
+        case_store=workflow.case_store,
+        config_store=config_store,
+        processing_store=workflow.processing_store,
+    )
+    regression_workflow.capture_recorder = workflow.capture_recorder
+    regression_workflow.integration_dispatcher.capture_recorder = workflow.capture_recorder
+    for domain, payload in active_overrides.items():
+        regression_workflow.apply_config_payload(domain, payload)
+    return regression_workflow
 
 
 @app.get("/healthz")
@@ -1039,11 +1085,14 @@ def operator_simulate_scenario(
             scenario_id,
             text=request.text,
             provided_slots=request.provided_slots,
+            channel_id=request.channel_id,
+            channel_parameter_values=request.channel_parameter_values,
             run_mode=request.run_mode,
             allow_llm=request.allow_llm,
             allow_readonly_integrations=request.allow_readonly_integrations,
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
+            bypass_policy_gates=request.bypass_policy_gates,
         )
         audit_success(
             context,
@@ -1113,11 +1162,14 @@ def debug_simulate_scenario(
             scenario_id,
             text=request.text,
             provided_slots=request.provided_slots,
+            channel_id=request.channel_id,
+            channel_parameter_values=request.channel_parameter_values,
             run_mode=request.run_mode,
             allow_llm=request.allow_llm,
             allow_readonly_integrations=request.allow_readonly_integrations,
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
+            bypass_policy_gates=request.bypass_policy_gates,
         )
         audit_success(
             context,
@@ -3040,11 +3092,14 @@ def admin_simulate_scenario(
             scenario_id,
             text=request.text,
             provided_slots=request.provided_slots,
+            channel_id=request.channel_id,
+            channel_parameter_values=request.channel_parameter_values,
             run_mode=request.run_mode,
             allow_llm=request.allow_llm,
             allow_readonly_integrations=request.allow_readonly_integrations,
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
+            bypass_policy_gates=request.bypass_policy_gates,
         )
         audit_success(
             context,
@@ -3309,6 +3364,244 @@ def admin_legacy_slot_resolution_cleanup(
         raise config_error_response(error) from error
 
 
+@app.post("/admin/config/orphan-resolution-profile-repair")
+def admin_orphan_resolution_profile_repair(
+    request: AdminOrphanResolutionProfileRepairRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="slot_schemas",
+        mode="manage",
+        action="admin.config.orphan_resolution_profile_repair",
+    )
+    require_config_permission(
+        context,
+        http_request,
+        domain="attribute_resolution_profiles",
+        mode="read",
+        action="admin.config.orphan_resolution_profile_repair",
+    )
+    try:
+        result = config_store.repair_orphaned_resolution_profiles(
+            slot_schema_id=request.slot_schema_id,
+            operator_id=request.operator_id,
+            dry_run=request.dry_run,
+        )
+        if not request.dry_run and result.get("status") == "applied":
+            for version in result.get("versions", []):
+                workflow.apply_config_payload(version["domain"], version["payload"])
+        public_result = {key: value for key, value in result.items() if key != "payloads"}
+        if "versions" in public_result:
+            public_result["versions"] = [
+                {key: value for key, value in version.items() if key != "payload"}
+                for version in public_result["versions"]
+            ]
+        summary = result.get("summary") or {}
+        audit_success(
+            context,
+            http_request,
+            action=(
+                "admin.config.orphan_resolution_profile_repair.preview"
+                if request.dry_run
+                else "admin.config.orphan_resolution_profile_repair.apply"
+            ),
+            resource_type="config",
+            resource_id=request.slot_schema_id,
+            permission=permission,
+            details={
+                "operator_id": request.operator_id,
+                "slot_schema_id": request.slot_schema_id,
+                "slot_count": len(summary.get("orphan_slots_repaired") or []),
+                "stage_link_count": len(summary.get("orphan_stage_links_cleared") or []),
+                "status": result.get("status"),
+            },
+        )
+        return public_result
+    except ConfigRegistryError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.config.orphan_resolution_profile_repair",
+            resource_type="config",
+            resource_id=request.slot_schema_id,
+            permission=permission,
+            status_code=400,
+            message=str(error),
+        )
+        raise config_error_response(error) from error
+
+
+@app.post("/admin/config/drafts/bundle/validate")
+def admin_validate_config_draft_bundle(
+    request: AdminConfigDraftBundleRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    try:
+        drafts = [config_store.require_draft(draft_id) for draft_id in request.draft_ids]
+        permissions = [
+            require_config_permission(
+                context,
+                http_request,
+                domain=draft["domain"],
+                mode="manage",
+                action="admin.config.draft_bundle.validate",
+            )
+            for draft in drafts
+        ]
+        result = config_store.validate_draft_bundle(request.draft_ids)
+        audit_success(
+            context,
+            http_request,
+            action="admin.config.draft_bundle.validate",
+            resource_type="config",
+            resource_id=",".join(result["draft_ids"]),
+            permission=",".join(dict.fromkeys(permissions)),
+            details={
+                "operator_id": request.operator_id,
+                "domains": result.get("domains", []),
+                "status": result.get("status"),
+            },
+        )
+        return result
+    except (ConfigDraftNotFound, ConfigRegistryError) as error:
+        raise config_error_response(error) from error
+
+
+@app.post("/admin/config/drafts/bundle/activate")
+def admin_activate_config_draft_bundle(
+    request: AdminConfigDraftBundleRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    try:
+        actor_id = context.actor_id
+        drafts = [config_store.require_draft(draft_id) for draft_id in request.draft_ids]
+        permissions = [
+            require_config_permission(
+                context,
+                http_request,
+                domain=draft["domain"],
+                mode="manage",
+                action="admin.config.draft_bundle.activate",
+            )
+            for draft in drafts
+        ]
+        validation_result = config_store.validate_draft_bundle(request.draft_ids)
+        if validation_result.get("status") != "valid":
+            audit_error(
+                context,
+                http_request,
+                action="admin.config.draft_bundle.activate",
+                resource_type="config",
+                resource_id=",".join(validation_result.get("draft_ids", request.draft_ids)),
+                permission=",".join(dict.fromkeys(permissions)),
+                status_code=400,
+                message="Валидация пакета не пройдена.",
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "config_bundle_validation_failed",
+                    "message": "Валидация пакета не пройдена.",
+                    "validation": validation_result,
+                },
+            )
+
+        candidate_payloads = config_store.normalized_draft_bundle_payloads(request.draft_ids)
+        checked_draft_ids = []
+        for draft in validation_result.get("drafts", []):
+            regression = build_config_regression(
+                draft,
+                operator_id=actor_id,
+                limit=request.limit,
+                active_overrides=candidate_payloads,
+            )
+            checked = config_store.save_regression(draft["draft_id"], regression)
+            checked_draft_ids.append(checked["draft_id"])
+            if regression.get("status") == "failed":
+                raise ConfigRegistryError(
+                    f"Регрессионная проверка пакета не пройдена для {draft['domain']}."
+                )
+
+        result = config_store.activate_draft_bundle(checked_draft_ids, actor_id)
+        for version in result.get("versions", []):
+            workflow.apply_config_payload(version["domain"], version["payload"])
+        audit_details = {
+            "operator_id": actor_id,
+            "domains": [version["domain"] for version in result.get("versions", [])],
+            "version_ids": [version["version_id"] for version in result.get("versions", [])],
+        }
+        if request.operator_id and request.operator_id != actor_id:
+            audit_details["requested_operator_id"] = request.operator_id
+        audit_success(
+            context,
+            http_request,
+            action="admin.config.draft_bundle.activate",
+            resource_type="config",
+            resource_id=",".join(result["draft_ids"]),
+            permission=",".join(dict.fromkeys(permissions)),
+            details=audit_details,
+        )
+        return result
+    except (ConfigDraftNotFound, ConfigRegistryError) as error:
+        raise config_error_response(error) from error
+
+
+@app.delete("/admin/config/drafts/invalid")
+def admin_delete_invalid_config_drafts(
+    http_request: Request,
+    domain: str = Query(),
+    operator_id: str | None = Query(default=None),
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain=domain,
+        mode="manage",
+        action="admin.config.drafts.invalid.delete",
+    )
+    try:
+        actor_id = context.actor_id
+        result = config_store.delete_invalid_drafts(
+            domain=domain,
+            operator_id=actor_id,
+        )
+        audit_details = {
+            "domain": domain,
+            "operator_id": actor_id,
+            "deleted_count": result.get("deleted_count", 0),
+        }
+        if operator_id and operator_id != actor_id:
+            audit_details["requested_operator_id"] = operator_id
+        audit_success(
+            context,
+            http_request,
+            action="admin.config.drafts.invalid.delete",
+            resource_type="config",
+            resource_id=domain,
+            permission=permission,
+            details=audit_details,
+        )
+        return result
+    except ConfigRegistryError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.config.drafts.invalid.delete",
+            resource_type="config",
+            resource_id=domain,
+            permission=permission,
+            status_code=400,
+            message=str(error),
+        )
+        raise config_error_response(error) from error
+
+
 @app.get("/admin/config/drafts/{draft_id}")
 def admin_get_config_draft(
     draft_id: str,
@@ -3382,10 +3675,14 @@ def admin_regression_config_draft(
         )
         if draft.get("validation", {}).get("status") != "valid":
             draft = config_store.validate_draft(draft_id)
+        active_overrides = None
+        if draft.get("validation", {}).get("status") == "valid":
+            active_overrides = config_store.normalized_draft_payloads_for_regression(draft_id)
         regression = build_config_regression(
             draft,
             operator_id=request.operator_id,
             limit=request.limit,
+            active_overrides=active_overrides,
         )
         draft = config_store.save_regression(draft_id, regression)
         audit_success(

@@ -77,20 +77,18 @@ else:
 
 admin_js = request("/admin/static/app.js", parse_json=False)
 for expected in [
-    "Условия передачи",
-    "2 ошибки инструментов подряд",
-    "Пакет передачи",
-    "Собранные слоты",
     "handoff_conditions",
     "handoff_package",
 ]:
     assert expected in admin_js, expected
 for removed in [
     "l2_conditions",
-    "escalation_package",
+    "Major Incident",
+    "major_incident",
+    "affected_users_threshold",
 ]:
     assert removed not in admin_js, removed
-print("UI чекбоксов блока 5 проверен")
+print("UI-маркеры модели блока 5 проверены")
 
 escalations_active = request("/admin/config/active/escalation_policies")
 payload = escalations_active["payload"]
@@ -140,11 +138,11 @@ assert legacy_validated["validation"]["status"] == "invalid", legacy_validated
 assert any("l2_conditions" in error or "handoff_conditions" in error for error in legacy_validated["validation"]["errors"]), legacy_validated
 print("старые поля l2_conditions/escalation_package отклоняются")
 
-detail = request("/operator/scenarios/network_issue")
+detail = request("/admin/scenarios/network_issue")
 policy = detail["escalation_policy"]
 assert "handoff_conditions" in policy and "handoff_package" in policy, policy
 assert "escalation_package" not in policy, policy
-print("Operator API возвращает новую модель блока 5")
+print("Admin API возвращает новую модель блока 5")
 
 print("Smoke-проверка этапа 13.8 завершена.")
 PY

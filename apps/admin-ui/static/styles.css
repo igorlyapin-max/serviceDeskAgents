@@ -346,6 +346,30 @@ label {
   padding: var(--space-2) var(--space-3);
 }
 
+.notice[data-type="success"] {
+  border-color: color-mix(in srgb, var(--ok) 32%, var(--line));
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.notice[data-type="error"] {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.notice[data-type="warning"] {
+  border-color: color-mix(in srgb, var(--warn) 32%, var(--line));
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.notice[data-type="info"] {
+  border-color: color-mix(in srgb, var(--info) 32%, var(--line));
+  background: var(--info-soft);
+  color: var(--info);
+}
+
 .view-content {
   display: grid;
   gap: 16px;

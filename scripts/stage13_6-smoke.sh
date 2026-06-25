@@ -29,7 +29,6 @@ cleanup() {
 trap cleanup EXIT
 
 BASE_URL="${BASE_URL}" "${PYTHON_BIN}" - <<'PY'
-import copy
 import json
 import os
 import time
@@ -77,33 +76,34 @@ else:
 
 admin_js = request("/admin/static/app.js", parse_json=False)
 operator_js = request("/operator/static/app.js", parse_json=False)
-for expected in [
-    "Профили действий канала",
-    "notify_on_call",
-]:
-    assert expected in admin_js, expected
+assert "Профили действий канала" not in admin_js, admin_js[:500]
+assert "channel-profile-add" not in admin_js, admin_js[:500]
 assert "Оповещать дежурных" not in admin_js, admin_js[:500]
+assert "Major Incident" not in admin_js, admin_js[:500]
+assert "major_incident" not in admin_js, admin_js[:500]
+assert "notify_on_call" not in admin_js, admin_js[:500]
 assert "channel_profile_mapping" not in admin_js, admin_js[:500]
-for expected in [
-    "Профиль канала",
-    "channel_action_profiles",
-    "notify_on_call",
-]:
-    assert expected in operator_js, expected
-print("assets профилей канала проверены")
+assert "Профиль канала" not in operator_js, operator_js[:500]
+assert "channel_action_profiles" not in operator_js, operator_js[:500]
+assert "Major Incident" not in operator_js, operator_js[:500]
+assert "major_incident" not in operator_js, operator_js[:500]
+assert "notify_on_call" not in operator_js, operator_js[:500]
+print("assets каналов без action-профилей проверены")
 
 channels_active = request("/admin/config/active/interaction_channels")
 channel_by_id = {channel["channel_id"]: channel for channel in channels_active["payload"]["channels"]}
-messenger_profiles = {profile["profile_id"]: profile for profile in channel_by_id["messenger_bot"]["action_profiles"]}
-debug_profiles = {profile["profile_id"]: profile for profile in channel_by_id["debug"]["action_profiles"]}
-assert messenger_profiles["major_incident"]["action"]["action_type"] == "notify_on_call", messenger_profiles["major_incident"]
-assert debug_profiles["major_incident"]["action"]["action_type"] == "debug_stop", debug_profiles["major_incident"]
-print("default action profiles проверены")
+for channel in channel_by_id.values():
+    assert "action_profiles" not in channel, channel
+    assert "question_delivery" not in channel, channel
+    assert "incomplete_discussion_action" not in channel, channel
+    assert "escalation_action" not in channel, channel
+print("default каналы без action-профилей проверены")
 
 escalations_active = request("/admin/config/active/escalation_policies")
 policy = next(item for item in escalations_active["payload"]["policies"] if item["policy_id"] == "escalation.network_issue")
 assert "channel_profile_mapping" not in policy, policy
-assert "notify_on_call" not in policy["major_incident"], policy
+assert "major_incident" not in policy, policy
+assert "affected_users_threshold" not in policy.get("handoff_conditions", []), policy
 
 simulation = request(
     "/admin/scenarios/network_issue/simulate",
@@ -112,27 +112,22 @@ simulation = request(
         "text": "VPN недоступен для отдела, больше 20 пользователей",
     },
 )
-profiles = simulation["channel_action_profiles"]
-assert profiles["major_incident"]["event_type"] == "major_incident", simulation
-assert profiles["major_incident"]["action"]["action_type"] == "debug_stop", simulation
-print("dry-run профилей канала проверен")
+assert "channel_action_profiles" not in simulation, simulation
+assert simulation["escalation_action"]["action_type"] == "debug_stop", simulation
+print("dry-run fallback канала debug проверен")
 
-bad_channels = copy.deepcopy(channels_active["payload"])
-debug = next(channel for channel in bad_channels["channels"] if channel["channel_id"] == "debug")
-debug["action_profiles"] = [profile for profile in debug["action_profiles"] if profile["profile_id"] != "major_incident"]
-draft = request(
-    "/admin/config/drafts",
+messenger_simulation = request(
+    "/admin/scenarios/network_issue/simulate",
     {
-        "domain": "interaction_channels",
-        "payload": bad_channels,
-        "operator_id": "admin-stage13_6-bad-channel",
-        "base_version_id": channels_active["active_version_id"],
+        "operator_id": "admin-stage13_6",
+        "text": "VPN недоступен для отдела, больше 20 пользователей",
+        "channel_id": "messenger_bot",
     },
 )
-validated = request(f"/admin/config/drafts/{draft['draft_id']}/validate", {"operator_id": "admin-stage13_6-bad-channel"})
-assert validated["validation"]["status"] == "invalid", validated
-assert any("major_incident" in error for error in validated["validation"]["errors"]), validated
-print("валидация профилей канала проверена")
+assert messenger_simulation["interaction_channel"]["channel_id"] == "messenger_bot", messenger_simulation
+assert "channel_action_profiles" not in messenger_simulation, messenger_simulation
+assert messenger_simulation["escalation_action"]["action_type"] == "call_specialist", messenger_simulation
+print("dry-run fallback реального канала проверен")
 
 print("Smoke-проверка этапа 13.6 завершена.")
 PY
