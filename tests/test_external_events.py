@@ -8,7 +8,7 @@ from apps.orchestrator.app.action_gates import utc_now
 from apps.orchestrator.app.cases import CaseStore
 from apps.orchestrator.app.config_registry import ConfigStore
 from apps.orchestrator.app.contracts import ContractRegistry, ContractValidationError
-from apps.orchestrator.app.kafka_runtime import ExternalEventWorker, KafkaCommandRecord
+from apps.orchestrator.app.kafka_runtime import AgentTaskWorker, ExternalEventWorker, KafkaCommandRecord
 from apps.orchestrator.app.processing import (
     ExternalEventIdempotencyConflict,
     ProcessingConflict,
@@ -207,6 +207,52 @@ class ExternalEventsTest(unittest.TestCase):
             self.config_store.validate_external_event_result_contract(wait, invalid_event)
         self.assertTrue(any("message" in error for error in context.exception.errors))
 
+    def test_progress_event_without_progress_schema_does_not_use_terminal_schema(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="monitor_provider_channel_repair_completed",
+            reason="Ожидание результата мониторинга провайдера.",
+            deadline_seconds=86400,
+            origin={
+                "kind": "react_call",
+                "react_call": "n8n_monitor_provider_channel_repair",
+                "endpoint_id": "n8n",
+                "operation_id": "monitor_provider_channel_repair",
+                "contract_snapshot": {
+                    "schema_version": "1.0",
+                    "endpoint_id": "n8n",
+                    "operation_id": "monitor_provider_channel_repair",
+                    "event_type": "monitor_provider_channel_repair_completed",
+                    "async_event_contract": {
+                        "contract_status": "valid",
+                        "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+                        "result_schema": {
+                            "type": "object",
+                            "required": ["runbook_status", "message", "finished_at"],
+                            "properties": {
+                                "runbook_status": {"enum": ["OK", "ERROR"]},
+                                "message": {"type": "string"},
+                                "finished_at": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        progress_event = self.external_event(
+            wait,
+            status="progress",
+            event_id="evt-provider-progress",
+            event_type="monitor_provider_channel_repair_completed",
+            result={
+                "runbook_status": "PROGRESS",
+                "polling_diagnostic": {"current_status": "polling", "poll_iteration": 1},
+            },
+        )
+
+        self.config_store.validate_external_event_result_contract(wait, progress_event)
+
     def test_success_external_event_closes_wait_and_queues_resume_task(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
@@ -238,6 +284,32 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertEqual(duplicate["resume_task"]["task_id"], result["resume_task"]["task_id"])
         self.assertNotIn("case", duplicate)
         self.assertNotIn("external_event", duplicate)
+
+    def test_agent_task_worker_processes_external_event_resume_task(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait)
+        result = self.processing_store.record_external_event(event)
+        resume_task_id = result["resume_task"]["task_id"]
+
+        worker_result = AgentTaskWorker(
+            self.processing_store,
+            worker_id="test-agent-task-worker",
+        ).process_batch(limit=1)
+
+        self.assertEqual(worker_result["processed"], 1)
+        self.assertEqual(self.processing_store.require_task(resume_task_id)["status"], "completed")
+        run = self.processing_store.require_run(result["resume_task"]["run_id"])
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["current_step"], "external_event_processed")
+        detail = self.processing_store.case_detail(self.case["case_id"])
+        self.assertTrue(
+            any(item["event_type"] == "processing_external_event_resume_processed" for item in detail["timeline"]["events"])
+        )
 
     def test_progress_external_event_keeps_wait_open(self) -> None:
         wait = self.processing_store.open_external_wait(

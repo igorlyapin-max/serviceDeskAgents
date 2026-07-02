@@ -43,9 +43,33 @@ stage3-check:
 stage3-run:
 	$(PYTHON) -m uvicorn apps.orchestrator.app.main:app --host 127.0.0.1 --port $${ORCHESTRATOR_PORT:-18088}
 
+.PHONY: runtime-up
+runtime-up:
+	$(COMPOSE) up -d --build postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+
+.PHONY: runtime-up-no-build
+runtime-up-no-build:
+	$(COMPOSE) up -d postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+
+.PHONY: runtime-check
+runtime-check:
+	./scripts/runtime-check.sh
+
+.PHONY: runtime-ps
+runtime-ps:
+	$(COMPOSE) ps postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+
+.PHONY: runtime-logs
+runtime-logs:
+	$(COMPOSE) logs --tail=200 litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+
 .PHONY: async-outbox-publish-once
 async-outbox-publish-once:
 	$(PYTHON) -m apps.orchestrator.app.kafka_runtime publish-once --limit $${OUTBOX_PUBLISH_LIMIT:-50}
+
+.PHONY: async-outbox-publisher
+async-outbox-publisher:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime publisher --topic $${TOOL_COMMAND_TOPIC:-tool.commands} --interval-seconds $${OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
 
 .PHONY: async-tool-worker
 async-tool-worker:
@@ -54,6 +78,10 @@ async-tool-worker:
 .PHONY: async-external-event-worker
 async-external-event-worker:
 	$(PYTHON) -m apps.orchestrator.app.kafka_runtime external-event-worker --topic $${EXTERNAL_EVENT_TOPIC:-external.events}
+
+.PHONY: async-agent-task-worker
+async-agent-task-worker:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime agent-task-worker --topic $${AGENT_TASK_TOPIC:-agent.tasks}
 
 .PHONY: stage3-smoke
 stage3-smoke:

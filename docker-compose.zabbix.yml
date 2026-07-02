@@ -1,0 +1,10 @@
+services:
+  n8n:
+    networks:
+      - default
+      - zabbix
+
+networks:
+  zabbix:
+    external: true
+    name: ${ZABBIX_DOCKER_NETWORK:-zabbix_zabbix_internal}

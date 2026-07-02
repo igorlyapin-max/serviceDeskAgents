@@ -48,6 +48,7 @@ const elements = {
   slotAnswers: document.getElementById('slotAnswers'),
   scenarioSummary: document.getElementById('scenarioSummary'),
   stepsView: document.getElementById('stepsView'),
+  resolutionProfilesView: document.getElementById('resolutionProfilesView'),
   rebuildButton: document.getElementById('rebuildButton'),
   copyButton: document.getElementById('copyButton'),
   summaryView: document.getElementById('summaryView'),
@@ -131,7 +132,7 @@ const visibleLabels = {
   p4: 'P4',
   partial: 'частично',
   pending_auto_fill: 'ожидает автозаполнения',
-  pending_live_execution: 'ожидает реального вызова',
+  pending_live_execution: 'подготовлено к реальному вызову',
   pending: 'ожидает',
   planned: 'запланировано',
   provided: 'заполнено',
@@ -156,7 +157,23 @@ const visibleLabels = {
   escalate_operator: 'эскалировать оператору',
   mark_failed: 'завершить ошибкой',
   prepared: 'подготовлено',
+  no_result: 'нет результата',
+  not_dispatched: 'не отправлено',
+  not_submitted: 'не передано',
   not_executed: 'не выполнялось',
+  queued_in_outbox: 'в очереди outbox',
+  publishing_to_kafka: 'публикуется в Kafka',
+  publish_failed_retrying: 'ошибка публикации',
+  published_to_kafka: 'опубликовано в Kafka',
+  worker_started: 'worker начал',
+  worker_failed: 'ошибка worker',
+  n8n_launch_rejected: 'n8n отклонил запуск',
+  waiting_external_event: 'ожидает n8n callback',
+  external_event_received: 'результат n8n получен',
+  external_event_failed: 'n8n вернул ошибку',
+  external_event_timeout: 'n8n timeout',
+  missing_async_command: 'нет async-команды',
+  async_event_contract_missing: 'нет async-контракта',
   question_required: 'нужно уточнение у клиента',
   waiting: 'вопрос клиенту',
   resolution_profile: 'профиль разрешения',
@@ -460,10 +477,30 @@ async function api(path, options = {}) {
     headers: apiHeaders(options.headers || {}),
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
+  let body = {};
+  let parseError = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch (error) {
+      parseError = error;
+    }
+  }
   if (!response.ok) {
-    const message = body.detail?.message || body.detail?.errors?.join('; ') || response.statusText;
+    const preview = text ? text.slice(0, 500) : '';
+    const detail = parseError ? null : body.detail;
+    const baseMessage = detail?.message
+      || detail?.errors?.join('; ')
+      || (parseError
+        ? `${path} вернул не JSON: HTTP ${response.status} ${response.statusText}${preview ? `. Фрагмент ответа: ${preview}` : ''}`
+        : response.statusText);
+    const message = detail?.error && detail.error !== baseMessage
+      ? `${baseMessage}: ${detail.error}`
+      : baseMessage;
     throw new Error(message);
+  }
+  if (parseError) {
+    throw new Error(`${path} вернул успешный HTTP ${response.status}, но тело ответа не JSON: ${parseError.message}`);
   }
   return body;
 }
@@ -663,6 +700,7 @@ function traceStatusHint(status) {
     approval_required: 'Требуется подтверждение оператора перед выполнением.',
     question_required: 'Нужно уточнение у клиента.',
     waiting: 'Открыто ожидание результата или ответа.',
+    waiting_external_event: 'Открыто ожидание terminal ExternalEvent от n8n.',
     started: 'Шаг начат.',
   };
   return hints[String(status || '').toLowerCase()] || '';
@@ -887,6 +925,19 @@ function clientAgentOutcome(simulation) {
       missing_slots: simulation.missing_slots || [],
     };
   }
+  const pendingExternalEvent = simulation.final_decision === 'waiting_external_event'
+    || (simulation.attribute_resolution || []).some((item) =>
+      item.status === 'pending_live_execution' || item.decision === 'execute_react_call',
+    );
+  if (pendingExternalEvent) {
+    return {
+      status: 'waiting_external_event',
+      label: 'Ожидает n8n',
+      summary: 'Агент ожидает внешний результат ReAct-вызова или n8n workflow.',
+      next_step: 'Дождитесь terminal ExternalEvent; после callback проверьте профиль разрешения и итоговые слоты.',
+      missing_slots: simulation.missing_slots || [],
+    };
+  }
   if (simulation.awaiting_client_response || simulation.next_question) {
     return {
       status: 'waiting',
@@ -1038,6 +1089,10 @@ function slotResolutionState(slot, simulation = state.scenarioSimulation) {
 }
 
 function resolutionQuestion(slot, simulation) {
+  const profile = slotResolutionProfile(slot);
+  if (slotFillMethod(slot) === 'resolution_profile' && profile?.human_resolution_policy?.action === 'escalate_operator') {
+    return '';
+  }
   const stateItem = slotResolutionState(slot, simulation);
   return stateItem?.pending_question || simulation?.next_question || slotQuestionText(slot) || '';
 }
@@ -1110,6 +1165,459 @@ function formatResolutionOutputSlots(rules = []) {
     .sort((left, right) => (left.order || 0) - (right.order || 0))
     .map((rule) => `${rule.order || '?'} ${rule.slot_id}${rule.required_for_success ? ' *' : ''}`)
     .join('; ');
+}
+
+function profileById(detail, profileId) {
+  return (detail?.attribute_resolution_profiles || [])
+    .find((profile) => profile.profile_id === profileId) || null;
+}
+
+function resolutionStepId(step = {}, index = 0) {
+  return step.step_id || `step${index + 1}`;
+}
+
+function profileLaunches(simulation = state.scenarioSimulation) {
+  return [
+    ...(simulation?.ready_tool_launches || []),
+    ...(simulation?.blocked_tool_launches || []),
+  ];
+}
+
+function launchForResolutionStep(profileId, stepId, simulation = state.scenarioSimulation) {
+  return profileLaunches(simulation).find((launch) =>
+    (launch.profile_id === profileId && launch.step_id === stepId)
+    || launch.launch_id === `${profileId}.${stepId}`,
+  ) || null;
+}
+
+function itemMatchesLaunch(item = {}, launch = {}) {
+  if (!item || !launch) return false;
+  const extensions = item.extensions || {};
+  const trace = extensions.trace || {};
+  const actionId = `${launch.launch_id}.action`;
+  return item.debug_launch_id === launch.launch_id
+    || item.action_id === actionId
+    || extensions.debug_launch_id === launch.launch_id
+    || trace.debug_launch_id === launch.launch_id
+    || (
+      (item.source_profile_id || extensions.source_profile_id || trace.source_profile_id) === launch.profile_id
+      && (item.source_step_id || extensions.source_step_id || trace.source_step_id) === launch.step_id
+    );
+}
+
+function currentToolResults(analysis = state.analysis) {
+  return [
+    ...(state.caseRecord?.tool_results || []),
+    ...(state.caseRecord?.analysis_snapshot?.tool_results || []),
+    ...(analysis?.tool_results || []),
+  ].filter(Boolean);
+}
+
+function currentToolTrace(analysis = state.analysis) {
+  return [
+    ...(state.caseRecord?.tool_trace || []),
+    ...(state.caseRecord?.analysis_snapshot?.tool_trace || []),
+    ...(analysis?.tool_trace || []),
+  ].filter(Boolean);
+}
+
+function toolResultForLaunch(launch, analysis = state.analysis) {
+  return currentToolResults(analysis).find((result) => itemMatchesLaunch(result, launch)) || null;
+}
+
+function toolTraceForLaunch(launch, analysis = state.analysis) {
+  return currentToolTrace(analysis).find((trace) => itemMatchesLaunch(trace, launch)) || null;
+}
+
+function proposedActionForLaunch(launch, ticketInput = state.ticketInput) {
+  if (!launch) return null;
+  return (ticketInput?.decision_override?.proposed_actions || [])
+    .find((action) => itemMatchesLaunch(action, launch)) || null;
+}
+
+function analysisErrorMessage(analysis = state.analysis) {
+  if (!analysis) return '';
+  const decision = analysis.ai_decision?.decision || {};
+  const failureErrors = analysis.failure?.errors || [];
+  return [
+    analysis.operator_message,
+    decision.summary,
+    decision.reason,
+    decision.question,
+    ...(Array.isArray(failureErrors) ? failureErrors : []),
+  ].filter(Boolean).join('; ');
+}
+
+function launchExecutionState(launch, stepResult, analysis = state.analysis) {
+  const result = launch ? toolResultForLaunch(launch, analysis) : null;
+  const trace = launch ? toolTraceForLaunch(launch, analysis) : null;
+  const action = proposedActionForLaunch(launch);
+  const preparedBySimulation = Boolean(launch || stepResult?.result?.status === 'ready_for_execution');
+  if (result || trace) {
+    const asyncDelivery = result?.extensions?.async_delivery;
+    const diagnosticStatus = result?.extensions?.diagnostic_status;
+    return {
+      status: diagnosticStatus || result?.status || trace?.status || 'executed',
+      result,
+      trace,
+      action,
+      preparedBySimulation,
+      submittedToAnalyze: Boolean(action),
+      actualResultFound: true,
+      message: asyncDelivery?.message || result?.error?.message || result?.output?.message || trace?.error_code || 'Фактический результат найден.',
+    };
+  }
+  if (analysis && launch && ['ready', 'approval_required'].includes(launch.status)) {
+    if (!action) {
+      return {
+        status: 'not_submitted',
+        result: null,
+        trace: null,
+        action: null,
+        preparedBySimulation,
+        submittedToAnalyze: false,
+        actualResultFound: false,
+        message: 'Симуляция подготовила вызов, но он не был включен в decision_override для /tickets/analyze.',
+      };
+    }
+    const errorMessage = analysisErrorMessage(analysis);
+    if (analysis.workflow_state?.id === 'error' || analysis.ai_decision?.decision?.type === 'error') {
+      return {
+        status: 'not_dispatched',
+        result: null,
+        trace: null,
+        action,
+        preparedBySimulation,
+        submittedToAnalyze: true,
+        actualResultFound: false,
+        message: `Вызов был передан в /tickets/analyze, но анализ завершился ошибкой до фактического результата${errorMessage ? `: ${errorMessage}` : '.'}`,
+      };
+    }
+    return {
+      status: 'no_result',
+      result: null,
+      trace: null,
+      action,
+      preparedBySimulation,
+      submittedToAnalyze: true,
+      actualResultFound: false,
+      message: 'Вызов был передан в /tickets/analyze, но фактический tool_result/tool_trace для него в ответе анализа не найден.',
+    };
+  }
+  if (launch?.status) {
+    return {
+      status: launch.status,
+      result: null,
+      trace: null,
+      action,
+      preparedBySimulation,
+      submittedToAnalyze: false,
+      actualResultFound: false,
+      message: formatList([
+        ...(launch.missing_parameter_slots || []).map((slotId) => `не заполнен слот ${slotId}`),
+        ...(launch.unknown_required_slots || []).map((slotId) => `нет слота ${slotId}`),
+      ]),
+    };
+  }
+  return {
+    status: stepResult?.result?.status || 'pending',
+    result: null,
+    trace: null,
+    action: null,
+    preparedBySimulation,
+    submittedToAnalyze: false,
+    actualResultFound: false,
+    message: stepResult?.result?.reason || 'Фактическое выполнение еще не запускалось.',
+  };
+}
+
+function renderResolutionParameterTable(step = {}, stepResult = {}, launch = null, execution = {}) {
+  const bindings = step.parameter_mapping || launch?.parameter_bindings || {};
+  const trace = execution.result?.extensions?.trace || {};
+  const reactParameters = trace.react_parameters || execution.action?.parameters || stepResult.parameters || {};
+  const operationParameters = trace.operation_parameters || {};
+  const rows = Object.entries(bindings).map(([parameter, sourceRef]) => [
+    escapeHtml(parameter),
+    escapeHtml(sourceRef),
+    traceJson(reactParameters[parameter]),
+    traceJson(operationParameters[parameter]),
+  ]);
+  return table(['Параметр ReAct', 'Источник', 'Значение ReAct', 'Параметр endpoint'], rows);
+}
+
+function renderAsyncDeliveryDiagnostics(delivery) {
+  if (!delivery) return '';
+  const outbox = delivery.outbox || {};
+  const receipt = delivery.tool_command_receipt || {};
+  const wait = delivery.wait || {};
+  const events = delivery.external_event_receipts || [];
+  const latestEvent = events[0] || {};
+  const latestResult = latestEvent.result || {};
+  const emailResult = latestResult.email_result || {};
+  const pollingDiagnostic = latestResult.polling_diagnostic || {};
+  const receiptError = receipt.tool_result_error || {};
+  const receiptOutput = receipt.tool_result_output || {};
+  const latestEventDetail = latestEvent.error?.message
+    || latestResult.message
+    || (pollingDiagnostic.current_status ? `polling=${pollingDiagnostic.current_status}; match_count=${pollingDiagnostic.match_count ?? 'н/д'}` : '')
+    || (emailResult.status ? `email_result.status=${emailResult.status}; match_count=${emailResult.match_count ?? 'н/д'}` : '')
+    || latestEvent.event_type
+    || wait.expected_event_type
+    || 'н/д';
+  const rows = [
+    [
+      'Outbox',
+      badge(outbox.status || 'missing'),
+      escapeHtml(outbox.message_id || 'н/д'),
+      escapeHtml(outbox.last_error || (outbox.published_at ? `published_at: ${outbox.published_at}` : 'н/д')),
+    ],
+    [
+      'Kafka',
+      badge(outbox.published_at ? 'published_to_kafka' : (outbox.status === 'pending' ? 'queued_in_outbox' : outbox.status || 'missing')),
+      escapeHtml(delivery.topic || outbox.topic || 'н/д'),
+      escapeHtml(outbox.published_at || delivery.root_cause || 'н/д'),
+    ],
+    [
+      'Worker',
+      badge(receipt.status || 'missing'),
+      escapeHtml(receipt.worker_id || 'н/д'),
+      escapeHtml(
+        receiptError.code
+          ? `${receiptError.code}: ${receiptError.message || 'ошибка без описания'}`
+          : (receiptOutput.message || receipt.tool_result_status || 'receipt отсутствует'),
+      ),
+    ],
+    [
+      'n8n / ExternalEvent',
+      badge(latestEvent.status || wait.status || 'waiting'),
+      escapeHtml(latestEvent.event_id || wait.wait_id || 'н/д'),
+      escapeHtml(latestEventDetail),
+    ],
+  ];
+  const n8nResultSummary = latestEvent.result ? `
+    <div class="grid">
+      ${metric('Runbook status', badge(latestResult.runbook_status || latestEvent.status || 'н/д'))}
+      ${metric('Email result', badge(emailResult.status || 'н/д'))}
+      ${metric('Совпадений писем', escapeHtml(emailResult.match_count ?? 'н/д'))}
+      ${metric('Номер заявки', escapeHtml(emailResult.ticket_number || latestResult.service_request || 'н/д'))}
+      ${metric('Тема ответа', escapeHtml(emailResult.subject || 'н/д'))}
+      ${metric('Ящик ответа', escapeHtml(emailResult.mailbox_address || emailResult.reply_mailbox_address || 'н/д'))}
+    </div>
+  ` : '';
+  const pollingSummary = Object.keys(pollingDiagnostic).length ? `
+    <div class="grid">
+      ${metric('Polling status', badge(pollingDiagnostic.current_status || latestResult.runbook_status || 'progress'))}
+      ${metric('Итерация', escapeHtml(pollingDiagnostic.poll_iteration ?? 'н/д'))}
+      ${metric('Проверяемый ресурс', escapeHtml(pollingDiagnostic.checked_resource || 'н/д'))}
+      ${metric('Следующий опрос', escapeHtml(pollingDiagnostic.next_poll_at || 'н/д'))}
+      ${metric('Писем в индексе', escapeHtml(pollingDiagnostic.mailbox_indexed_count ?? 'н/д'))}
+      ${metric('Совпадений', escapeHtml(pollingDiagnostic.match_count ?? 'н/д'))}
+      ${metric('Reply-To ящик', escapeHtml(pollingDiagnostic.reply_mailbox_address || 'н/д'))}
+      ${metric('Последняя ошибка', escapeHtml(pollingDiagnostic.last_error || 'нет'))}
+    </div>
+  ` : '';
+  return `
+    <div class="message-block">
+      <div class="metric-label">Фактическое исполнение async-команды</div>
+      <div class="grid">
+        ${metric('Статус доставки', badge(delivery.status))}
+        ${metric('Уровень', badge(delivery.severity || 'н/д'))}
+        ${metric('Endpoint / операция', escapeHtml(`${receipt.endpoint_id || 'н/д'} / ${receipt.operation_id || 'н/д'}`))}
+        ${metric('Tool', escapeHtml(receipt.tool_name || 'н/д'))}
+        ${metric('Command ID', escapeHtml(delivery.command_id || 'н/д'))}
+        ${metric('Wait ID', escapeHtml(delivery.wait_id || 'н/д'))}
+        ${metric('Topic', escapeHtml(delivery.topic || outbox.topic || 'н/д'))}
+        ${metric('n8n URL', escapeHtml(receipt.endpoint_url || 'н/д'))}
+      </div>
+      <p>${escapeHtml(delivery.message || 'н/д')}</p>
+      <p><strong>Корневая причина:</strong> ${escapeHtml(delivery.root_cause || 'н/д')}</p>
+      ${pollingSummary}
+      ${n8nResultSummary}
+      ${table(['Стадия', 'Статус', 'Идентификатор', 'Деталь'], rows)}
+      <details>
+        <summary>Технические детали async-доставки</summary>
+        ${traceJson(delivery)}
+      </details>
+    </div>
+  `;
+}
+
+function renderResolutionExecutionBlock(launch, stepResult, execution) {
+  const result = execution.result;
+  const trace = execution.trace;
+  const action = execution.action;
+  const asyncWait = result?.extensions?.async_wait;
+  const asyncDelivery = result?.extensions?.async_delivery;
+  const output = result?.output ?? stepResult?.result;
+  const error = result?.error;
+  const status = asyncDelivery?.status || execution.status || result?.status || trace?.status || launch?.status || 'pending';
+  const summary = [
+    metric('Статус выполнения', badge(status)),
+    metric('Подготовлено симуляцией', badge(execution.preparedBySimulation ? 'yes' : 'no')),
+    metric('Передано в analyze', badge(execution.submittedToAnalyze ? 'yes' : 'no')),
+    metric('Фактический результат', badge(execution.actualResultFound ? 'yes' : 'no')),
+    metric('Action ID', escapeHtml(result?.action_id || trace?.action_id || action?.action_id || (launch ? `${launch.launch_id}.action` : 'н/д'))),
+    metric('Invocation ID', escapeHtml(result?.invocation_id || trace?.invocation_id || 'н/д')),
+    metric('Попыток', escapeHtml(result?.attempts ?? trace?.attempts ?? 'н/д')),
+    metric('Длительность', escapeHtml(result?.duration_ms ?? trace?.duration_ms ?? 'н/д')),
+    metric('Policy', escapeHtml(result?.policy_rule_id || trace?.policy_rule_id || 'н/д')),
+  ].join('');
+  return `
+    <div class="resolution-execution">
+      <div class="grid">${summary}</div>
+      <div class="message-block">
+        <div class="metric-label">Состояние выполнения</div>
+        <p>${escapeHtml(execution.message || 'н/д')}</p>
+      </div>
+      ${action ? `
+        <div class="message-block">
+          <div class="metric-label">Action, переданный в /tickets/analyze</div>
+          ${traceJson({
+            action_id: action.action_id,
+            tool_name: action.tool_name,
+            action_type: action.action_type,
+            parameters: action.parameters || {},
+            endpoint_id: action.extensions?.endpoint_id,
+            operation_id: action.extensions?.operation_id,
+            debug_launch_id: action.extensions?.debug_launch_id,
+          })}
+        </div>
+      ` : ''}
+      ${asyncWait ? `
+        <div class="message-block">
+          <div class="metric-label">Async wait</div>
+          ${traceJson(asyncWait)}
+        </div>
+      ` : ''}
+      ${renderAsyncDeliveryDiagnostics(asyncDelivery)}
+      <div class="dry-run-trace-grid">
+        <div>
+          <div class="metric-label">Результат</div>
+          <div class="trace-value">${traceJson(output)}</div>
+        </div>
+        <div>
+          <div class="metric-label">Ошибка</div>
+          <div class="trace-value">${traceJson(error)}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderResolutionProfileStep(profileItem, step, index) {
+  const stepId = resolutionStepId(step, index);
+  const stepResult = profileItem.enrichment_step_results?.[stepId] || {};
+  const launch = launchForResolutionStep(profileItem.profile_id, stepId);
+  const execution = launchExecutionState(launch, stepResult);
+  const completionPolicy = stepResult.completion_policy || launch?.completion_policy || step.completion_policy || {};
+  return `
+    <details class="resolution-step-card" open>
+      <summary>
+        <span class="trace-step">Шаг ${escapeHtml(index + 1)}</span>
+        <strong>${escapeHtml(step.step_name || stepResult.step_name || stepId)}</strong>
+        ${badge(execution.status)}
+      </summary>
+      <div class="resolution-step-body">
+        <div class="grid">
+          ${metric('ReAct-вызов', escapeHtml(step.react_call || stepResult.react_call || launch?.tool_name || 'н/д'))}
+          ${metric('Endpoint / операция', escapeHtml(`${step.endpoint_id || stepResult.endpoint_id || launch?.endpoint_id || 'н/д'} / ${step.operation_id || stepResult.operation_id || launch?.operation_id || 'н/д'}`))}
+          ${metric('Получение результата', escapeHtml(completionPolicySummary(completionPolicy)))}
+          ${metric('Launch ID', escapeHtml(launch?.launch_id || `${profileItem.profile_id}.${stepId}`))}
+        </div>
+        ${renderResolutionParameterTable(step, stepResult, launch, execution)}
+        ${renderResolutionExecutionBlock(launch, stepResult, execution)}
+      </div>
+    </details>
+  `;
+}
+
+function resolutionProfileRuntimeSummary(item, steps = []) {
+  const executions = steps
+    .map((step, index) => {
+      const stepId = resolutionStepId(step, index);
+      const stepResult = item.enrichment_step_results?.[stepId] || {};
+      const launch = launchForResolutionStep(item.profile_id, stepId);
+      return launchExecutionState(launch, stepResult);
+    })
+    .filter(Boolean);
+  const errorExecution = executions.find((execution) =>
+    ['n8n_launch_rejected', 'external_event_failed', 'worker_failed', 'not_dispatched', 'error'].includes(execution.status),
+  );
+  if (errorExecution) {
+    return {
+      status: errorExecution.status,
+      message: errorExecution.message || resolutionProgressText(item),
+    };
+  }
+  const waitingExecution = executions.find((execution) =>
+    ['waiting_external_event', 'published_to_kafka', 'queued_in_outbox', 'worker_started'].includes(execution.status),
+  );
+  if (waitingExecution) {
+    return {
+      status: waitingExecution.status,
+      message: waitingExecution.message || resolutionProgressText(item),
+    };
+  }
+  const completedExecution = executions.find((execution) =>
+    ['external_event_received', 'success', 'completed'].includes(execution.status),
+  );
+  if (completedExecution) {
+    return {
+      status: completedExecution.status,
+      message: completedExecution.message || resolutionProgressText(item),
+    };
+  }
+  return {
+    status: item.status || 'pending',
+    message: resolutionProgressText(item),
+  };
+}
+
+function renderResolutionProfilesView(detail, simulation) {
+  if (!detail) return '<div class="empty">Сценарий не загружен</div>';
+  if (!state.workflowStarted) {
+    return '<div class="empty">Профили разрешения появятся после кнопки «Анализировать»</div>';
+  }
+  const items = simulation?.attribute_resolution || [];
+  if (!items.length) {
+    return '<div class="empty">В текущем прогоне профили разрешения не вызывались</div>';
+  }
+  return items.map((item) => {
+    const profile = profileById(detail, item.profile_id) || {};
+    const steps = item.enrichment_steps?.length ? item.enrichment_steps : (profile.enrichment_steps || []);
+    const runtime = resolutionProfileRuntimeSummary(item, steps);
+    const outputRows = Object.entries(item.output_values || {}).map(([slotId, value]) => [
+      escapeHtml(slotLabel(detail.slot_schema, slotId)),
+      traceJson(value),
+    ]);
+    return `
+      <details class="resolution-profile-card" open>
+        <summary>
+          <span class="resolution-profile-title">${escapeHtml(item.profile_name || profile.display_name || item.profile_id)}</span>
+          ${badge(runtime.status)}
+          <span class="summary-line">${escapeHtml(runtime.message)}</span>
+        </summary>
+        <div class="resolution-profile-body">
+          <div class="grid">
+            ${metric('Режим', escapeHtml(visibleLabels[item.resolution_mode] || item.resolution_mode || 'н/д'))}
+            ${metric('Решение', escapeHtml(visibleLabels[item.decision] || item.decision || 'н/д'))}
+            ${metric('Попытка', escapeHtml(`${item.attempt || 1}/${item.max_attempts || 1}`))}
+            ${metric('Выходные слоты', escapeHtml(formatResolutionOutputSlots(item.output_slots_order)))}
+          </div>
+          <div class="message-block">
+            <div class="metric-label">Сообщение / причина</div>
+            <p>${escapeHtml(item.reason || item.pending_question || item.resolution_decision?.handoff_message || item.human_resolution_policy?.message_template || 'н/д')}</p>
+          </div>
+          ${outputRows.length ? table(['Слот', 'Значение'], outputRows) : ''}
+          <div class="resolution-step-list">
+            ${steps.length
+              ? steps.map((step, index) => renderResolutionProfileStep(item, step, index)).join('')
+              : '<div class="empty">У профиля нет этапов обогащения</div>'}
+          </div>
+        </div>
+      </details>
+    `;
+  }).join('');
 }
 
 function formatDurationSeconds(seconds) {
@@ -1261,6 +1769,7 @@ function renderScenario() {
   renderQuestion();
   renderSlotAnswers();
   renderSteps();
+  renderResolutionProfiles();
   renderTrace();
   syncAnalyzeButton();
 }
@@ -1405,14 +1914,10 @@ function renderFiveStepView(detail, simulation, options = {}) {
     escapeHtml(simulation?.slot_values?.[slot.slot_id]?.reason || 'н/д'),
   ]);
   const resolutionRows = (simulation?.attribute_resolution || []).map((item) => [
-    escapeHtml(slotLabel(slotSchema, item.slot_id)),
     escapeHtml(item.profile_name),
     badge(item.status),
-    escapeHtml(resolutionEnrichmentLabel(item.enrichment_steps || [])),
-    escapeHtml(`${item.attempt || 1}/${item.max_attempts || 1}`),
-    escapeHtml(resolutionProgressText(item)),
-    escapeHtml(formatOutputValues(item.output_values)),
     escapeHtml(formatResolutionOutputSlots(item.output_slots_order)),
+    escapeHtml(resolutionProgressText(item)),
     escapeHtml(visibleLabels[item.human_resolution_policy?.action] || item.human_resolution_policy?.action || 'н/д'),
     escapeHtml(item.pending_question || item.resolution_decision?.handoff_message || item.human_resolution_policy?.message_template || 'н/д'),
   ]);
@@ -1509,7 +2014,7 @@ function renderFiveStepView(detail, simulation, options = {}) {
         ${metric('Таймауты', escapeHtml(`${slotSchema.timeouts?.reminder_after_seconds || 'н/д'} сек / ${slotSchema.timeouts?.draft_after_seconds || 'н/д'} сек`))}
       </div>
       ${table(['Слот', 'Приоритет', 'Тип', 'Способ заполнения', 'Статус', 'Результат слота', 'Confidence', 'Причина'], slotRows)}
-      ${resolutionRows.length ? table(['Слот', 'Профиль', 'Статус', 'Обогащение контекста', 'Попытка', 'Решение', 'Результаты слотов', 'Выходные слоты', 'Действие', 'Сообщение'], resolutionRows) : ''}`,
+      ${resolutionRows.length ? table(['Профиль', 'Статус', 'Выходные слоты', 'Итог профиля', 'Действие', 'Сообщение'], resolutionRows) : ''}`,
     ),
     stepBlock(
       2,
@@ -1579,6 +2084,13 @@ function renderSteps() {
     scenarioName: scenarioName(),
     providedSlots: state.providedSlots,
   });
+}
+
+function renderResolutionProfiles() {
+  elements.resolutionProfilesView.innerHTML = renderResolutionProfilesView(
+    state.scenarioDetail,
+    state.scenarioSimulation,
+  );
 }
 
 function effectiveTicketText() {
@@ -1967,6 +2479,7 @@ function renderAnalysis() {
   renderApprovals();
   renderCase();
   renderFeedback();
+  renderResolutionProfiles();
   renderTrace();
   elements.copyText.textContent = buildCopyText();
   elements.copyButton.disabled = false;
@@ -2309,12 +2822,14 @@ async function refreshCase() {
     return;
   }
   renderCase();
+  renderResolutionProfiles();
+  renderTrace();
 }
 
 function startCasePolling() {
   stopCasePolling();
   if (!state.analysis?.case_id) return;
-  state.casePoll = window.setInterval(refreshCase, 4000);
+  state.casePoll = window.setInterval(refreshCase, 2000);
 }
 
 function stopCasePolling() {

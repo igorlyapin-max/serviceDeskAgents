@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 from unittest.mock import Mock
 
+from apps.orchestrator.app import runtime_guardrails
 from apps.orchestrator.app.runtime_guardrails import (
     RuntimeConfigurationError,
     local_security_warnings,
@@ -55,6 +56,28 @@ class RuntimeGuardrailsTest(unittest.TestCase):
 
         self.assertIn("второй log sink", str(context.exception))
         self.assertIn("SECURITY_AUTH_MODE", str(context.exception))
+
+    def test_staging_rejects_plaintext_kafka_external_events(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "staging",
+                "SECURITY_AUTH_MODE": "oidc",
+                "LOG_SINKS": "stdout,jsonl",
+                "POSTGRES_PASSWORD": "strong-postgres-password",
+                "N8N_DB_PASSWORD": "strong-n8n-db-password",
+                "N8N_ENCRYPTION_KEY": "strong-n8n-encryption-key-32-chars",
+                "N8N_WEBHOOK_TOKEN": "strong-n8n-webhook-token",
+                "LITELLM_MASTER_KEY": "strong-litellm-master-key",
+                "INTEGRATION_CALLBACK_TOKEN__N8N": "strong-callback-token",
+                "KAFKA_SECURITY_PROTOCOL": "PLAINTEXT",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("Kafka external.events", str(context.exception))
 
     def test_unknown_environment_is_rejected(self) -> None:
         with patch.dict(os.environ, {"APP_ENV": "sandbox"}, clear=True):
@@ -126,6 +149,119 @@ class RuntimeGuardrailsTest(unittest.TestCase):
             self.assertIn("diagnostic_startup", verbose_message)
             self.assertIn("параметр скрыт", verbose_message)
             self.assertNotIn("secret", verbose_message)
+
+    def test_readiness_reports_async_runtime_error(self) -> None:
+        config_store = Mock()
+        config_store.active_payload.return_value = {"scenarios": []}
+        workflow = Mock()
+        workflow.model_config.return_value = {"status": "ok"}
+        workflow.knowledge_status.return_value = {"status": "ok"}
+        processing_store = Mock()
+        processing_store.overview.return_value = {
+            "schema_version": "1.0",
+            "runtime": {
+                "schema_version": "1.0",
+                "status": "error",
+                "issues": ["Outbox publisher не запускался или не записал heartbeat."],
+                "required_components": [],
+            },
+        }
+
+        with (
+            patch.object(runtime_guardrails, "_state_db_check", return_value={"name": "state_db", "status": "ok"}),
+            patch.object(runtime_guardrails, "_kafka_bootstrap_check", return_value={"name": "kafka_bootstrap", "status": "ok"}),
+            patch.object(runtime_guardrails, "_n8n_health_check", return_value={"name": "n8n", "status": "ok"}),
+            patch.object(runtime_guardrails, "_model_gateway_check", return_value={"name": "model_gateway", "status": "ok"}),
+            patch.object(runtime_guardrails, "_integration_auth_check", return_value={"name": "integration_auth", "status": "ok"}),
+        ):
+            report = runtime_guardrails.readiness_report(
+                config_store=config_store,
+                workflow=workflow,
+                processing_store=processing_store,
+            )
+
+        self.assertEqual(report["status"], "error")
+        async_check = next(check for check in report["checks"] if check["name"] == "async_runtime")
+        self.assertEqual(async_check["status"], "error")
+        self.assertIn("Outbox publisher", async_check["message"])
+
+    def test_model_gateway_check_uses_litellm_models_endpoint(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        model_config = {
+            "gateway": {"type": "litellm", "base_url": "http://litellm:4000/v1"},
+            "routing": {"slot_resolution": "openai-primary"},
+            "providers": {
+                "openai": {
+                    "model_alias": "openai-primary",
+                    "base_url": "https://api.openai.com/v1",
+                }
+            },
+        }
+
+        with (
+            patch.dict(os.environ, {"LITELLM_MASTER_KEY": "test-key"}, clear=True),
+            patch.object(runtime_guardrails.urllib.request, "urlopen", return_value=Response()) as urlopen_mock,
+        ):
+            check = runtime_guardrails._model_gateway_check(model_config)
+
+        self.assertEqual(check["status"], "ok")
+        request = urlopen_mock.call_args.args[0]
+        self.assertEqual(request.full_url, "http://litellm:4000/v1/models")
+        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+
+    def test_integration_auth_check_reports_missing_token_env(self) -> None:
+        config_store = Mock()
+        config_store.active_payload.return_value = {
+            "endpoints": [
+                {
+                    "endpoint_id": "n8n",
+                    "enabled": True,
+                    "auth": {
+                        "type": "header_token",
+                        "header_name": "X-ServiceDesk-Token",
+                        "token_env": "N8N_WEBHOOK_TOKEN",
+                    },
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            check = runtime_guardrails._integration_auth_check(config_store)
+
+        self.assertEqual(check["status"], "error")
+        self.assertIn("n8n", check["message"])
+        self.assertIn("N8N_WEBHOOK_TOKEN", check["message"])
+        self.assertIn("X-ServiceDesk-Token", check["message"])
+
+    def test_integration_auth_check_accepts_configured_token_env(self) -> None:
+        config_store = Mock()
+        config_store.active_payload.return_value = {
+            "endpoints": [
+                {
+                    "endpoint_id": "n8n",
+                    "enabled": True,
+                    "auth": {
+                        "type": "header_token",
+                        "header_name": "X-ServiceDesk-Token",
+                        "token_env": "N8N_WEBHOOK_TOKEN",
+                    },
+                }
+            ]
+        }
+
+        with patch.dict(os.environ, {"N8N_WEBHOOK_TOKEN": "secret"}, clear=True):
+            check = runtime_guardrails._integration_auth_check(config_store)
+
+        self.assertEqual(check["status"], "ok")
+        self.assertNotIn("secret", check["message"])
 
 
 if __name__ == "__main__":

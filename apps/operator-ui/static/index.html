@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Консоль отладки ServiceDesk</title>
-    <link rel="stylesheet" href="/debug/static/styles.css?v=review_remediation_20260625">
+    <link rel="stylesheet" href="/debug/static/styles.css?v=profile_resolution_trace_20260625">
     <script defer src="/debug/static/theme_plugin.js?v=channel_actions_cleanup_20260615"></script>
   </head>
   <body>
@@ -71,11 +71,12 @@
         <section class="detail-pane" aria-label="Детали обработки">
           <nav class="operator-tabs" role="tablist" aria-label="Разделы одиночного прогона">
             <button class="operator-tab active" data-main-tab="steps" type="button" role="tab" aria-selected="true">5 шагов</button>
+            <button class="operator-tab" data-main-tab="profiles" type="button" role="tab" aria-selected="false">Профили разрешения</button>
             <button class="operator-tab" data-main-tab="result" type="button" role="tab" aria-selected="false">Результат</button>
             <button class="operator-tab" data-main-tab="case" type="button" role="tab" aria-selected="false">Кейс</button>
             <button class="operator-tab" data-main-tab="approvals" type="button" role="tab" aria-selected="false">Согласования</button>
-            <button class="operator-tab" data-main-tab="knowledge" type="button" role="tab" aria-selected="false">База знаний</button>
-            <button class="operator-tab" data-main-tab="trace" type="button" role="tab" aria-selected="false">Трассировка</button>
+            <button class="operator-tab" data-main-tab="knowledge" type="button" role="tab" aria-selected="false">Знания</button>
+            <button class="operator-tab" data-main-tab="trace" type="button" role="tab" aria-selected="false">Trace</button>
           </nav>
 
           <div class="operator-tab-panel" data-main-panel="steps" role="tabpanel">
@@ -88,7 +89,17 @@
             </section>
           </div>
 
-          <div class="operator-tab-panel" data-main-panel="result" role="tabpanel" hidden>
+          <div class="operator-tab-panel" data-main-panel="profiles" role="tabpanel" hidden>
+            <section class="resolution-profiles-pane" aria-labelledby="profiles-title">
+              <div class="section-head">
+                <h2 id="profiles-title">Профили разрешения</h2>
+                <div class="summary-line">Этапы, шаги и фактические ReAct-вызовы профилей</div>
+              </div>
+              <div id="resolutionProfilesView" class="resolution-profiles-view"></div>
+            </section>
+          </div>
+
+          <div class="operator-tab-panel service-panel" data-main-panel="result" role="tabpanel" hidden>
             <section class="result-pane" aria-labelledby="result-title">
               <div class="section-head">
                 <h2 id="result-title">Результат</h2>
@@ -109,7 +120,7 @@
             </section>
           </div>
 
-          <div class="operator-tab-panel" data-main-panel="case" role="tabpanel" hidden>
+          <div class="operator-tab-panel service-panel" data-main-panel="case" role="tabpanel" hidden>
             <section class="case-pane" aria-labelledby="case-title">
               <div class="section-head">
                 <h2 id="case-title">Кейс</h2>
@@ -121,7 +132,7 @@
             </section>
           </div>
 
-          <div class="operator-tab-panel" data-main-panel="approvals" role="tabpanel" hidden>
+          <div class="operator-tab-panel service-panel" data-main-panel="approvals" role="tabpanel" hidden>
             <section class="approval-pane" aria-labelledby="approval-title">
               <div class="section-head">
                 <h2 id="approval-title">Согласования</h2>
@@ -130,7 +141,7 @@
             </section>
           </div>
 
-          <div class="operator-tab-panel" data-main-panel="knowledge" role="tabpanel" hidden>
+          <div class="operator-tab-panel service-panel" data-main-panel="knowledge" role="tabpanel" hidden>
             <section class="knowledge-pane" aria-labelledby="knowledge-title">
               <div class="section-head">
                 <h2 id="knowledge-title">База знаний</h2>
@@ -140,7 +151,7 @@
             </section>
           </div>
 
-          <div class="operator-tab-panel" data-main-panel="trace" role="tabpanel" hidden>
+          <div class="operator-tab-panel service-panel" data-main-panel="trace" role="tabpanel" hidden>
             <section class="trace-pane" aria-labelledby="trace-title">
               <div class="section-head">
                 <h2 id="trace-title">Трассировка</h2>
@@ -271,6 +282,6 @@
       </main>
     </div>
 
-    <script src="/debug/static/app.js?v=operator_full_debug_safe_20260625"></script>
+    <script src="/debug/static/app.js?v=async_delivery_refresh_20260626"></script>
   </body>
 </html>

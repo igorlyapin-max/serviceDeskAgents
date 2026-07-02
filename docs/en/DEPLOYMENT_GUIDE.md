@@ -25,12 +25,18 @@ POSTGRES_PORT=15432
 REDIS_PORT=16379
 KAFKA_PORT=19092
 KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
-KAFKA_API_VERSION=2.8.0
+KAFKA_API_VERSION=2.3
+ORCHESTRATOR_KAFKA_API_VERSION=2.3
 TOOL_COMMAND_TOPIC=tool.commands
+EXTERNAL_EVENT_TOPIC=external.events
+AGENT_TASK_TOPIC=agent.tasks
 N8N_PORT=5678
 ORCHESTRATOR_PORT=18088
-ORCHESTRATOR_PUBLIC_URL=http://127.0.0.1:18088
+ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088
+CMDBUILD_BASE_URL=http://hostmachine:8090/cmdbuild
 LITELLM_PORT=4000
+LITELLM_PUBLIC_BASE_URL=http://127.0.0.1:4000/v1
+COMPOSE_LITELLM_BASE_URL=http://litellm:4000/v1
 VLLM_PORT=8000
 APP_ENV=local
 METRICS_ALLOWED_IPS=127.0.0.1,::1
@@ -43,7 +49,7 @@ Secrets are configured through `.env` or an external secret store:
 - `OPENAI_API_KEY`;
 - `LITELLM_MASTER_KEY`;
 - `N8N_ENCRYPTION_KEY`;
-- `N8N_WEBHOOK_TOKEN`;
+- `N8N_WEBHOOK_TOKEN` for `orchestrator` / `async-tool-worker` -> n8n webhook calls through `X-ServiceDesk-Token`;
 - `INTEGRATION_CALLBACK_TOKEN` for local/dev or `INTEGRATION_CALLBACK_TOKEN__<SOURCE>` for shared/staging/production.
 
 Do not commit `.env` to git. Docker Compose no longer supplies development passwords by default: if a required secret is missing, `docker compose config` fails. `change_me_*` values in `.env.example` are placeholders and must be replaced before using a shared environment or production.
@@ -62,10 +68,10 @@ Base stack:
 - `redis` - cache, locks and temporary state;
 - `redpanda` - Kafka-compatible broker for asynchronous events;
 - `n8n` - integration workflows and webhooks.
+- `litellm` - shared local OpenAI-compatible gateway on `http://127.0.0.1:4000/v1`.
 
-LLM profile:
+Optional LLM profile:
 
-- `litellm` - OpenAI-compatible gateway;
 - `vllm-cpu` - local CPU inference backend.
 
 ## Start the Base Stack
@@ -82,18 +88,29 @@ Start base services:
 docker compose up -d postgres redis redpanda n8n
 ```
 
+Start the full runtime stand with FastAPI and async workers:
+
+```bash
+make runtime-up
+make runtime-check
+```
+
 Check service status:
 
 ```bash
 docker compose ps
 ```
 
-## Start the LLM Profile
+For the n8n `Contracts: OpenAPI discovery` workflow, the Code node must be allowed to read environment variables. In local/dev set `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` and `N8N_OPENAPI_DEFAULT_LOCALE=ru`; otherwise `GET /webhook/contracts/openapi.json` may return an empty response because env access is denied.
 
-Start LiteLLM and vLLM CPU:
+## Start the LLM Gateway and Local CPU Model
+
+`make runtime-up` starts LiteLLM as the required gateway for model-based slot extraction. Inside Docker Compose the orchestrator uses `http://litellm:4000/v1`; from the host and from other local projects the gateway is available at `http://127.0.0.1:4000/v1`.
+
+Start vLLM CPU only when the active backend is the local CPU model:
 
 ```bash
-docker compose --profile llm up -d vllm-cpu litellm
+docker compose --profile llm up -d vllm-cpu
 ```
 
 Check LiteLLM:
@@ -103,7 +120,7 @@ curl -sS http://127.0.0.1:4000/v1/models \
   -H "Authorization: Bearer ${LITELLM_MASTER_KEY}"
 ```
 
-## Start FastAPI
+## Start FastAPI Locally Without Compose
 
 Install the backend into a local virtual environment:
 
@@ -120,6 +137,8 @@ Start the orchestrator:
   --port ${ORCHESTRATOR_PORT:-18088}
 ```
 
+This mode is useful for API/UI development. Async n8n calls require the full runtime: `async-outbox-publisher`, `async-tool-worker`, `async-external-event-worker`, and `async-agent-task-worker`. For the standard local stand, start them with `make runtime-up`.
+
 UI URLs:
 
 ```text
@@ -132,7 +151,7 @@ Health endpoints:
 
 ```text
 http://127.0.0.1:18088/healthz  # simple liveness
-http://127.0.0.1:18088/readyz   # readiness for state DB, configuration, models and knowledge base
+http://127.0.0.1:18088/readyz   # readiness for state DB, configuration, models, Kafka, n8n and async runtime
 http://127.0.0.1:18088/metrics  # MVP Prometheus-compatible technical metrics
 ```
 
@@ -146,7 +165,24 @@ In production, `/readyz` also reports that SQLite state DB is MVP storage and is
 
 For long-running n8n workflows, the orchestrator does not keep the HTTP request open. It writes a command to the outbox, the publisher sends it to Kafka, and a separate worker calls the n8n webhook.
 
-Publish pending outbox messages to Kafka once. This is a batch command; without an explicit `--limit`, the Makefile uses `${OUTBOX_PUBLISH_LIMIT:-50}`:
+Recommended Docker Compose start:
+
+```bash
+make runtime-up
+make runtime-check
+```
+
+`runtime-check` verifies the public LiteLLM endpoint and `/readyz`; readiness fails when Kafka, n8n or the model gateway is unavailable, when heartbeat is stale for `async-outbox-publisher`, `async-tool-worker`, `async-external-event-worker` or `async-agent-task-worker`, or when `tool.commands` remains pending longer than the allowed threshold.
+
+Run the long-running outbox publisher to Kafka. This process is required for a working stand: without it, async commands stay in `processing_outbox` and the actual n8n webhook is not called.
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime publisher --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
+# or
+PYTHON=.venv/bin/python make async-outbox-publisher
+```
+
+Publish pending outbox messages to Kafka once for manual diagnostics. This is a batch command; without an explicit `--limit`, the Makefile uses `${OUTBOX_PUBLISH_LIMIT:-50}`:
 
 ```bash
 .venv/bin/python -m apps.orchestrator.app.kafka_runtime publish-once --limit 50
@@ -170,7 +206,31 @@ Run the long-running inbound Kafka result worker:
 PYTHON=.venv/bin/python make async-external-event-worker
 ```
 
-For the local stand, the default outbound n8n runbook command topic is `tool.commands`; the default inbound external event topic is `external.events`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
+Run the long-running agent continuation worker after terminal ExternalEvent:
+
+```bash
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime agent-task-worker --topic ${AGENT_TASK_TOPIC:-agent.tasks}
+# or
+PYTHON=.venv/bin/python make async-agent-task-worker
+```
+
+For the local stand, the default outbound n8n runbook command topic is `tool.commands`; the default inbound external event topic is `external.events`; the default agent continuation task topic is `agent.tasks`. Kafka is reachable from the host at `127.0.0.1:19092` and from the docker network at `redpanda:9092`.
+
+`N8N_WEBHOOK_TOKEN` must be available to both the caller (`orchestrator` / `async-tool-worker`) and the n8n container: the orchestrator sends it as `X-ServiceDesk-Token`, while n8n validates the inbound webhook. The n8n container must also receive result-delivery settings: `ORCHESTRATOR_PUBLIC_URL`, `INTEGRATION_CALLBACK_TOKEN`, `INTEGRATION_CALLBACK_TOKEN__N8N`, `N8N_KAFKA_BOOTSTRAP_SERVERS`, Kafka security variables, and `EXTERNAL_EVENT_TOPIC`. In local compose, set `N8N_KAFKA_BOOTSTRAP_SERVERS=redpanda:9092` because n8n reaches Kafka from the docker network.
+
+n8n email workflows receive SMTP `from` and `replyTo` as required runbook payload parameters. For provider reply waiting scenarios, `replyTo` must point to the mailbox indexed by the IMAP collector; reply lookup is filtered by that address.
+
+Zabbix runbooks use an `origin -> API URL/token` registry in the n8n environment. The origin is taken from the user-facing `problemUrl`; for example, `http://localhost:8081/tr_events.php?...` uses `http://localhost:8081`. For local Zabbix running in a separate Docker Compose project, use:
+
+```text
+COMPOSE_FILE=docker-compose.yml:docker-compose.zabbix.yml
+ZABBIX_DOCKER_NETWORK=zabbix_zabbix_internal
+ZABBIX_RUNBOOK_REQUIRED_ORIGINS=http://localhost:8081
+ZABBIX_API_URLS_BY_ORIGIN={"http://localhost:8081":"http://zabbix-web:8080/api_jsonrpc.php"}
+ZABBIX_API_TOKENS_BY_ORIGIN={"http://localhost:8081":"<zabbix-api-token>"}
+```
+
+`make runtime-check` verifies that the registry is configured, n8n can reach the Zabbix API from the container, and token values are not printed.
 
 Kafka transport security is selected by the administrator through env. Local/dev default:
 
@@ -279,6 +339,8 @@ Topics must be managed by infrastructure. Application services must not create t
 
 `external.events` is the default topic for inbound results from external async operations. The `ExternalEvent` consumer commits a Kafka offset only after a durable result, duplicate receipt, or `dead-letter` record exists. It uses separate `EXTERNAL_EVENT_TOPIC`, `EXTERNAL_EVENT_WORKER_GROUP_ID`, and `EXTERNAL_EVENT_WORKER_OFFSET_RESET` variables.
 
+`agent.tasks` is the default topic for durable continuation after terminal ExternalEvent. `async-agent-task-worker` claims queued `langgraph_resume` tasks from the state DB, links them to the external-event receipt, and moves the run to its final status. Without this worker, an n8n callback can be accepted while the scenario remains waiting for continuation.
+
 ## Long-Running Actions and External Events
 
 The platform owns the lifecycle of long waits. For scenarios such as "a provider email was sent, check again in an hour" or "n8n is running a long workflow", the runtime creates a `wait_state` with `case_id`, `wait_id`, `correlation_id`, expected `event_type`, `deadline_at` and `origin`.
@@ -292,7 +354,7 @@ POST http://127.0.0.1:18088/external-events/{source}
 Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 ```
 
-Local/dev callback URL may use `http://127.0.0.1`. In shared/staging/production set `ORCHESTRATOR_PUBLIC_URL=https://...`; outbound n8n webhook base is configured with `N8N_WEBHOOK_BASE_URL=https://...`.
+For local/dev with n8n running in Docker, the callback URL and CMDBuild URL must be reachable from the n8n container. Use `ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088` and `CMDBUILD_BASE_URL=http://hostmachine:8090/cmdbuild` by default; compose adds the `hostmachine:host-gateway` alias, and the orchestrator must bind to `0.0.0.0`. In shared/staging/production set `ORCHESTRATOR_PUBLIC_URL=https://...` and the production CMDBuild URL; outbound n8n webhook base is configured with `N8N_WEBHOOK_BASE_URL=https://...`.
 
 In local/dev, the shared `INTEGRATION_CALLBACK_TOKEN` is allowed. In shared/staging/production, use source-specific variables, for example `INTEGRATION_CALLBACK_TOKEN__N8N` for `POST /external-events/n8n`.
 
@@ -337,6 +399,8 @@ Before production operation, MVP limitations must be moved to production-grade i
 ## Troubleshooting
 
 - If Admin UI does not show new sections, restart FastAPI and reload the page without cache.
-- If LiteLLM does not respond, check `LITELLM_MASTER_KEY`, `OPENAI_API_KEY` and the `llm` profile.
+- If LiteLLM does not respond, check the `litellm` container, `LITELLM_MASTER_KEY`, `OPENAI_API_KEY`, `LITELLM_PUBLIC_BASE_URL` and `COMPOSE_LITELLM_BASE_URL`.
 - If Kafka is unavailable, check the `redpanda` container and port `19092`.
+- If an n8n webhook returns `auth_token_missing`, check that `N8N_WEBHOOK_TOKEN` is set in the `orchestrator` and `async-tool-worker` runtime.
+- If n8n returns `zabbix_status_failed`, run `make runtime-check`: the usual causes are missing `ZABBIX_API_TOKENS_BY_ORIGIN`, a missing origin from `problemUrl`, or the n8n container not being connected to the Zabbix Docker network.
 - If an n8n callback is rejected, check `INTEGRATION_CALLBACK_TOKEN` and endpoint id.

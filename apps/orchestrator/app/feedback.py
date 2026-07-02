@@ -5,6 +5,7 @@ import os
 import sqlite3
 import uuid
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -531,10 +532,15 @@ class FeedbackStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:

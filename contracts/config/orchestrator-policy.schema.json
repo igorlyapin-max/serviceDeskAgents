@@ -15,6 +15,18 @@
     "confidence_defaults": {
       "$ref": "#/$defs/confidence_thresholds"
     },
+    "editor_reference_hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hidden_fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/editor_reference_field"
+          }
+        }
+      }
+    },
     "policies": {
       "type": "array",
       "items": {
@@ -119,6 +131,52 @@
       "minLength": 1,
       "maxLength": 160,
       "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "editor_reference_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "contexts",
+        "display_name",
+        "description",
+        "show_in_hints"
+      ],
+      "properties": {
+        "field": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_.-]*$"
+        },
+        "contexts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "react_output",
+              "step_output",
+              "wait",
+              "channel"
+            ]
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "show_in_hints": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

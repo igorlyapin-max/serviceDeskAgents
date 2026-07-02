@@ -5,9 +5,12 @@ from typing import Any
 
 from .config_registry import (
     canonical_react_parameter_schema,
+    constant_source_ref,
     react_visible_parameter_schema,
     schema_properties,
+    schema_parameter_default,
     schema_required,
+    schema_required_parameter_groups,
 )
 
 
@@ -519,7 +522,12 @@ def compile_attribute_resolution_step(
     errors.extend(_template_reference_errors(instruction=instruction, slots=slots, tools=tools, tool=tool, previous_steps=previous_steps))
     parameter_schema = _react_parameter_schema(tool)
     parameters = list(schema_properties(parameter_schema).keys())
-    required_parameters = set(schema_required(parameter_schema))
+    required_parameters = {
+        parameter
+        for group in schema_required_parameter_groups(parameter_schema)
+        for parameter in group
+    }
+    required_parameters.update(schema_required(parameter_schema))
     parameter_mapping: dict[str, str] = {}
     selected_react_call = tool.get("tool_name") or requested_react_call
     if re.search(r"\bentity:", instruction or "", flags=re.IGNORECASE):
@@ -555,6 +563,10 @@ def compile_attribute_resolution_step(
             parameter_mapping[parameter] = f"slot:{slot['slot_id']}"
             continue
         if parameter in required_parameters:
+            has_default, default_value = schema_parameter_default(parameter_schema, parameter)
+            if has_default:
+                parameter_mapping[parameter] = constant_source_ref(default_value)
+                continue
             errors.append(f"Не удалось подобрать источник для обязательного параметра шага: {parameter}.")
         else:
             warnings.append(f"Не удалось подобрать источник для необязательного параметра шага: {parameter}.")

@@ -146,6 +146,8 @@ def fetch_openapi_contract(endpoint: dict[str, Any], contract_source: dict[str, 
         raise OpenApiContractError(f"Не удалось получить OpenAPI-контракт: {error}") from error
     if len(body) > MAX_OPENAPI_CONTRACT_BYTES:
         raise OpenApiContractError("OpenAPI-контракт слишком большой для импорта в UI.")
+    if not body.strip():
+        raise OpenApiContractError("OpenAPI endpoint вернул пустое тело ответа.")
     try:
         document = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -332,8 +334,17 @@ def default_parameter_mapping(operation: dict[str, Any]) -> dict[str, str]:
 def default_result_mapping(operation: dict[str, Any]) -> dict[str, str]:
     return {
         result_name: result_name
-        for result_name in schema_property_names(operation.get("response_schema"))
+        for result_name in schema_property_names(operation_result_schema(operation))
     }
+
+
+def operation_result_schema(operation: dict[str, Any]) -> dict[str, Any]:
+    async_contracts = operation.get("async_event_contracts")
+    if isinstance(async_contracts, dict) and len(async_contracts) == 1:
+        contract = next(iter(async_contracts.values()))
+        if isinstance(contract, dict) and isinstance(contract.get("result_schema"), dict):
+            return contract["result_schema"]
+    return operation.get("response_schema") or {"type": "object", "additionalProperties": True}
 
 
 def default_react_policy(action_type: str, operation: dict[str, Any]) -> dict[str, Any]:
@@ -375,7 +386,7 @@ def proposed_react_calls_for_operations(
             or f"ReAct-вызов ИИ для OpenAPI операции {operation_id}.",
             "endpoint_bindings": [binding],
             "parameters_schema": copy.deepcopy(operation.get("request_schema") or {"type": "object", "additionalProperties": True}),
-            "result_schema": copy.deepcopy(operation.get("response_schema") or {"type": "object", "additionalProperties": True}),
+            "result_schema": copy.deepcopy(operation_result_schema(operation)),
             "contract_version": str(operation.get("contract_version") or "1.0"),
             "contract_status": str(operation.get("contract_status") or "draft"),
             "policy": default_react_policy(action_type, operation),
@@ -443,6 +454,111 @@ def schema_or_default(schema: Any, document: dict[str, Any], warnings: list[str]
         warnings.append(f"{context}: JSON Schema невалидна ({error.message}); использован свободный объект.")
         return {"type": "object", "additionalProperties": True}
     return resolved
+
+
+def schema_composition_variants(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(schema, dict):
+        return []
+    variants: list[dict[str, Any]] = []
+    for key in ("allOf", "oneOf", "anyOf"):
+        value = schema.get(key)
+        if isinstance(value, list):
+            variants.extend(item for item in value if isinstance(item, dict))
+    return variants
+
+
+def schema_properties(schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {}
+    properties = schema.get("properties")
+    result = dict(properties) if isinstance(properties, dict) else {}
+    for variant in schema_composition_variants(schema):
+        for name, property_schema in schema_properties(variant).items():
+            result.setdefault(name, property_schema)
+    return result
+
+
+def _schema_const_value(schema: dict[str, Any] | None, field_name: str) -> Any:
+    field_schema = schema_properties(schema).get(field_name)
+    return field_schema.get("const") if isinstance(field_schema, dict) else None
+
+
+def _is_async_accepted_schema(schema: dict[str, Any]) -> bool:
+    return (
+        _schema_const_value(schema, "runbook_status") == "accepted"
+        or _schema_const_value(schema, "async_delivery") is True
+    )
+
+
+def _async_contract_from_result_schema(
+    *,
+    event_type: str,
+    result_schema: dict[str, Any],
+    contract_version: str,
+    display_name: str,
+    description: str,
+) -> dict[str, Any]:
+    return {
+        event_type: {
+            "display_name": display_name,
+            "description": description,
+            "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+            "result_schema": copy.deepcopy(result_schema),
+            "contract_version": contract_version,
+            "contract_status": "valid",
+        }
+    }
+
+
+def async_event_contracts_for_operation(
+    operation: dict[str, Any],
+    document: dict[str, Any],
+    warnings: list[str],
+    *,
+    operation_id: str,
+    response_schema: dict[str, Any],
+    contract_version: str,
+) -> dict[str, dict[str, Any]]:
+    result_delivery = operation.get("x-result-delivery")
+    raw_event_type = (result_delivery or {}).get("event_type") if isinstance(result_delivery, dict) else None
+    event_type = normalize_operation_id(str(raw_event_type or f"{operation_id}_completed"), "post", "")
+
+    if isinstance(result_delivery, dict) and result_delivery.get("result_schema"):
+        raw_result_schema = result_delivery["result_schema"]
+        result_schema = schema_or_default(
+            {"$ref": raw_result_schema} if isinstance(raw_result_schema, str) else raw_result_schema,
+            document,
+            warnings,
+            context=f"{operation_id} x-result-delivery.result_schema",
+        )
+        return _async_contract_from_result_schema(
+            event_type=event_type,
+            result_schema=result_schema,
+            contract_version=contract_version,
+            display_name=str(result_delivery.get("display_name") or f"{operation_id} completed"),
+            description=str(
+                result_delivery.get("description")
+                or f"Финальный external event для операции {operation_id}."
+            ),
+        )
+
+    variants = schema_composition_variants(response_schema)
+    if not variants:
+        return {}
+    accepted_variants = [item for item in variants if _is_async_accepted_schema(item)]
+    result_variants = [item for item in variants if not _is_async_accepted_schema(item)]
+    if len(accepted_variants) == 1 and len(result_variants) == 1:
+        return _async_contract_from_result_schema(
+            event_type=event_type,
+            result_schema=result_variants[0],
+            contract_version=contract_version,
+            display_name=f"{operation_id} completed",
+            description=(
+                f"Финальный external event для операции {operation_id}, "
+                "выделенный из OpenAPI oneOf accepted/result."
+            ),
+        )
+    return {}
 
 
 def _content_json_schema(content: dict[str, Any] | None) -> Any:
@@ -594,9 +710,25 @@ def import_openapi_operations(document: dict[str, Any]) -> dict[str, Any]:
                 operation_warnings,
                 operation_id=operation_id,
             )
+            async_event_contracts = async_event_contracts_for_operation(
+                operation,
+                document,
+                operation_warnings,
+                operation_id=operation_id,
+                response_schema=response_schema,
+                contract_version=contract_version,
+            )
             warnings.extend(operation_warnings)
             display_name = str(operation.get("summary") or operation.get("operationId") or operation_id)
             description = str(operation.get("description") or operation.get("summary") or f"OpenAPI операция {operation_id}.")
+            result_delivery = operation.get("x-result-delivery") if isinstance(operation.get("x-result-delivery"), dict) else None
+            extensions = {
+                "contract_source": "openapi_3_1",
+                "openapi_path": str(path),
+                "openapi_operation_id": operation.get("operationId") or operation_id,
+            }
+            if result_delivery:
+                extensions["result_delivery"] = copy.deepcopy(result_delivery)
             operations[operation_id] = {
                 "display_name": display_name,
                 "description": description,
@@ -604,15 +736,11 @@ def import_openapi_operations(document: dict[str, Any]) -> dict[str, Any]:
                 "path": str(path),
                 "request_schema": request_schema,
                 "response_schema": response_schema,
-                "async_event_contracts": {},
+                "async_event_contracts": async_event_contracts,
                 "contract_version": contract_version,
                 "contract_status": "draft" if operation_warnings else "valid",
                 "timeout_seconds": 30,
-                "extensions": {
-                    "contract_source": "openapi_3_1",
-                    "openapi_path": str(path),
-                    "openapi_operation_id": operation.get("operationId") or operation_id,
-                },
+                "extensions": extensions,
             }
 
     if not operations:

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -38,6 +39,73 @@ class KafkaRuntimeError(RuntimeError):
 KAFKA_SECURITY_PROTOCOLS = {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}
 KAFKA_SASL_MECHANISMS = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"}
 SERVICEDESK_RESULT_CODES = {"Выполнено", "Не выполнено"}
+
+
+class RuntimeHeartbeat:
+    def __init__(
+        self,
+        processing_store: ProcessingStore,
+        *,
+        role: str,
+        display_name: str,
+        worker_id: str,
+        topic: str | None = None,
+        interval_seconds: float | None = None,
+    ):
+        self.processing_store = processing_store
+        self.role = role
+        self.display_name = display_name
+        self.worker_id = worker_id
+        self.topic = topic
+        self.interval_seconds = interval_seconds or float(os.getenv("ASYNC_RUNTIME_HEARTBEAT_INTERVAL_SECONDS", "5"))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "RuntimeHeartbeat":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: BaseException | None, traceback: Any) -> None:
+        if exc is None:
+            self.stop(status="stopped")
+        else:
+            self.stop(status="error", error=str(exc))
+
+    def start(self) -> None:
+        self.beat(status="ok")
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{self.role}-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, *, status: str = "stopped", error: str | None = None) -> None:
+        self._stop.set()
+        self.beat(status=status, error=error)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def beat(
+        self,
+        *,
+        status: str = "ok",
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.processing_store.record_runtime_heartbeat(
+            role=self.role,
+            display_name=self.display_name,
+            worker_id=self.worker_id,
+            topic=self.topic,
+            status=status,
+            details=details,
+            error=error,
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(max(1.0, self.interval_seconds)):
+            self.beat(status="ok")
 
 
 class MessageProducer(Protocol):
@@ -171,12 +239,20 @@ class OutboxPublisher:
         producer: MessageProducer,
         *,
         worker_id: str | None = None,
+        topic: str | None = None,
     ):
         self.processing_store = processing_store
         self.producer = producer
         self.worker_id = worker_id or f"outbox-publisher-{uuid.uuid4().hex[:8]}"
+        self.topic = topic or "*"
 
-    def publish_batch(self, *, limit: int = 50, topics: list[str] | None = None) -> dict[str, Any]:
+    def publish_batch(
+        self,
+        *,
+        limit: int = 50,
+        topics: list[str] | None = None,
+        close_producer: bool = True,
+    ) -> dict[str, Any]:
         messages = self.processing_store.claim_outbox_batch(
             worker_id=self.worker_id,
             limit=limit,
@@ -224,9 +300,10 @@ class OutboxPublisher:
                     message_id=message.get("message_id"),
                     error=str(error),
                 )
-        close = getattr(self.producer, "close", None)
-        if callable(close):
-            close()
+        if close_producer:
+            close = getattr(self.producer, "close", None)
+            if callable(close):
+                close()
         return {
             "schema_version": "1.0",
             "claimed": len(messages),
@@ -234,12 +311,65 @@ class OutboxPublisher:
             "failed": failed,
         }
 
+    def publish_forever(
+        self,
+        *,
+        limit: int = 50,
+        topics: list[str] | None = None,
+        interval_seconds: float = 2.0,
+        max_batches: int | None = None,
+    ) -> dict[str, Any]:
+        totals = {
+            "schema_version": "1.0",
+            "mode": "publisher",
+            "batches": 0,
+            "claimed": 0,
+            "published": 0,
+            "failed": 0,
+        }
+        heartbeat_topic = ",".join(topics) if topics else self.topic
+        heartbeat = RuntimeHeartbeat(
+            self.processing_store,
+            role="outbox_publisher",
+            display_name="Outbox publisher",
+            worker_id=self.worker_id,
+            topic=heartbeat_topic,
+        )
+        try:
+            with heartbeat:
+                while True:
+                    result = self.publish_batch(limit=limit, topics=topics, close_producer=False)
+                    totals["batches"] += 1
+                    totals["claimed"] += int(result.get("claimed") or 0)
+                    totals["published"] += int(result.get("published") or 0)
+                    totals["failed"] += int(result.get("failed") or 0)
+                    heartbeat.beat(status="ok", details=totals)
+                    log_json(
+                        logger,
+                        logging.INFO,
+                        "outbox_publisher_batch_completed",
+                        claimed=result.get("claimed"),
+                        published=result.get("published"),
+                        failed=result.get("failed"),
+                        batch=totals["batches"],
+                    )
+                    if max_batches is not None and totals["batches"] >= max_batches:
+                        return totals
+                    if int(result.get("claimed") or 0) == 0:
+                        time.sleep(max(0.1, interval_seconds))
+        finally:
+            close = getattr(self.producer, "close", None)
+            if callable(close):
+                close()
+
 
 def kafka_api_version() -> tuple[int, ...]:
-    value = os.getenv("KAFKA_API_VERSION", "2.8.0").strip()
+    value = os.getenv("KAFKA_API_VERSION", "2.3.0").strip()
     parts = [int(part) for part in value.split(".") if part.strip()]
     if not 2 <= len(parts) <= 3:
         raise KafkaRuntimeError("KAFKA_API_VERSION должен иметь формат major.minor или major.minor.patch.")
+    if len(parts) == 3 and parts[2] == 0:
+        parts = parts[:2]
     return tuple(parts)
 
 
@@ -269,10 +399,12 @@ class ToolCommandWorker:
         dispatcher: IntegrationDispatcher,
         *,
         worker_id: str | None = None,
+        topic: str | None = None,
     ):
         self.processing_store = processing_store
         self.dispatcher = dispatcher
         self.worker_id = worker_id or f"tool-worker-{uuid.uuid4().hex[:8]}"
+        self.topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
 
     def process_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command = self._extract_command(command)
@@ -362,53 +494,65 @@ class ToolCommandWorker:
         failed = 0
         dead_lettered = 0
         handled = 0
-        for item in commands:
-            if limit is not None and handled >= limit:
-                break
-            command: dict[str, Any] | None = None
-            try:
-                command = self._extract_command(item)
-                self.process_command(command)
-                self._commit_record(item)
-                processed += 1
-                handled += 1
-            except (KafkaRuntimeError, ProcessingConflict, ProcessingNotFound) as error:
-                failed += 1
-                handled += 1
-                if command is None:
-                    command = self._dead_letter_command(item)
+        with RuntimeHeartbeat(
+            self.processing_store,
+            role="tool_worker",
+            display_name="Tool command worker",
+            worker_id=self.worker_id,
+            topic=self.topic,
+        ) as heartbeat:
+            for item in commands:
+                if limit is not None and handled >= limit:
+                    break
+                command: dict[str, Any] | None = None
+                heartbeat.beat(status="ok", details={"handled": handled, "processed": processed, "failed": failed})
                 try:
-                    self.processing_store.record_tool_command_dead_letter(
-                        command,
-                        str(error),
-                        worker_id=self.worker_id,
-                    )
+                    command = self._extract_command(item)
+                    self.process_command(command)
                     self._commit_record(item)
-                    dead_lettered += 1
-                except Exception as dlq_error:  # noqa: BLE001 - no ack without durable failure record
+                    processed += 1
+                    handled += 1
+                except (KafkaRuntimeError, ProcessingConflict, ProcessingNotFound) as error:
+                    failed += 1
+                    handled += 1
+                    if command is None:
+                        command = self._dead_letter_command(item)
+                    try:
+                        self.processing_store.record_tool_command_dead_letter(
+                            command,
+                            str(error),
+                            worker_id=self.worker_id,
+                        )
+                        self._commit_record(item)
+                        dead_lettered += 1
+                    except Exception as dlq_error:  # noqa: BLE001 - no ack without durable failure record
+                        log_json(
+                            logger,
+                            logging.ERROR,
+                            "tool_command_dead_letter_failed",
+                            error=ProcessingStore._sanitize_error_text(str(dlq_error)),
+                        )
+                    metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
                     log_json(
                         logger,
                         logging.ERROR,
-                        "tool_command_dead_letter_failed",
-                        error=ProcessingStore._sanitize_error_text(str(dlq_error)),
+                        "tool_command_failed",
+                        error=ProcessingStore._sanitize_error_text(str(error)),
                     )
-                metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
-                log_json(
-                    logger,
-                    logging.ERROR,
-                    "tool_command_failed",
-                    error=ProcessingStore._sanitize_error_text(str(error)),
-                )
-            except Exception as error:  # noqa: BLE001 - no commit for transient/unclassified failures
-                failed += 1
-                handled += 1
-                metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
-                log_json(
-                    logger,
-                    logging.ERROR,
-                    "tool_command_failed_without_commit",
-                    error=ProcessingStore._sanitize_error_text(str(error)),
-                )
+                except Exception as error:  # noqa: BLE001 - no commit for transient/unclassified failures
+                    failed += 1
+                    handled += 1
+                    metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
+                    log_json(
+                        logger,
+                        logging.ERROR,
+                        "tool_command_failed_without_commit",
+                        error=ProcessingStore._sanitize_error_text(str(error)),
+                    )
+            heartbeat.beat(
+                status="ok",
+                details={"handled": handled, "processed": processed, "failed": failed, "dead_lettered": dead_lettered},
+            )
         return {
             "schema_version": "1.0",
             "processed": processed,
@@ -521,11 +665,13 @@ class ExternalEventWorker:
         contracts: ContractRegistry,
         *,
         worker_id: str | None = None,
+        topic: str | None = None,
     ):
         self.processing_store = processing_store
         self.config_store = config_store
         self.contracts = contracts
         self.worker_id = worker_id or f"external-event-worker-{uuid.uuid4().hex[:8]}"
+        self.topic = topic or os.getenv("EXTERNAL_EVENT_TOPIC", DEFAULT_EXTERNAL_EVENT_TOPIC)
 
     def process_event(
         self,
@@ -579,58 +725,70 @@ class ExternalEventWorker:
         failed = 0
         dead_lettered = 0
         handled = 0
-        for item in events:
-            if limit is not None and handled >= limit:
-                break
-            event: dict[str, Any] | None = None
-            try:
-                event = self._extract_event(item)
-                self.process_event(
-                    item,
-                    received_transport="kafka_event" if isinstance(item, KafkaCommandRecord) else "internal",
-                    source_topic=getattr(item, "topic", None),
-                )
-                self._commit_record(item)
-                processed += 1
-                handled += 1
-            except (ContractValidationError, KafkaRuntimeError, ProcessingConflict, ProcessingNotFound) as error:
-                failed += 1
-                handled += 1
-                if event is None:
-                    event = self._dead_letter_event(item)
+        with RuntimeHeartbeat(
+            self.processing_store,
+            role="external_event_worker",
+            display_name="External event worker",
+            worker_id=self.worker_id,
+            topic=self.topic,
+        ) as heartbeat:
+            for item in events:
+                if limit is not None and handled >= limit:
+                    break
+                event: dict[str, Any] | None = None
+                heartbeat.beat(status="ok", details={"handled": handled, "processed": processed, "failed": failed})
                 try:
-                    self.processing_store.record_external_event_dead_letter(
-                        event,
-                        str(error),
-                        worker_id=self.worker_id,
-                        source_topic=getattr(item, "topic", DEFAULT_EXTERNAL_EVENT_TOPIC),
+                    event = self._extract_event(item)
+                    self.process_event(
+                        item,
+                        received_transport="kafka_event" if isinstance(item, KafkaCommandRecord) else "internal",
+                        source_topic=getattr(item, "topic", None),
                     )
                     self._commit_record(item)
-                    dead_lettered += 1
-                except Exception as dlq_error:  # noqa: BLE001 - no ack without durable failure record
+                    processed += 1
+                    handled += 1
+                except (ContractValidationError, KafkaRuntimeError, ProcessingConflict, ProcessingNotFound) as error:
+                    failed += 1
+                    handled += 1
+                    if event is None:
+                        event = self._dead_letter_event(item)
+                    try:
+                        self.processing_store.record_external_event_dead_letter(
+                            event,
+                            str(error),
+                            worker_id=self.worker_id,
+                            source_topic=getattr(item, "topic", DEFAULT_EXTERNAL_EVENT_TOPIC),
+                        )
+                        self._commit_record(item)
+                        dead_lettered += 1
+                    except Exception as dlq_error:  # noqa: BLE001 - no ack without durable failure record
+                        log_json(
+                            logger,
+                            logging.ERROR,
+                            "external_event_dead_letter_failed",
+                            error=ProcessingStore._sanitize_error_text(str(dlq_error)),
+                        )
+                    metrics.increment("external_event_worker_total", {"source": "unknown", "status": "failed"})
                     log_json(
                         logger,
                         logging.ERROR,
-                        "external_event_dead_letter_failed",
-                        error=ProcessingStore._sanitize_error_text(str(dlq_error)),
+                        "external_event_failed",
+                        error=ProcessingStore._sanitize_error_text(str(error)),
                     )
-                metrics.increment("external_event_worker_total", {"source": "unknown", "status": "failed"})
-                log_json(
-                    logger,
-                    logging.ERROR,
-                    "external_event_failed",
-                    error=ProcessingStore._sanitize_error_text(str(error)),
-                )
-            except Exception as error:  # noqa: BLE001 - no commit for transient/unclassified failures
-                failed += 1
-                handled += 1
-                metrics.increment("external_event_worker_total", {"source": "unknown", "status": "failed"})
-                log_json(
-                    logger,
-                    logging.ERROR,
-                    "external_event_failed_without_commit",
-                    error=ProcessingStore._sanitize_error_text(str(error)),
-                )
+                except Exception as error:  # noqa: BLE001 - no commit for transient/unclassified failures
+                    failed += 1
+                    handled += 1
+                    metrics.increment("external_event_worker_total", {"source": "unknown", "status": "failed"})
+                    log_json(
+                        logger,
+                        logging.ERROR,
+                        "external_event_failed_without_commit",
+                        error=ProcessingStore._sanitize_error_text(str(error)),
+                    )
+            heartbeat.beat(
+                status="ok",
+                details={"handled": handled, "processed": processed, "failed": failed, "dead_lettered": dead_lettered},
+            )
         return {
             "schema_version": "1.0",
             "processed": processed,
@@ -865,6 +1023,124 @@ class ExternalEventWorker:
         }
 
 
+class AgentTaskWorker:
+    def __init__(
+        self,
+        processing_store: ProcessingStore,
+        *,
+        worker_id: str | None = None,
+        topic: str | None = None,
+        lease_seconds: int | None = None,
+    ):
+        self.processing_store = processing_store
+        self.worker_id = worker_id or f"agent-task-worker-{uuid.uuid4().hex[:8]}"
+        self.topic = topic or os.getenv("AGENT_TASK_TOPIC", "agent.tasks")
+        self.lease_seconds = lease_seconds or int(os.getenv("AGENT_TASK_LEASE_SECONDS", "60"))
+
+    def process_batch(self, *, limit: int = 50, heartbeat: RuntimeHeartbeat | None = None) -> dict[str, Any]:
+        if heartbeat is None:
+            with RuntimeHeartbeat(
+                self.processing_store,
+                role="agent_task_worker",
+                display_name="Agent task worker",
+                worker_id=self.worker_id,
+                topic=self.topic,
+            ) as batch_heartbeat:
+                return self._process_batch(limit=limit, heartbeat=batch_heartbeat)
+        return self._process_batch(limit=limit, heartbeat=heartbeat)
+
+    def _process_batch(self, *, limit: int = 50, heartbeat: RuntimeHeartbeat) -> dict[str, Any]:
+        processed = 0
+        failed = 0
+        handled = 0
+        while handled < max(1, limit):
+            heartbeat.beat(status="ok", details={"handled": handled, "processed": processed, "failed": failed})
+            task = self.processing_store.claim_next_task(
+                task_type="langgraph_resume",
+                worker_id=self.worker_id,
+                lease_seconds=self.lease_seconds,
+            )
+            if not task:
+                break
+            handled += 1
+            try:
+                result = self.processing_store.process_external_event_resume_task(
+                    task,
+                    worker_id=self.worker_id,
+                )
+                processed += 1
+                metrics.increment("agent_task_worker_total", {"task_type": task.get("task_type"), "status": "completed"})
+                log_json(
+                    logger,
+                    logging.INFO,
+                    "agent_task_processed",
+                    task_id=task.get("task_id"),
+                    task_type=task.get("task_type"),
+                    run_id=task.get("run_id"),
+                    case_id=task.get("case_id"),
+                    result=result,
+                )
+            except Exception as error:  # noqa: BLE001 - durable task failure is better than silent queue buildup
+                failed += 1
+                self.processing_store.fail_task(
+                    task["task_id"],
+                    worker_id=self.worker_id,
+                    error=str(error),
+                )
+                metrics.increment("agent_task_worker_total", {"task_type": task.get("task_type"), "status": "failed"})
+                log_json(
+                    logger,
+                    logging.ERROR,
+                    "agent_task_failed",
+                    task_id=task.get("task_id"),
+                    task_type=task.get("task_type"),
+                    run_id=task.get("run_id"),
+                    case_id=task.get("case_id"),
+                    error=ProcessingStore._sanitize_error_text(str(error)),
+                )
+        heartbeat.beat(status="ok", details={"handled": handled, "processed": processed, "failed": failed})
+        return {
+            "schema_version": "1.0",
+            "processed": processed,
+            "failed": failed,
+            "handled": handled,
+        }
+
+    def process_forever(
+        self,
+        *,
+        limit: int = 50,
+        interval_seconds: float = 2.0,
+        max_batches: int | None = None,
+    ) -> dict[str, Any]:
+        totals = {"schema_version": "1.0", "processed": 0, "failed": 0, "handled": 0, "batches": 0}
+        with RuntimeHeartbeat(
+            self.processing_store,
+            role="agent_task_worker",
+            display_name="Agent task worker",
+            worker_id=self.worker_id,
+            topic=self.topic,
+        ) as heartbeat:
+            while max_batches is None or totals["batches"] < max_batches:
+                result = self.process_batch(limit=limit, heartbeat=heartbeat)
+                totals["processed"] += int(result.get("processed") or 0)
+                totals["failed"] += int(result.get("failed") or 0)
+                totals["handled"] += int(result.get("handled") or 0)
+                totals["batches"] += 1
+                heartbeat.beat(status="ok", details=totals)
+                if result.get("handled"):
+                    log_json(
+                        logger,
+                        logging.INFO,
+                        "agent_task_worker_batch_completed",
+                        processed=result.get("processed"),
+                        failed=result.get("failed"),
+                        handled=result.get("handled"),
+                    )
+                time.sleep(max(0.2, interval_seconds))
+        return totals
+
+
 def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingStore, IntegrationDispatcher]:
     contracts = ContractRegistry()
     case_store = CaseStore(contracts)
@@ -883,9 +1159,11 @@ def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingSt
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ServiceDeskAgents Kafka async runtime")
-    parser.add_argument("mode", choices=["publish-once", "worker", "external-event-worker"])
+    parser.add_argument("mode", choices=["publish-once", "publisher", "worker", "external-event-worker", "agent-task-worker"])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--topic")
+    parser.add_argument("--interval-seconds", type=float, default=2.0)
+    parser.add_argument("--max-batches", type=int)
     args = parser.parse_args()
 
     configure_logging()
@@ -896,14 +1174,44 @@ def main() -> None:
         result = OutboxPublisher(
             processing_store,
             JsonKafkaProducer(),
+            topic="*",
         ).publish_batch(limit=publish_limit)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+
+    if args.mode == "publisher":
+        publish_limit = args.limit if args.limit is not None else 50
+        topics = [args.topic] if args.topic else None
+        result = OutboxPublisher(
+            processing_store,
+            JsonKafkaProducer(),
+            topic=args.topic or "*",
+        ).publish_forever(
+            limit=publish_limit,
+            topics=topics,
+            interval_seconds=args.interval_seconds,
+            max_batches=args.max_batches,
+        )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
 
     if args.mode == "worker":
         topic = args.topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
         consumer = JsonKafkaConsumer(topic=topic)
-        result = ToolCommandWorker(processing_store, dispatcher).process_commands(consumer, limit=args.limit)
+        result = ToolCommandWorker(processing_store, dispatcher, topic=topic).process_commands(consumer, limit=args.limit)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+
+    if args.mode == "agent-task-worker":
+        task_limit = args.limit if args.limit is not None else 50
+        result = AgentTaskWorker(
+            processing_store,
+            topic=args.topic or os.getenv("AGENT_TASK_TOPIC", "agent.tasks"),
+        ).process_forever(
+            limit=task_limit,
+            interval_seconds=args.interval_seconds,
+            max_batches=args.max_batches,
+        )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
 
@@ -913,7 +1221,10 @@ def main() -> None:
         group_id=os.getenv("EXTERNAL_EVENT_WORKER_GROUP_ID", "servicedesk-external-event-workers"),
         offset_reset_env="EXTERNAL_EVENT_WORKER_OFFSET_RESET",
     )
-    result = ExternalEventWorker(processing_store, config_store, contracts).process_events(consumer, limit=args.limit)
+    result = ExternalEventWorker(processing_store, config_store, contracts, topic=topic).process_events(
+        consumer,
+        limit=args.limit,
+    )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 

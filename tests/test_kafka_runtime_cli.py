@@ -22,6 +22,7 @@ class KafkaRuntimeCliTest(unittest.TestCase):
         event_worker.process_events.return_value = {"mode": "external-event-worker"}
         producer = Mock(name="producer")
         consumer = Mock(name="consumer")
+        publisher.publish_forever.return_value = {"mode": "publisher"}
 
         with (
             patch.object(sys, "argv", ["kafka_runtime", *argv]),
@@ -57,6 +58,38 @@ class KafkaRuntimeCliTest(unittest.TestCase):
 
         result["publisher"].publish_batch.assert_called_once_with(limit=3)
 
+    def test_outbox_publisher_is_long_running_by_default(self) -> None:
+        result = self.run_main(["publisher"])
+
+        result["publisher"].publish_forever.assert_called_once_with(
+            limit=50,
+            topics=None,
+            interval_seconds=2.0,
+            max_batches=None,
+        )
+
+    def test_outbox_publisher_supports_topic_interval_and_batch_limit(self) -> None:
+        result = self.run_main(
+            [
+                "publisher",
+                "--topic",
+                "tool.commands",
+                "--limit",
+                "3",
+                "--interval-seconds",
+                "0.5",
+                "--max-batches",
+                "2",
+            ]
+        )
+
+        result["publisher"].publish_forever.assert_called_once_with(
+            limit=3,
+            topics=["tool.commands"],
+            interval_seconds=0.5,
+            max_batches=2,
+        )
+
     def test_tool_worker_without_limit_is_long_running(self) -> None:
         result = self.run_main(["worker"])
 
@@ -86,6 +119,10 @@ class KafkaRuntimeCliTest(unittest.TestCase):
             config = kafka_runtime.kafka_client_security_config()
 
         self.assertEqual(config, {"security_protocol": "PLAINTEXT"})
+
+    def test_kafka_api_version_normalizes_zero_patch(self) -> None:
+        with patch.dict(os.environ, {"KAFKA_API_VERSION": "2.8.0"}, clear=True):
+            self.assertEqual(kafka_runtime.kafka_api_version(), (2, 8))
 
     def test_kafka_security_config_supports_sasl_ssl(self) -> None:
         with patch.dict(

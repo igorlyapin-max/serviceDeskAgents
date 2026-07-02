@@ -25,7 +25,7 @@ from .config_registry import (
     tool_usage_refs,
 )
 from .contracts import ContractRegistry, ContractValidationError
-from .debug_runtime import DebugRuntime, DebugRuntimeError
+from .debug_runtime import DebugRuntime, DebugRuntimeError, redact_text
 from .local_env import LocalEnvError, set_local_env_value
 from .metrics import metrics
 from .openapi_contracts import OpenApiContractError, preview_openapi_contract
@@ -139,6 +139,7 @@ class AdminConfigDraftCreateRequest(BaseModel):
     payload: dict[str, Any] = Field()
     operator_id: str = Field()
     base_version_id: str | None = Field(default=None)
+    scope: dict[str, Any] | None = Field(default=None)
 
 
 class AdminConfigDraftActionRequest(BaseModel):
@@ -1431,6 +1432,35 @@ def debug_waits(
     return processing_store.list_waits(limit=limit)
 
 
+@app.get("/debug/async-delivery")
+def debug_async_delivery(
+    case_id: str | None = None,
+    wait_id: str | None = None,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.async_delivery.read",
+            resource_type="async_delivery",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        if wait_id:
+            return processing_store.async_delivery_for_wait(wait_id)
+        if case_id:
+            return processing_store.async_delivery_for_case(case_id)
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise debug_error_response(error) from error
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "missing_async_delivery_target",
+            "message": "Укажите case_id или wait_id для диагностики async-доставки.",
+        },
+    )
+
+
 @app.get("/debug/integration-operations")
 def debug_integration_operations(
     context: SecurityContext = Depends(
@@ -1644,6 +1674,7 @@ def analyze_ticket(
         )
     ),
 ) -> dict[str, Any]:
+    ticket_input: dict[str, Any] = {}
     try:
         ticket_input = model_to_dict(request)
         analysis = workflow.analyze(ticket_input)
@@ -1668,6 +1699,50 @@ def analyze_ticket(
         ) from error
     except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
         raise processing_error_response(error) from error
+    except Exception as error:
+        error_text = str(error) or type(error).__name__
+        safe_error_text = redact_text(error_text)
+        ticket_id = ticket_input.get("ticket_id") or request.ticket_id
+        case_id = ticket_input.get("case_id") or request.case_id
+        log_json(
+            logger,
+            logging.ERROR,
+            "tickets_analyze_unhandled_error",
+            error_type=type(error).__name__,
+            error=safe_error_text,
+            ticket_id=ticket_id,
+            case_id=case_id,
+        )
+        log_debug_event(
+            logger,
+            "tickets_analyze_unhandled_error",
+            error_type=type(error).__name__,
+            ticket_id=ticket_id,
+            case_id=case_id,
+            verbose_fields={
+                "error": safe_error_text,
+                "ticket_input": ticket_input,
+            },
+        )
+        audit_error(
+            context,
+            http_request,
+            action="tickets.analyze",
+            resource_type="case",
+            resource_id=case_id,
+            permission="cases.operate",
+            status_code=500,
+            message=f"{type(error).__name__}: {safe_error_text}",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "tickets_analyze_unhandled_error",
+                "message": "Анализ заявки завершился ошибкой до фактического результата.",
+                "ticket_id": ticket_id,
+                "case_id": case_id,
+            },
+        ) from error
 
 
 @app.post("/cases")
@@ -3265,6 +3340,7 @@ def admin_create_config_draft(
             payload=request.payload,
             created_by=request.operator_id,
             base_version_id=request.base_version_id,
+            scope=request.scope,
         )
         audit_success(
             context,
@@ -3676,14 +3752,38 @@ def admin_regression_config_draft(
         if draft.get("validation", {}).get("status") != "valid":
             draft = config_store.validate_draft(draft_id)
         active_overrides = None
-        if draft.get("validation", {}).get("status") == "valid":
+        if (
+            config_store.is_scoped_attribute_resolution_profile_draft(draft)
+            and draft.get("validation", {}).get("status") == "valid"
+        ):
+            regression = {
+                "schema_version": "1.0",
+                "domain": draft["domain"],
+                "status": "skipped",
+                "run_at": utc_now(),
+                "gates": [
+                    {
+                        "gate_id": "scoped_profile_regression",
+                        "status": "skipped",
+                        "message": "Регрессионная проверка пропущена для scoped-активации одного профиля.",
+                    }
+                ],
+            }
+        elif draft.get("validation", {}).get("status") == "valid":
             active_overrides = config_store.normalized_draft_payloads_for_regression(draft_id)
-        regression = build_config_regression(
-            draft,
-            operator_id=request.operator_id,
-            limit=request.limit,
-            active_overrides=active_overrides,
-        )
+            regression = build_config_regression(
+                draft,
+                operator_id=request.operator_id,
+                limit=request.limit,
+                active_overrides=active_overrides,
+            )
+        else:
+            regression = build_config_regression(
+                draft,
+                operator_id=request.operator_id,
+                limit=request.limit,
+                active_overrides=active_overrides,
+            )
         draft = config_store.save_regression(draft_id, regression)
         audit_success(
             context,

@@ -791,6 +791,221 @@
           },
           "contract_version": "1.0",
           "contract_status": "valid"
+        },
+        "monitor_provider_channel_repair": {
+          "display_name": "Мониторить ремонт канала провайдера",
+          "description": "Запустить async n8n workflow письма провайдеру и мониторинга восстановления через Zabbix/email.",
+          "method": "POST",
+          "path": "/provider/channel-repair/monitor",
+          "request_schema": {
+            "type": "object",
+            "required": [
+              "problemUrl",
+              "service_request",
+              "from",
+              "replyTo"
+            ],
+            "properties": {
+              "problem_host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "router_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "problemUrl": {
+                "type": "string",
+                "minLength": 1
+              },
+              "service_request": {
+                "type": "string",
+                "minLength": 1
+              },
+              "poll_interval_minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60
+              },
+              "timeout_minutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 240
+              },
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "replyTo": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "problem_host"
+                ]
+              },
+              {
+                "required": [
+                  "router_ref"
+                ]
+              }
+            ],
+            "additionalProperties": true
+          },
+          "timeout_seconds": 15,
+          "response_schema": {
+            "type": "object",
+            "required": [
+              "runbook_status",
+              "message",
+              "async_delivery"
+            ],
+            "properties": {
+              "runbook_status": {
+                "type": "string",
+                "const": "accepted"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "async_delivery": {
+                "type": "boolean",
+                "const": true
+              },
+              "correlation_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "wait_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "result_transport": {
+                "type": "string",
+                "enum": [
+                  "http_callback",
+                  "kafka_event",
+                  "both"
+                ]
+              },
+              "result_topic": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          },
+          "async_event_contracts": {
+            "monitor_provider_channel_repair_completed": {
+              "display_name": "Результат мониторинга ремонта канала",
+              "description": "Terminal или progress ExternalEvent от provider channel repair monitor.",
+              "statuses": [
+                "progress",
+                "success",
+                "error",
+                "timeout",
+                "cancelled"
+              ],
+              "result_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "message"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "enum": [
+                      "RESOLVED",
+                      "OK",
+                      "MULTI_MAIL",
+                      "DELIVERY_FAILED",
+                      "NOT_FOUND",
+                      "ERROR",
+                      "PROGRESS"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "router_lookup_status": {
+                    "type": "string"
+                  },
+                  "email_dispatch": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "email_result": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "polling_diagnostic": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "additionalProperties": true
+              },
+              "progress_schema": {
+                "type": "object",
+                "required": [
+                  "runbook_status",
+                  "polling_diagnostic"
+                ],
+                "properties": {
+                  "runbook_status": {
+                    "type": "string",
+                    "const": "PROGRESS"
+                  },
+                  "polling_diagnostic": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "additionalProperties": true
+              },
+              "error_schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "contract_version": "1.0",
+              "contract_status": "valid"
+            }
+          },
+          "extensions": {
+            "result_delivery": {
+              "canonical_event": "ServiceDesk ExternalEvent",
+              "async_callback_path": "invocation.extensions.async_callback",
+              "supported_transports": [
+                "http_callback",
+                "kafka_event",
+                "both"
+              ],
+              "default_transport": "kafka_event",
+              "default_result_topic": "external.events"
+            }
+          },
+          "contract_version": "1.0",
+          "contract_status": "valid"
         }
       }
     },

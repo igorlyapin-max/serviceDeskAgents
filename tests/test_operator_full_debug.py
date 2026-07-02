@@ -14,6 +14,7 @@ from apps.orchestrator.app.config_registry import (
     utc_now,
 )
 from apps.orchestrator.app.contracts import ContractRegistry
+from apps.orchestrator.app.integrations import IntegrationDispatcher
 from apps.orchestrator.app.workflow import TicketWorkflow
 
 
@@ -35,6 +36,7 @@ class FakeDispatcher:
             "policy_rule_id": invocation["policy_rule_id"],
             "duration_ms": 1,
             "attempts": 1,
+            "extensions": copy.deepcopy(invocation.get("extensions", {})),
             "output": {
                 "runbook_status": "accepted",
                 "message": "n8n принял запуск ранбука.",
@@ -345,6 +347,108 @@ class OperatorFullDebugTest(unittest.TestCase):
         self.assertTrue(analysis["execution_policy_results"][0]["extensions"]["debug_bypass_policy_gates"])
         self.assertEqual(dispatcher.invocations[0]["execution_mode"], "auto_execute")
         self.assertFalse(dispatcher.invocations[0]["approval_required"])
+
+    def test_operator_full_debug_preserves_profile_trace_metadata(self) -> None:
+        workflow = self.workflow()
+        dispatcher = FakeDispatcher()
+        workflow.integration_dispatcher = dispatcher
+        decision_override = workflow._runbook_decision({"service": "billing-worker"})
+        decision_override["proposed_actions"][0].setdefault("extensions", {}).update(
+            {
+                "source_profile_id": "profile.provider.registration",
+                "source_step_id": "step1",
+                "debug_launch_id": "profile.provider.registration.step1",
+            }
+        )
+
+        analysis = workflow.analyze(
+            {
+                "user": "ivanov",
+                "service": "billing-worker",
+                "description": "Нужно получить номер регистрации от провайдера.",
+                "priority": "p3",
+                "scenario": "action",
+                "decision_override": decision_override,
+                "debug_run_mode": "operator_full_debug",
+                "debug_bypass_policy_gates": True,
+            }
+        )
+
+        self.assertEqual(
+            dispatcher.invocations[0]["extensions"]["source_profile_id"],
+            "profile.provider.registration",
+        )
+        self.assertEqual(
+            analysis["tool_results"][0]["extensions"]["debug_launch_id"],
+            "profile.provider.registration.step1",
+        )
+        self.assertEqual(
+            analysis["tool_trace"][0]["source_step_id"],
+            "step1",
+        )
+
+    def test_integration_base_result_copies_profile_trace_metadata(self) -> None:
+        result = IntegrationDispatcher._base_result(
+            {
+                "schema_version": "1.0",
+                "invocation_id": "inv-test",
+                "action_id": "profile.provider.registration.step1.action",
+                "tool_name": "n8n_wait_for_email_by_ticket",
+                "endpoint_id": "n8n",
+                "adapter_type": "n8n_webhook",
+                "operation_id": "wait_for_email_by_ticket",
+                "policy_rule_id": "debug_operator_full_run",
+                "extensions": {
+                    "source_profile_id": "profile.provider.registration",
+                    "source_step_id": "step1",
+                    "debug_launch_id": "profile.provider.registration.step1",
+                    "secret_operation_parameters": ["token"],
+                },
+            },
+            "success",
+        )
+
+        self.assertEqual(result["extensions"]["source_profile_id"], "profile.provider.registration")
+        self.assertEqual(result["extensions"]["source_step_id"], "step1")
+        self.assertEqual(result["extensions"]["debug_launch_id"], "profile.provider.registration.step1")
+        self.assertNotIn("secret_operation_parameters", result["extensions"])
+
+    def test_operator_full_debug_returns_not_dispatched_result_for_invalid_action(self) -> None:
+        workflow = self.workflow()
+        decision_override = workflow._runbook_decision({"service": "billing-worker"})
+        action = decision_override["proposed_actions"][0]
+        action["parameters"] = {}
+        action.setdefault("extensions", {}).update(
+            {
+                "source_profile_id": "profile.provider.registration",
+                "source_step_id": "step1",
+                "debug_launch_id": "profile.provider.registration.step1",
+            }
+        )
+
+        analysis = workflow.analyze(
+            {
+                "user": "ivanov",
+                "service": "billing-worker",
+                "description": "Нужно получить номер регистрации от провайдера.",
+                "priority": "p3",
+                "scenario": "action",
+                "decision_override": decision_override,
+                "debug_run_mode": "operator_full_debug",
+                "debug_bypass_policy_gates": True,
+            }
+        )
+
+        self.assertEqual(analysis["tool_results"][0]["status"], "error")
+        self.assertEqual(analysis["tool_results"][0]["error"]["code"], "not_dispatched")
+        self.assertEqual(
+            analysis["tool_results"][0]["extensions"]["diagnostic_status"],
+            "not_dispatched",
+        )
+        self.assertEqual(
+            analysis["tool_trace"][0]["debug_launch_id"],
+            "profile.provider.registration.step1",
+        )
 
     def test_debug_policy_bypass_overrides_critical_risk_block(self) -> None:
         workflow = self.workflow()

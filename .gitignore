@@ -1,5 +1,6 @@
 .env
 .venv/
+*.txt
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -13,6 +14,7 @@ build/
 data/
 logs/
 state/
+tmp/
 
 # Local planning notes are not repository documentation.
 docs/PLAN.md

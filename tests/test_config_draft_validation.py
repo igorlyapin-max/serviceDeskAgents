@@ -260,6 +260,99 @@ def llm_slot_payload(*, extraction_instruction: str) -> dict:
 
 
 class ConfigDraftValidationTest(unittest.TestCase):
+    def test_scoped_profile_draft_ignores_invalid_sibling_and_activates_only_selected_profile(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            slot_draft = store.create_draft(
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            profile_draft = store.create_draft(
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(),
+                created_by="admin-1",
+            )
+            activate_bundle(store, [slot_draft["draft_id"], profile_draft["draft_id"]])
+
+            payload = custom_profile_payload()
+            payload["profiles"][0]["description"] = "Изменено только в выбранном профиле."
+            invalid_sibling = {
+                **payload["profiles"][0],
+                "profile_id": "profile.custom.invalid_sibling",
+                "display_name": "Невалидный соседний профиль",
+                "description": "",
+            }
+            payload["profiles"].append(invalid_sibling)
+            scoped_draft = store.create_draft(
+                domain="attribute_resolution_profiles",
+                payload=payload,
+                created_by="admin-1",
+                base_version_id=store.active_version_id("attribute_resolution_profiles"),
+                scope={
+                    "type": "collection_item",
+                    "collection": "profiles",
+                    "id_key": "profile_id",
+                    "id": "profile.custom.attribute_copy",
+                    "action": "upsert",
+                },
+            )
+
+            validated = store.validate_draft(scoped_draft["draft_id"])
+            self.assertEqual(validated["validation"]["status"], "valid", validated["validation"]["errors"])
+            store.save_regression(
+                scoped_draft["draft_id"],
+                {
+                    "schema_version": "1.0",
+                    "domain": "attribute_resolution_profiles",
+                    "status": "skipped",
+                    "run_at": "2026-06-25T00:00:00Z",
+                    "gates": [],
+                },
+            )
+            store.activate_draft(scoped_draft["draft_id"], activated_by="admin-1")
+
+            active_profiles = store.active_payload("attribute_resolution_profiles")["profiles"]
+            self.assertEqual([profile["profile_id"] for profile in active_profiles], ["profile.custom.attribute_copy"])
+            self.assertEqual(active_profiles[0]["description"], "Изменено только в выбранном профиле.")
+
+    def test_scoped_profile_draft_preserves_invalid_payload_and_requires_bundle_for_new_slots(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            slot_draft = store.create_draft(
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            profile_draft = store.create_draft(
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(),
+                created_by="admin-1",
+            )
+            activate_bundle(store, [slot_draft["draft_id"], profile_draft["draft_id"]])
+
+            payload = custom_profile_payload(output_slot_id="new_provider_ticket")
+            scoped_draft = store.create_draft(
+                domain="attribute_resolution_profiles",
+                payload=payload,
+                created_by="admin-1",
+                base_version_id=store.active_version_id("attribute_resolution_profiles"),
+                scope={
+                    "type": "collection_item",
+                    "collection": "profiles",
+                    "id_key": "profile_id",
+                    "id": "profile.custom.attribute_copy",
+                    "action": "upsert",
+                },
+            )
+
+            validated = store.validate_draft(scoped_draft["draft_id"])
+
+            self.assertEqual(validated["status"], "invalid")
+            self.assertIn("Используйте «Активировать пакет»", "; ".join(validated["validation"]["errors"]))
+            saved = store.require_draft(scoped_draft["draft_id"])
+            self.assertEqual(saved["payload"]["profiles"][0]["target_slot_id"], "new_provider_ticket")
+
     def test_slot_schema_draft_can_reference_profile_draft_from_same_operator(self) -> None:
         with TemporaryDirectory() as tempdir:
             store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")

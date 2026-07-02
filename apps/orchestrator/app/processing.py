@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,34 @@ WAIT_ORIGIN_KINDS = {"react_call", "client_question", "approval", "timer", "syst
 DEFAULT_ASYNC_TOOL_COMMAND_TOPIC = "tool.commands"
 DEFAULT_EXTERNAL_EVENT_TOPIC = "external.events"
 DEFAULT_EXTERNAL_EVENT_SOURCE = "n8n"
+ASYNC_OUTBOX_STALE_SECONDS = 10
+RUNTIME_HEARTBEAT_STALE_SECONDS = 30
+RUNTIME_REQUIRED_COMPONENTS = (
+    {
+        "role": "outbox_publisher",
+        "display_name": "Outbox publisher",
+        "topic_env": "TOOL_COMMAND_TOPIC",
+        "default_topic": DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+    },
+    {
+        "role": "tool_worker",
+        "display_name": "Tool command worker",
+        "topic_env": "TOOL_COMMAND_TOPIC",
+        "default_topic": DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+    },
+    {
+        "role": "external_event_worker",
+        "display_name": "External event worker",
+        "topic_env": "EXTERNAL_EVENT_TOPIC",
+        "default_topic": DEFAULT_EXTERNAL_EVENT_TOPIC,
+    },
+    {
+        "role": "agent_task_worker",
+        "display_name": "Agent task worker",
+        "topic_env": "AGENT_TASK_TOPIC",
+        "default_topic": "agent.tasks",
+    },
+)
 EXTERNAL_EVENT_RESULT_TRANSPORTS = {"http_callback", "kafka_event", "both"}
 EXTERNAL_EVENT_TRANSPORT_ALLOWLIST = {
     "http_callback": {"http_callback"},
@@ -186,7 +215,10 @@ class ProcessingStore:
     ) -> dict[str, Any]:
         case_id = analysis["case_id"]
         case = self.case_store.require(case_id)
-        if self.latest_run(case_id):
+        existing_run = self.latest_run(case_id)
+        if existing_run:
+            if existing_run.get("extensions", {}).get("async_dispatch_in_progress"):
+                return self.finalize_analysis_run(ticket_input, analysis, run=existing_run)
             return self.case_detail(case_id)
 
         now = utc_now()
@@ -728,16 +760,45 @@ class ProcessingStore:
             outbox_total = connection.execute(
                 "select count(*) as count from processing_outbox where status = 'pending'"
             ).fetchone()
+            outbox_rows = connection.execute(
+                """
+                select topic, status, count(*) as count, min(created_at) as oldest_created_at
+                from processing_outbox
+                group by topic, status
+                order by topic, status
+                """
+            ).fetchall()
+            oldest_pending = connection.execute(
+                """
+                select topic, message_id, message_key, event_type, created_at, attempts, last_error
+                from processing_outbox
+                where status = 'pending'
+                order by created_at asc, message_id asc
+                limit 1
+                """
+            ).fetchone()
+            heartbeat_rows = connection.execute(
+                """
+                select component_id, role, display_name, worker_id, topic, status,
+                       last_seen_at, last_error, details_json
+                from runtime_heartbeats
+                order by role, topic, component_id
+                """
+            ).fetchall()
         waits_by_type: dict[str, dict[str, int]] = {}
         for row in wait_rows:
             waits_by_type.setdefault(str(row["wait_type"]), {})[str(row["status"])] = int(row["count"])
+        runtime = self._runtime_overview(heartbeat_rows, outbox_rows, oldest_pending)
         return {
             "schema_version": "1.0",
             "kafka": {
                 "bootstrap_servers": self.kafka_bootstrap_servers,
                 "topics": copy.deepcopy(KAFKA_TOPICS),
                 "outbox_pending": int(outbox_total["count"] if outbox_total else 0),
+                "outbox_by_topic": self._outbox_counts(outbox_rows),
+                "oldest_pending": self._oldest_pending_summary(oldest_pending),
             },
+            "runtime": runtime,
             "runs_by_status": self._counts(run_rows, "status"),
             "tasks_by_status": self._counts(task_rows, "status"),
             "waits_by_type": waits_by_type,
@@ -747,6 +808,208 @@ class ProcessingStore:
                 "waits": self._count_statuses("wait_states", ACTIVE_WAIT_STATUSES),
                 "stale_tasks": self.stale_task_count(),
             },
+        }
+
+    def record_runtime_heartbeat(
+        self,
+        *,
+        role: str,
+        worker_id: str,
+        display_name: str | None = None,
+        topic: str | None = None,
+        status: str = "ok",
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        normalized_topic = str(topic or "*")
+        component_id = f"{role}:{normalized_topic}"
+        record = {
+            "schema_version": "1.0",
+            "component_id": component_id,
+            "role": role,
+            "display_name": display_name or role,
+            "worker_id": worker_id,
+            "topic": normalized_topic,
+            "status": status,
+            "last_seen_at": now,
+            "last_error": self._sanitize_error_text(error) if error else None,
+            "details": details or {},
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into runtime_heartbeats (
+                    component_id, role, display_name, worker_id, topic, status,
+                    last_seen_at, last_error, details_json, created_at, updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(component_id) do update set
+                    display_name = excluded.display_name,
+                    worker_id = excluded.worker_id,
+                    status = excluded.status,
+                    last_seen_at = excluded.last_seen_at,
+                    last_error = excluded.last_error,
+                    details_json = excluded.details_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    component_id,
+                    role,
+                    record["display_name"],
+                    worker_id,
+                    normalized_topic,
+                    status,
+                    now,
+                    record["last_error"],
+                    self._to_json(record["details"]),
+                    now,
+                    now,
+                ),
+            )
+        return record
+
+    def _runtime_overview(
+        self,
+        heartbeat_rows: list[sqlite3.Row],
+        outbox_rows: list[sqlite3.Row],
+        oldest_pending: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        stale_seconds = self._runtime_heartbeat_stale_seconds()
+        heartbeats = [self._runtime_heartbeat_summary(row, stale_seconds) for row in heartbeat_rows]
+        required: list[dict[str, Any]] = []
+        issues: list[str] = []
+        for requirement in RUNTIME_REQUIRED_COMPONENTS:
+            topic = os.getenv(str(requirement["topic_env"]), str(requirement["default_topic"]))
+            matching = [
+                heartbeat
+                for heartbeat in heartbeats
+                if heartbeat["role"] == requirement["role"]
+                and heartbeat.get("topic") in {topic, "*", None, ""}
+            ]
+            selected = max(matching, key=lambda item: item.get("last_seen_at") or "", default=None)
+            if not selected:
+                status = "error"
+                message = f"{requirement['display_name']} не запускался или не записал heartbeat."
+            elif selected.get("stale"):
+                status = "error"
+                message = (
+                    f"{requirement['display_name']} не обновлял heartbeat более "
+                    f"{stale_seconds} сек."
+                )
+            elif selected.get("status") not in {"ok", "running"}:
+                status = "error"
+                message = selected.get("last_error") or f"{requirement['display_name']} имеет статус {selected.get('status')}."
+            else:
+                status = "ok"
+                message = f"{requirement['display_name']} работает."
+            component = {
+                "role": requirement["role"],
+                "display_name": requirement["display_name"],
+                "topic": topic,
+                "status": status,
+                "message": message,
+                "heartbeat": selected,
+            }
+            required.append(component)
+            if status != "ok":
+                issues.append(message)
+
+        tool_topic = os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        stale_tool_outbox = self._stale_pending_topic_summary(outbox_rows, tool_topic)
+        if stale_tool_outbox:
+            issues.append(
+                (
+                    f"В topic {tool_topic} есть неопубликованный outbox старше "
+                    f"{ASYNC_OUTBOX_STALE_SECONDS} сек."
+                )
+            )
+
+        return {
+            "schema_version": "1.0",
+            "status": "error" if issues else "ok",
+            "heartbeat_stale_seconds": stale_seconds,
+            "required_components": required,
+            "components": heartbeats,
+            "issues": issues,
+            "stale_tool_outbox": stale_tool_outbox,
+            "oldest_pending": self._oldest_pending_summary(oldest_pending),
+        }
+
+    @staticmethod
+    def _runtime_heartbeat_stale_seconds() -> int:
+        try:
+            value = int(os.getenv("ASYNC_RUNTIME_HEARTBEAT_STALE_SECONDS", str(RUNTIME_HEARTBEAT_STALE_SECONDS)))
+        except ValueError:
+            return RUNTIME_HEARTBEAT_STALE_SECONDS
+        return max(5, value)
+
+    @classmethod
+    def _runtime_heartbeat_summary(cls, row: sqlite3.Row, stale_seconds: int) -> dict[str, Any]:
+        age_seconds = cls._age_seconds(row["last_seen_at"])
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        return {
+            "component_id": row["component_id"],
+            "role": row["role"],
+            "display_name": row["display_name"],
+            "worker_id": row["worker_id"],
+            "topic": row["topic"],
+            "status": row["status"],
+            "last_seen_at": row["last_seen_at"],
+            "age_seconds": age_seconds,
+            "stale": age_seconds is None or age_seconds > stale_seconds,
+            "last_error": row["last_error"],
+            "details": details,
+        }
+
+    @classmethod
+    def _outbox_counts(cls, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "topic": row["topic"],
+                    "status": row["status"],
+                    "count": int(row["count"]),
+                    "oldest_created_at": row["oldest_created_at"],
+                    "oldest_age_seconds": cls._age_seconds(row["oldest_created_at"]),
+                }
+            )
+        return result
+
+    @classmethod
+    def _stale_pending_topic_summary(cls, rows: list[sqlite3.Row], topic: str) -> dict[str, Any] | None:
+        for row in rows:
+            if row["topic"] != topic or row["status"] not in {"pending", "publishing"}:
+                continue
+            age_seconds = cls._age_seconds(row["oldest_created_at"])
+            if age_seconds is None or age_seconds < ASYNC_OUTBOX_STALE_SECONDS:
+                continue
+            return {
+                "topic": topic,
+                "status": row["status"],
+                "count": int(row["count"]),
+                "oldest_created_at": row["oldest_created_at"],
+                "oldest_age_seconds": age_seconds,
+            }
+        return None
+
+    @classmethod
+    def _oldest_pending_summary(cls, row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "topic": row["topic"],
+            "message_id": row["message_id"],
+            "message_key": row["message_key"],
+            "event_type": row["event_type"],
+            "created_at": row["created_at"],
+            "age_seconds": cls._age_seconds(row["created_at"]),
+            "attempts": int(row["attempts"] or 0),
+            "last_error": row["last_error"],
         }
 
     def list_cases(self, limit: int = 100) -> dict[str, Any]:
@@ -777,7 +1040,7 @@ class ProcessingStore:
         }
 
     def case_detail(self, case_id: str) -> dict[str, Any]:
-        case = self.case_store.require(case_id)
+        case = self.enrich_async_tool_results(self.case_store.require(case_id))
         return {
             "schema_version": "1.0",
             "case": case,
@@ -787,6 +1050,76 @@ class ProcessingStore:
             "waits": self.list_waits(case_id=case_id, limit=100)["waits"],
             "outbox": self.list_outbox(case_id=case_id, limit=50)["messages"],
         }
+
+    def async_delivery_for_case(self, case_id: str) -> dict[str, Any]:
+        case = self.enrich_async_tool_results(self.case_store.require(case_id))
+        snapshots = []
+        for result in case.get("tool_results", []):
+            if not isinstance(result, dict):
+                continue
+            extensions = result.get("extensions")
+            if not isinstance(extensions, dict):
+                continue
+            delivery = extensions.get("async_delivery")
+            if not isinstance(delivery, dict):
+                continue
+            snapshots.append(
+                {
+                    "action_id": result.get("action_id"),
+                    "invocation_id": result.get("invocation_id"),
+                    "tool_name": result.get("tool_name"),
+                    "endpoint_id": result.get("endpoint_id"),
+                    "operation_id": result.get("operation_id"),
+                    "source_profile_id": extensions.get("source_profile_id"),
+                    "source_step_id": extensions.get("source_step_id"),
+                    "debug_launch_id": extensions.get("debug_launch_id"),
+                    "delivery": delivery,
+                }
+            )
+        return {
+            "schema_version": "1.0",
+            "case_id": case_id,
+            "snapshots": snapshots,
+        }
+
+    def async_delivery_for_wait(self, wait_id: str) -> dict[str, Any]:
+        wait = self.require_wait(wait_id)
+        snapshot = self.async_tool_delivery_snapshot(
+            {
+                "wait_id": wait_id,
+                "correlation_id": wait.get("correlation_id"),
+            }
+        )
+        return {
+            "schema_version": "1.0",
+            "case_id": wait.get("case_id"),
+            "wait_id": wait_id,
+            "snapshot": snapshot,
+        }
+
+    def enrich_async_tool_results(self, payload: dict[str, Any]) -> dict[str, Any]:
+        enriched = copy.deepcopy(payload)
+        self._enrich_async_tool_result_list(enriched.get("tool_results"))
+        snapshot = enriched.get("analysis_snapshot")
+        if isinstance(snapshot, dict):
+            self._enrich_async_tool_result_list(snapshot.get("tool_results"))
+        return enriched
+
+    def _enrich_async_tool_result_list(self, tool_results: Any) -> None:
+        if not isinstance(tool_results, list):
+            return
+        for result in tool_results:
+            if not isinstance(result, dict):
+                continue
+            extensions = result.get("extensions")
+            if not isinstance(extensions, dict):
+                continue
+            async_wait = extensions.get("async_wait")
+            snapshot = self.async_tool_delivery_snapshot(async_wait)
+            if not snapshot:
+                continue
+            extensions["async_delivery"] = snapshot
+            extensions["diagnostic_status"] = snapshot["status"]
 
     def list_runs(self, *, case_id: str | None = None, limit: int = 100) -> dict[str, Any]:
         return {
@@ -1076,6 +1409,381 @@ class ProcessingStore:
             ).fetchone()
         return json.loads(row["receipt_json"]) if row else None
 
+    def external_event_receipts_for_wait(
+        self,
+        *,
+        case_id: str | None = None,
+        wait_id: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if case_id:
+            clauses.append("case_id = ?")
+            parameters.append(case_id)
+        if correlation_id:
+            clauses.append("correlation_id = ?")
+            parameters.append(correlation_id)
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        parameters.append(min(max(limit, 0), 200))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                select receipt_json
+                from external_event_receipts
+                {where}
+                order by updated_at desc, created_at desc, idempotency_key desc
+                limit ?
+                """,
+                parameters,
+            ).fetchall()
+        receipts = [json.loads(row["receipt_json"]) for row in rows]
+        if wait_id:
+            receipts = [
+                receipt
+                for receipt in receipts
+                if receipt.get("wait_id") in (None, "", wait_id)
+            ]
+        return receipts
+
+    def async_tool_delivery_snapshot(self, async_wait: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(async_wait, dict):
+            return None
+        wait_id = async_wait.get("wait_id")
+        idempotency_key = async_wait.get("correlation_id")
+        wait = None
+        if wait_id:
+            try:
+                wait = self.require_wait(wait_id)
+            except ProcessingNotFound:
+                wait = None
+        if not idempotency_key and wait:
+            idempotency_key = wait.get("correlation_id")
+        outbox_message = self.outbox_message_by_idempotency_key(idempotency_key) if idempotency_key else None
+        receipt = self.tool_command_receipt(idempotency_key) if idempotency_key else None
+        dead_letter = self.outbox_message_by_idempotency_key(f"{idempotency_key}:dead_letter") if idempotency_key else None
+        receipts = self.external_event_receipts_for_wait(
+            case_id=(wait or {}).get("case_id") or outbox_message and outbox_message.get("key"),
+            wait_id=wait_id,
+            correlation_id=idempotency_key,
+        )
+        status, message, root_cause, severity = self._async_delivery_state(
+            async_wait=async_wait,
+            wait=wait,
+            outbox_message=outbox_message,
+            receipt=receipt,
+            dead_letter=dead_letter,
+            external_event_receipts=receipts,
+        )
+        return {
+            "schema_version": "1.0",
+            "status": status,
+            "severity": severity,
+            "message": message,
+            "root_cause": root_cause,
+            "checked_at": utc_now(),
+            "idempotency_key": idempotency_key,
+            "command_id": async_wait.get("command_id"),
+            "wait_id": wait_id,
+            "topic": async_wait.get("topic") or (outbox_message or {}).get("topic"),
+            "outbox": self._async_delivery_outbox_summary(outbox_message),
+            "tool_command_receipt": self._async_delivery_receipt_summary(receipt),
+            "dead_letter": self._async_delivery_outbox_summary(dead_letter),
+            "wait": self._async_delivery_wait_summary(wait),
+            "external_event_receipts": [
+                self._async_delivery_external_receipt_summary(receipt)
+                for receipt in receipts
+            ],
+        }
+
+    @staticmethod
+    def _async_delivery_outbox_summary(message: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not message:
+            return None
+        return {
+            "message_id": message.get("message_id"),
+            "topic": message.get("topic"),
+            "event_type": message.get("event_type"),
+            "status": message.get("status"),
+            "idempotency_key": message.get("idempotency_key"),
+            "created_at": message.get("created_at"),
+            "updated_at": message.get("updated_at"),
+            "published_at": message.get("published_at"),
+            "attempts": message.get("attempts", 0),
+            "last_error": message.get("last_error"),
+            "locked_by": message.get("locked_by"),
+            "locked_until": message.get("locked_until"),
+            "age_seconds": ProcessingStore._age_seconds(message.get("created_at")),
+        }
+
+    @staticmethod
+    def _age_seconds(value: str | None) -> int | None:
+        moment = parse_utc(value)
+        if moment is None:
+            return None
+        return max(0, int((datetime.now(UTC).replace(microsecond=0) - moment).total_seconds()))
+
+    @staticmethod
+    def _async_delivery_receipt_summary(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not receipt:
+            return None
+        result = receipt.get("result") or {}
+        tool_result = result.get("tool_result") if isinstance(result, dict) else None
+        tool_extensions = (tool_result or {}).get("extensions") if isinstance((tool_result or {}).get("extensions"), dict) else {}
+        return {
+            "command_id": receipt.get("command_id"),
+            "status": receipt.get("status"),
+            "worker_id": receipt.get("worker_id"),
+            "created_at": receipt.get("created_at"),
+            "updated_at": receipt.get("updated_at"),
+            "tool_name": (tool_result or {}).get("tool_name"),
+            "endpoint_id": (tool_result or {}).get("endpoint_id"),
+            "operation_id": (tool_result or {}).get("operation_id"),
+            "tool_result_status": (tool_result or {}).get("status"),
+            "tool_result_error": (tool_result or {}).get("error"),
+            "tool_result_output": (tool_result or {}).get("output"),
+            "endpoint_url": tool_extensions.get("endpoint_url"),
+            "n8n_ack_body": tool_extensions.get("n8n_ack_body"),
+        }
+
+    @staticmethod
+    def _async_delivery_wait_summary(wait: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not wait:
+            return None
+        return {
+            "wait_id": wait.get("wait_id"),
+            "run_id": wait.get("run_id"),
+            "case_id": wait.get("case_id"),
+            "ticket_id": wait.get("ticket_id"),
+            "status": wait.get("status"),
+            "wait_type": wait.get("wait_type"),
+            "channel_id": wait.get("channel_id"),
+            "expected_event_type": wait.get("expected_event_type"),
+            "deadline_at": wait.get("deadline_at"),
+            "created_at": wait.get("created_at"),
+            "updated_at": wait.get("updated_at"),
+            "completed_at": wait.get("completed_at"),
+        }
+
+    @staticmethod
+    def _external_event_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        external_event = receipt.get("external_event")
+        if isinstance(external_event, dict):
+            return external_event
+        result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+        external_event = result.get("external_event") if isinstance(result.get("external_event"), dict) else {}
+        return external_event
+
+    @staticmethod
+    def _async_delivery_external_receipt_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+        external_event = ProcessingStore._external_event_from_receipt(receipt)
+        return {
+            "idempotency_key": receipt.get("idempotency_key"),
+            "event_id": receipt.get("event_id"),
+            "event_type": receipt.get("event_type"),
+            "status": external_event.get("status") or receipt.get("status"),
+            "receipt_status": receipt.get("receipt_status"),
+            "source": external_event.get("source") or receipt.get("source"),
+            "created_at": receipt.get("created_at"),
+            "updated_at": receipt.get("updated_at"),
+            "error": external_event.get("error"),
+            "result": ProcessingStore._compact_external_event_value(external_event.get("result")),
+        }
+
+    @staticmethod
+    def _async_delivery_state(
+        *,
+        async_wait: dict[str, Any],
+        wait: dict[str, Any] | None,
+        outbox_message: dict[str, Any] | None,
+        receipt: dict[str, Any] | None,
+        dead_letter: dict[str, Any] | None,
+        external_event_receipts: list[dict[str, Any]],
+    ) -> tuple[str, str, str, str]:
+        if dead_letter:
+            error = ((dead_letter.get("payload") or {}).get("error") or dead_letter.get("last_error") or "н/д")
+            return (
+                "worker_failed",
+                f"Команда попала в dead-letter: {error}",
+                "ToolCommandWorker не смог обработать команду и записал ее в dead-letter.",
+                "error",
+            )
+        terminal_receipts = [
+            item for item in external_event_receipts
+            if item.get("receipt_status") == "completed"
+        ]
+        if terminal_receipts:
+            latest = terminal_receipts[0]
+            external_event = ProcessingStore._external_event_from_receipt(latest)
+            event_status = external_event.get("status") or latest.get("status")
+            event_result = external_event.get("result") if isinstance(external_event.get("result"), dict) else {}
+            if event_status == "progress":
+                diagnostic = event_result.get("polling_diagnostic") if isinstance(event_result.get("polling_diagnostic"), dict) else {}
+                message = event_result.get("message") if isinstance(event_result, dict) else None
+                current_status = diagnostic.get("current_status") or event_result.get("runbook_status") or "progress"
+                checked_resource = diagnostic.get("checked_resource")
+                match_count = diagnostic.get("match_count")
+                mailbox_count = diagnostic.get("mailbox_indexed_count")
+                detail_parts = [
+                    f"статус={current_status}",
+                    f"ресурс={checked_resource}" if checked_resource else "",
+                    f"совпадений={match_count}" if match_count is not None else "",
+                    f"писем в индексе={mailbox_count}" if mailbox_count is not None else "",
+                ]
+                detail = "; ".join(part for part in detail_parts if part)
+                return (
+                    "external_event_progress",
+                    f"n8n workflow выполняется: {message or detail or 'получено промежуточное состояние polling.'}",
+                    "Workflow был запущен и вернул промежуточный progress ExternalEvent; terminal результат еще ожидается.",
+                    "pending",
+                )
+            if event_status == "success":
+                message = event_result.get("message") if isinstance(event_result, dict) else None
+                return (
+                    "external_event_received",
+                    f"Получен успешный внешний результат n8n: {message}" if message else "Получен успешный внешний результат n8n.",
+                    "Команда была доставлена до n8n, workflow вернул terminal ExternalEvent со статусом success.",
+                    "ok",
+                )
+            if event_status == "timeout":
+                message = event_result.get("message") if isinstance(event_result, dict) else None
+                return (
+                    "external_event_timeout",
+                    f"n8n вернул timeout по асинхронному workflow: {message}" if message else "n8n вернул timeout по асинхронному workflow.",
+                    "Workflow был запущен, но завершился timeout ExternalEvent; требуется разбор результата или эскалация.",
+                    "warning",
+                )
+            if event_status in {"error", "cancelled"}:
+                error = external_event.get("error") if isinstance(external_event.get("error"), dict) else {}
+                result_error = event_result.get("error") if isinstance(event_result.get("error"), dict) else {}
+                error_code = error.get("code") or result_error.get("code") or event_status
+                error_message = (
+                    error.get("message")
+                    or result_error.get("message")
+                    or event_result.get("message")
+                    or event_status
+                    or "н/д"
+                )
+                error_text = f"{error_code}: {error_message}" if error_code and error_code != error_message else str(error_message)
+                return (
+                    "external_event_failed",
+                    f"n8n вернул ошибочный внешний результат: {error_text}",
+                    "Workflow был запущен, но terminal ExternalEvent сообщил ошибку; бизнес-действие не завершилось успешно.",
+                    "error",
+                )
+            return (
+                "external_event_received",
+                f"Получен внешний результат n8n со статусом {latest.get('status')}.",
+                "Команда была доставлена до n8n, внешний результат вернулся в оркестратор.",
+                "ok",
+            )
+        if wait and wait.get("status") not in ACTIVE_WAIT_STATUSES:
+            return (
+                f"wait_{wait.get('status')}",
+                f"Ожидание завершено со статусом {wait.get('status')}.",
+                "Асинхронное ожидание завершилось без активного ожидания результата.",
+                "ok",
+            )
+        if receipt:
+            receipt_status = receipt.get("status")
+            result = receipt.get("result") or {}
+            tool_result = result.get("tool_result") if isinstance(result, dict) else None
+            tool_status = (tool_result or {}).get("status")
+            if receipt_status == "completed" and tool_status in {"success", "dry_run_completed"}:
+                return (
+                    "waiting_external_event",
+                    "Worker обработал команду и n8n-вызов принят; ожидается внешний результат.",
+                    "Исполнение дошло до n8n, но финальный ExternalEvent еще не получен.",
+                    "ok",
+                )
+            if receipt_status == "completed":
+                tool_error = (tool_result or {}).get("error") or {}
+                error_code = tool_error.get("code") or tool_status or "unknown_error"
+                error_message = tool_error.get("message") or tool_status or "н/д"
+                if error_code in {
+                    "invalid_callback_url",
+                    "missing_callback_url",
+                    "missing_result_topic",
+                    "invalid_result_transport",
+                    "unauthorized",
+                    "http_400",
+                    "http_401",
+                    "http_403",
+                    "endpoint_response_contract_violation",
+                }:
+                    return (
+                        "n8n_launch_rejected",
+                        f"n8n отклонил запуск workflow: {error_code}: {error_message}",
+                        "ToolCommandWorker вызвал n8n endpoint, но webhook вернул ошибку до accepted; письмо и дальнейший мониторинг не выполнялись.",
+                        "error",
+                    )
+                return (
+                    "worker_failed",
+                    f"Worker завершил команду с ошибкой: {error_code}: {error_message}",
+                    "ToolCommandWorker вызвал endpoint, но получил ошибочный результат.",
+                    "error",
+                )
+            return (
+                "worker_started",
+                "ToolCommandWorker начал обработку команды, но завершение еще не записано.",
+                "Команда уже взята worker-ом; нужно дождаться завершения или проверить зависший worker.",
+                "pending",
+            )
+        if outbox_message:
+            outbox_status = outbox_message.get("status")
+            if outbox_status == "published":
+                return (
+                    "published_to_kafka",
+                    "Команда опубликована в Kafka, но ToolCommandWorker еще не записал receipt.",
+                    "Сообщение дошло до Kafka; ToolCommandWorker для topic tool.commands не обработал его или еще не завершил обработку.",
+                    "pending",
+                )
+            if outbox_status == "publishing":
+                return (
+                    "publishing_to_kafka",
+                    "Команда взята outbox publisher-ом для публикации в Kafka.",
+                    "Outbox publisher держит lease на сообщение; нужно дождаться публикации или истечения lease.",
+                    "pending",
+                )
+            if int(outbox_message.get("attempts") or 0) > 0 or outbox_message.get("last_error"):
+                return (
+                    "publish_failed_retrying",
+                    f"Публикация в Kafka не удалась, команда оставлена для повтора: {outbox_message.get('last_error') or 'ошибка не указана'}.",
+                    "Outbox publisher пытался отправить команду, но Kafka publish завершился ошибкой.",
+                    "warning",
+                )
+            age_seconds = ProcessingStore._age_seconds(outbox_message.get("created_at"))
+            if age_seconds is not None and age_seconds >= ASYNC_OUTBOX_STALE_SECONDS:
+                return (
+                    "queued_in_outbox",
+                    (
+                        f"Команда создана в outbox, но не опубликована в Kafka более "
+                        f"{ASYNC_OUTBOX_STALE_SECONDS} сек.; фактический вызов n8n не запускался."
+                    ),
+                    "Outbox publisher не запущен, остановлен или не обрабатывает topic tool.commands.",
+                    "warning",
+                )
+            return (
+                "queued_in_outbox",
+                "Команда создана в outbox и ожидает публикации publisher-ом; фактический вызов n8n еще не запускался.",
+                "Outbox publisher еще не обработал pending сообщение.",
+                "pending",
+            )
+        if async_wait.get("command_id") or async_wait.get("wait_id"):
+            return (
+                "missing_async_command",
+                "Async wait есть в tool_result, но outbox-команда не найдена.",
+                "Состояние wait/tool_result рассинхронизировано с processing_outbox.",
+                "error",
+            )
+        return (
+            "unknown",
+            "Нет данных о доставке async-команды.",
+            "Недостаточно данных для диагностики исполнения.",
+            "warning",
+        )
+
     def begin_tool_command(self, command: dict[str, Any], *, worker_id: str) -> dict[str, Any]:
         self.verify_tool_command(command)
         existing = self.tool_command_receipt(command["idempotency_key"])
@@ -1343,6 +2051,297 @@ class ProcessingStore:
         )
         return task
 
+    def claim_next_task(
+        self,
+        *,
+        task_type: str,
+        worker_id: str,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any] | None:
+        now = utc_now()
+        lease_until = add_seconds(now, max(5, lease_seconds))
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select task_json
+                from agent_tasks
+                where task_type = ?
+                  and (
+                    status = 'queued'
+                    or (
+                      status in ('running', 'leased')
+                      and lease_until is not null
+                      and lease_until < ?
+                    )
+                  )
+                order by
+                  case when status in ('running', 'leased') then 0 else 1 end,
+                  created_at,
+                  task_id
+                limit 1
+                """,
+                (task_type, now),
+            ).fetchone()
+            if not row:
+                return None
+            task = json.loads(row["task_json"])
+            previous_status = task.get("status")
+            previous_worker_id = task.get("worker_id")
+            previous_lease_until = task.get("lease_until")
+            if previous_status in {"running", "leased"}:
+                task["attempt"] = int(task.get("attempt") or 0) + 1
+                task.setdefault("audit", []).append(
+                    self._audit_item(
+                        "task_lease_reclaimed",
+                        worker_id,
+                        (
+                            f"Истекший lease worker={previous_worker_id or 'unknown'} "
+                            f"до {previous_lease_until or 'unknown'} переарендован."
+                        ),
+                    )
+                )
+            task["status"] = "running"
+            task["worker_id"] = worker_id
+            task["lease_until"] = lease_until
+            task["heartbeat_at"] = now
+            task["updated_at"] = now
+            cursor = connection.execute(
+                """
+                update agent_tasks
+                set status = ?,
+                    worker_id = ?,
+                    lease_until = ?,
+                    heartbeat_at = ?,
+                    updated_at = ?,
+                    task_json = ?
+                where task_id = ?
+                  and (
+                    status = 'queued'
+                    or (
+                      status in ('running', 'leased')
+                      and lease_until is not null
+                      and lease_until < ?
+                    )
+                  )
+                """,
+                (
+                    task["status"],
+                    task["worker_id"],
+                    task["lease_until"],
+                    task["heartbeat_at"],
+                    task["updated_at"],
+                    self._to_json(task),
+                    task["task_id"],
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        self._append_case_event(
+            task["case_id"],
+            "processing_task_started",
+            "Задача продолжения обработки взята runtime worker-ом.",
+            {
+                "run_id": task["run_id"],
+                "task_id": task["task_id"],
+                "task_type": task["task_type"],
+                "worker_id": worker_id,
+            },
+        )
+        return task
+
+    def complete_task(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        task = self.require_task(task_id)
+        if task.get("worker_id") not in {None, worker_id}:
+            raise ProcessingConflict(f"Задача {task_id} принадлежит worker {task.get('worker_id')}.")
+        now = utc_now()
+        task["status"] = "completed"
+        task["worker_id"] = worker_id
+        task["lease_until"] = None
+        task["heartbeat_at"] = now
+        task["updated_at"] = now
+        task["completed_at"] = now
+        if result is not None:
+            task["result"] = copy.deepcopy(result)
+        self._save_task(task)
+        self._append_case_event(
+            task["case_id"],
+            "processing_task_completed",
+            "Задача продолжения обработки завершена runtime worker-ом.",
+            {
+                "run_id": task["run_id"],
+                "task_id": task_id,
+                "task_type": task.get("task_type"),
+                "worker_id": worker_id,
+                "result": copy.deepcopy(result or {}),
+            },
+        )
+        self._enqueue(
+            "agent.results",
+            task["case_id"],
+            "agent_task_completed",
+            {
+                "case_id": task["case_id"],
+                "ticket_id": task["ticket_id"],
+                "run_id": task["run_id"],
+                "task": task,
+            },
+            idempotency_key=f"{task_id}:completed:{now}",
+        )
+        return task
+
+    def fail_task(
+        self,
+        task_id: str,
+        *,
+        worker_id: str,
+        error: str,
+    ) -> dict[str, Any]:
+        task = self.require_task(task_id)
+        if task.get("worker_id") not in {None, worker_id}:
+            raise ProcessingConflict(f"Задача {task_id} принадлежит worker {task.get('worker_id')}.")
+        now = utc_now()
+        task["status"] = "failed"
+        task["worker_id"] = worker_id
+        task["lease_until"] = None
+        task["heartbeat_at"] = now
+        task["updated_at"] = now
+        task["error"] = self._sanitize_error_text(error)
+        self._save_task(task)
+        self._append_case_event(
+            task["case_id"],
+            "processing_task_failed",
+            "Задача продолжения обработки завершилась ошибкой.",
+            {
+                "run_id": task["run_id"],
+                "task_id": task_id,
+                "task_type": task.get("task_type"),
+                "worker_id": worker_id,
+                "error": task["error"],
+            },
+        )
+        self._enqueue(
+            "dead-letter",
+            task["case_id"],
+            "agent_task_failed",
+            {
+                "case_id": task["case_id"],
+                "ticket_id": task["ticket_id"],
+                "run_id": task["run_id"],
+                "task": task,
+            },
+            idempotency_key=f"{task_id}:failed:{now}",
+        )
+        return task
+
+    def process_external_event_resume_task(
+        self,
+        task: dict[str, Any],
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        if task.get("task_type") != "langgraph_resume":
+            raise ProcessingConflict(f"Задача {task.get('task_id')} не является langgraph_resume.")
+        extensions = task.get("extensions") if isinstance(task.get("extensions"), dict) else {}
+        wait_id = extensions.get("wait_id")
+        correlation_id = extensions.get("correlation_id")
+        event_id = extensions.get("external_event_id")
+        if not wait_id or not correlation_id:
+            raise ProcessingConflict("langgraph_resume не содержит wait_id или correlation_id.")
+
+        wait = self.require_wait(str(wait_id))
+        receipts = self.external_event_receipts_for_wait(
+            case_id=task.get("case_id"),
+            wait_id=str(wait_id),
+            correlation_id=str(correlation_id),
+            limit=50,
+        )
+        selected_receipt = next(
+            (
+                receipt
+                for receipt in receipts
+                if not event_id
+                or receipt.get("event_id") == event_id
+                or self._external_event_from_receipt(receipt).get("event_id") == event_id
+            ),
+            None,
+        )
+        if not selected_receipt and event_id:
+            terminal_receipts = [
+                receipt
+                for receipt in receipts
+                if (
+                    self._external_event_from_receipt(receipt).get("status")
+                    or receipt.get("status")
+                ) in EXTERNAL_EVENT_TERMINAL_STATUSES
+            ]
+            if len(terminal_receipts) == 1:
+                selected_receipt = terminal_receipts[0]
+        if not selected_receipt:
+            raise ProcessingConflict(
+                f"Для langgraph_resume {task.get('task_id')} не найден receipt external event {event_id or correlation_id}."
+            )
+        external_event = self._external_event_from_receipt(selected_receipt)
+        event_status = external_event.get("status") or selected_receipt.get("status")
+        if event_status not in EXTERNAL_EVENT_TERMINAL_STATUSES:
+            raise ProcessingConflict(f"ExternalEvent {event_id or correlation_id} не terminal: {event_status}.")
+
+        now = utc_now()
+        run = self.require_run(task["run_id"])
+        run["status"] = EXTERNAL_EVENT_WAIT_STATUS.get(str(event_status), "failed")
+        run["current_step"] = "external_event_processed"
+        run["updated_at"] = now
+        run["completed_at"] = now
+        run.setdefault("resume_results", []).append(
+            {
+                "processed_at": now,
+                "task_id": task["task_id"],
+                "wait_id": wait_id,
+                "correlation_id": correlation_id,
+                "event_id": external_event.get("event_id") or event_id,
+                "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
+                "event_status": event_status,
+                "result": self._compact_external_event_value(external_event.get("result")),
+                "error": external_event.get("error"),
+            }
+        )
+        self._save_run(run)
+        self._append_case_event(
+            task["case_id"],
+            "processing_external_event_resume_processed",
+            f"Продолжение обработки после ExternalEvent завершено со статусом {event_status}.",
+            {
+                "run_id": run["run_id"],
+                "task_id": task["task_id"],
+                "wait_id": wait_id,
+                "wait_status": wait.get("status"),
+                "correlation_id": correlation_id,
+                "event_id": external_event.get("event_id") or event_id,
+                "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
+                "event_status": event_status,
+                "result": self._compact_external_event_value(external_event.get("result")),
+                "error": external_event.get("error"),
+            },
+        )
+        result = {
+            "schema_version": "1.0",
+            "run_id": run["run_id"],
+            "run_status": run["status"],
+            "wait_id": wait_id,
+            "wait_status": wait.get("status"),
+            "event_id": external_event.get("event_id") or event_id,
+            "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
+            "event_status": event_status,
+        }
+        self.complete_task(task["task_id"], worker_id=worker_id, result=result)
+        return result
+
     def force_wait_timeout(self, wait_id: str, *, actor_id: str, reason: str | None = None) -> dict[str, Any]:
         wait = self.require_wait(wait_id)
         if wait["status"] not in ACTIVE_WAIT_STATUSES:
@@ -1403,6 +2402,114 @@ class ProcessingStore:
             "case_escalated",
             {"case_id": case_id, "run_id": run.get("run_id") if run else None, "actor_id": actor_id, "reason": reason},
             idempotency_key=f"{case_id}:manual_escalation:{now}",
+        )
+        return self.case_detail(case_id)
+
+    def begin_analysis_run_for_async_dispatch(
+        self,
+        ticket_input: dict[str, Any],
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        case_id = analysis["case_id"]
+        if self.latest_run(case_id):
+            return self.case_detail(case_id)
+        now = utc_now()
+        run = {
+            "schema_version": "1.0",
+            "run_id": new_run_id(),
+            "case_id": case_id,
+            "ticket_id": analysis["ticket_id"],
+            "status": "running",
+            "scenario_id": ticket_input.get("scenario") or "auto",
+            "current_step": "tool_use",
+            "source": "tickets.analyze",
+            "config_versions": {},
+            "started_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "extensions": {
+                "workflow_state_id": analysis.get("workflow_state", {}).get("id"),
+                "decision_type": analysis.get("ai_decision", {}).get("decision", {}).get("type"),
+                "async_dispatch_in_progress": True,
+            },
+        }
+        with self._connect() as connection:
+            self._insert_run(connection, run)
+        self._append_case_event(
+            case_id,
+            "processing_run_started",
+            "Запуск обработки зарегистрирован перед асинхронной постановкой команды.",
+            {
+                "run_id": run["run_id"],
+                "run_status": run["status"],
+                "scenario_id": run["scenario_id"],
+            },
+        )
+        self._enqueue(
+            "case.events",
+            case_id,
+            "processing_run_started",
+            {
+                "case_id": case_id,
+                "ticket_id": analysis["ticket_id"],
+                "run": run,
+            },
+            idempotency_key=f"{case_id}:run_started:{run['run_id']}",
+        )
+        return self.case_detail(case_id)
+
+    def finalize_analysis_run(
+        self,
+        ticket_input: dict[str, Any],
+        analysis: dict[str, Any],
+        *,
+        run: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        case_id = analysis["case_id"]
+        run = run or self.latest_run(case_id)
+        if not run:
+            return self.record_analysis(ticket_input, analysis)
+        if not run.get("extensions", {}).get("async_dispatch_in_progress"):
+            return self.case_detail(case_id)
+
+        now = utc_now()
+        active_wait = self.active_wait(case_id)
+        wait = None
+        if active_wait and active_wait.get("run_id") == run["run_id"]:
+            run["status"] = "waiting"
+            run["current_step"] = active_wait.get("wait_type") or "external_event_wait"
+            run["completed_at"] = None
+        else:
+            run["status"] = self._run_status_from_analysis(analysis)
+            run["current_step"] = self._current_step_from_analysis(analysis)
+            run["completed_at"] = now if run["status"] in TERMINAL_RUN_STATUSES else None
+            wait = self._build_wait_from_analysis(run, analysis, now)
+        run["updated_at"] = now
+        extensions = run.setdefault("extensions", {})
+        extensions.pop("async_dispatch_in_progress", None)
+        extensions.update(
+            {
+                "workflow_state_id": analysis.get("workflow_state", {}).get("id"),
+                "decision_type": analysis.get("ai_decision", {}).get("decision", {}).get("type"),
+                "tool_result_count": len(analysis.get("tool_results", [])),
+                "approval_request_count": len(analysis.get("approval_requests", [])),
+            }
+        )
+        task = self._build_task_from_analysis(run, analysis, now)
+        self._save_run(run)
+        with self._connect() as connection:
+            if wait:
+                self._insert_wait(connection, wait)
+            self._insert_task(connection, task)
+        self._append_case_event(
+            case_id,
+            "processing_task_completed",
+            "Задача анализа завершена текущим синхронным исполнителем.",
+            {
+                "run_id": run["run_id"],
+                "task_id": task["task_id"],
+                "task_status": task["status"],
+            },
         )
         return self.case_detail(case_id)
 
@@ -1645,6 +2752,13 @@ class ProcessingStore:
             return "failed"
         if decision_type == "escalation_needed" or category == "handoff":
             return "escalated"
+        for result in analysis.get("tool_results", []):
+            extensions = result.get("extensions") if isinstance(result.get("extensions"), dict) else {}
+            if isinstance(extensions.get("async_wait"), dict):
+                return "waiting"
+        for result in analysis.get("tool_results", []):
+            if result.get("status") == "error":
+                return "failed"
         if category == "waiting" or analysis.get("approval_requests"):
             return "waiting"
         return "completed"
@@ -2485,6 +3599,35 @@ class ProcessingStore:
                 on tool_command_receipts(wait_id)
                 """
             )
+            connection.execute(
+                """
+                create table if not exists runtime_heartbeats (
+                    component_id text primary key,
+                    role text not null,
+                    display_name text not null,
+                    worker_id text not null,
+                    topic text,
+                    status text not null,
+                    last_seen_at text not null,
+                    last_error text,
+                    details_json text not null,
+                    created_at text not null,
+                    updated_at text not null
+                )
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_runtime_heartbeats_role
+                on runtime_heartbeats(role)
+                """
+            )
+            connection.execute(
+                """
+                create index if not exists idx_runtime_heartbeats_last_seen
+                on runtime_heartbeats(last_seen_at)
+                """
+            )
 
     @staticmethod
     def _ensure_outbox_columns(connection: sqlite3.Connection) -> None:
@@ -2510,10 +3653,15 @@ class ProcessingStore:
             """
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:

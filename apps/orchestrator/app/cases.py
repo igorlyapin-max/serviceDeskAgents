@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,58 @@ class CaseStore:
                 },
                 payload={"approval_request": copy.deepcopy(request)},
             )
+        for result in analysis.get("tool_results", []):
+            self.append_event(
+                case_id,
+                "tool_result_recorded",
+                actor_type="system",
+                actor_id="integration_dispatcher",
+                summary=f"Результат инструмента записан со статусом {result['status']}.",
+                correlation=self._correlation_from_tool_result(result),
+                payload={"tool_result": copy.deepcopy(result)},
+            )
+        return self.require(case_id)
+
+    def update_from_analysis(
+        self,
+        ticket_input: dict[str, Any],
+        analysis: dict[str, Any],
+    ) -> dict[str, Any]:
+        case_id = analysis["case_id"]
+        record = self.require(case_id)
+        now = utc_now()
+        analysis_snapshot = copy.deepcopy(analysis)
+        analysis_snapshot["case_id"] = case_id
+        action_gate_ids = [
+            request["gate_id"]
+            for request in analysis.get("approval_requests", [])
+            if request.get("gate_id")
+        ]
+        record["ticket_input"] = copy.deepcopy(ticket_input)
+        record["current_workflow_state"] = copy.deepcopy(analysis["workflow_state"])
+        record["ai_decision"] = copy.deepcopy(analysis.get("ai_decision"))
+        record["analysis_snapshot"] = analysis_snapshot
+        record["rag_trace"] = copy.deepcopy(analysis.get("rag_trace", {}))
+        record["tool_trace"] = copy.deepcopy(analysis.get("tool_trace", []))
+        record["tool_results"] = copy.deepcopy(analysis.get("tool_results", []))
+        for gate_id in action_gate_ids:
+            self._append_unique(record["action_gate_ids"], gate_id)
+        record["updated_at"] = now
+        self._apply_outcome(record, now)
+        self._save(record)
+        self._record_analysis_correlations(record)
+        self.append_event(
+            case_id,
+            "analysis_updated",
+            actor_type="system",
+            actor_id="workflow",
+            summary=f"Анализ обновлен в состоянии {analysis['workflow_state']['id']}.",
+            payload={
+                "workflow_state": copy.deepcopy(analysis["workflow_state"]),
+                "ai_decision": copy.deepcopy(analysis.get("ai_decision")),
+                "tool_trace": copy.deepcopy(analysis.get("tool_trace", [])),
+            },
+        )
         for result in analysis.get("tool_results", []):
             self.append_event(
                 case_id,
@@ -641,6 +694,7 @@ class CaseStore:
 
     @staticmethod
     def _tool_trace_item(tool_result: dict[str, Any]) -> dict[str, Any]:
+        extensions = tool_result.get("extensions", {})
         return {
             "invocation_id": tool_result["invocation_id"],
             "action_id": tool_result["action_id"],
@@ -653,8 +707,11 @@ class CaseStore:
             "duration_ms": tool_result["duration_ms"],
             "attempts": tool_result["attempts"],
             "error_code": tool_result.get("error", {}).get("code"),
-            "gate_id": tool_result.get("extensions", {}).get("gate_id"),
-            "mock": tool_result.get("extensions", {}).get("mock", False),
+            "gate_id": extensions.get("gate_id"),
+            "mock": extensions.get("mock", False),
+            "source_profile_id": extensions.get("source_profile_id"),
+            "source_step_id": extensions.get("source_step_id"),
+            "debug_launch_id": extensions.get("debug_launch_id"),
         }
 
     @staticmethod
@@ -785,10 +842,15 @@ class CaseStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:

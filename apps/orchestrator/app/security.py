@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -467,10 +468,15 @@ class AuditStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _counts(rows: list[sqlite3.Row], key: str) -> dict[str, int]:

@@ -6,6 +6,7 @@ import random
 import re
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2177,10 +2178,15 @@ class DebugRuntime:
             connection.execute("create index if not exists idx_debug_endpoint_captures_session_id on debug_endpoint_captures(session_id)")
             connection.execute("create index if not exists idx_debug_endpoint_captures_operation on debug_endpoint_captures(endpoint_id, operation_id)")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _to_json(record: dict[str, Any]) -> str:

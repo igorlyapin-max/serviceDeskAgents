@@ -50,6 +50,108 @@
       }
     },
     {
+      "workflow_id": "provider_channel_repair_monitor",
+      "display_name": "Письмо провайдеру и мониторинг ремонта канала",
+      "business_scenario": "provider_channel_repair_monitor",
+      "endpoint_id": "n8n",
+      "callback_endpoint_id": "n8n",
+      "enabled": true,
+      "contract_url": "http://127.0.0.1:5678/webhook/contracts/openapi.json",
+      "execution_url": "http://127.0.0.1:5678/webhook/provider/channel-repair/monitor",
+      "openapi_operation_id": "monitorProviderChannelRepair",
+      "workflow_export": "workflows/provider-channel-repair-monitor-webhook.json",
+      "operations": [
+        "monitor_provider_channel_repair"
+      ],
+      "async_supported": true,
+      "direct_supported": false,
+      "default_template_id": "provider_channel_outage_test",
+      "default_poll_interval_minutes": 15,
+      "default_timeout_minutes": 60,
+      "required_inputs": [
+        "problem_host_or_router_ref",
+        "problemUrl",
+        "service_request",
+        "poll_interval_minutes",
+        "timeout_minutes",
+        "from",
+        "replyTo",
+        "invocation.extensions.async_callback"
+      ],
+      "status_values": [
+        "RESOLVED",
+        "OK",
+        "MULTI_MAIL",
+        "DELIVERY_FAILED",
+        "NOT_FOUND",
+        "ERROR"
+      ],
+      "result_delivery": {
+        "canonical_event": "ServiceDesk ExternalEvent",
+        "async_callback_path": "invocation.extensions.async_callback",
+        "supported_transports": [
+          "http_callback",
+          "kafka_event",
+          "both"
+        ],
+        "default_transport": "kafka_event",
+        "default_result_topic": "external.events",
+        "callback_token_header": "X-ServiceDesk-Callback-Token",
+        "transport_security": {
+          "http_callback": {
+            "policy": "admin_configured",
+            "recommended_production_scheme": "https",
+            "callback_url_source": "invocation.extensions.async_callback.callback_url",
+            "callback_base_url_env": "ORCHESTRATOR_PUBLIC_URL",
+            "token_header": "X-ServiceDesk-Callback-Token"
+          },
+          "kafka_event": {
+            "policy": "credential_configured",
+            "supported_security_protocols": [
+              "SASL_SSL",
+              "SSL"
+            ],
+            "supported_auth": [
+              "sasl",
+              "mtls"
+            ],
+            "credential_owner": "n8n",
+            "topic_source": "invocation.extensions.async_callback.result_topic"
+          }
+        }
+      },
+      "depends_on": [
+        "cmdbuild_provider_email_context",
+        "templated_email_dispatch",
+        "zabbix_problem_status",
+        "email_mailbox_collector"
+      ],
+      "management": {
+        "restart_supported": false,
+        "cancel_supported": false,
+        "execution_history_supported": false
+      },
+      "progress_diagnostics": {
+        "enabled": true,
+        "delivery": "ExternalEvent.status=progress",
+        "frequency": "before_each_polling_wait",
+        "fields": [
+          "case_id",
+          "wait_id",
+          "correlation_id",
+          "service_request",
+          "reply_mailbox_address",
+          "checked_resource",
+          "poll_iteration",
+          "last_poll_at",
+          "next_poll_at",
+          "mailbox_indexed_count",
+          "match_count",
+          "last_error"
+        ]
+      }
+    },
+    {
       "workflow_id": "zabbix_problem_processing",
       "display_name": "Обработка проблемы Zabbix",
       "business_scenario": "zabbix_problem_processing",

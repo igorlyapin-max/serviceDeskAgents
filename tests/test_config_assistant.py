@@ -10,6 +10,7 @@ from apps.orchestrator.app.config_assistant import (
 )
 from apps.orchestrator.app.config_registry import (
     ConfigStore,
+    apply_schema_parameter_defaults,
     new_version_id,
     normalize_attribute_resolution_profile,
     operation_response_items,
@@ -922,6 +923,23 @@ class ConfigAssistantTest(unittest.TestCase):
         self.assertEqual(parameters["ticket_number"], "SR-42")
         self.assertEqual(parameters["poll_interval_minutes"], "1")
 
+    def test_schema_parameter_defaults_coerce_numeric_constants(self) -> None:
+        parameters, applied_defaults = apply_schema_parameter_defaults(
+            {
+                "type": "object",
+                "required": ["poll_interval_minutes", "timeout_minutes"],
+                "properties": {
+                    "poll_interval_minutes": {"type": "integer"},
+                    "timeout_minutes": {"type": "integer", "default": 15},
+                },
+            },
+            {"poll_interval_minutes": "1"},
+        )
+
+        self.assertEqual(parameters["poll_interval_minutes"], 1)
+        self.assertEqual(parameters["timeout_minutes"], 15)
+        self.assertEqual(applied_defaults, {"timeout_minutes": 15})
+
     def test_attribute_resolution_step_rejects_parameter_reference_from_other_react_call(self) -> None:
         result = compile_attribute_resolution_step(
             instruction=(
@@ -1005,6 +1023,74 @@ class ConfigAssistantTest(unittest.TestCase):
 
             self.assertEqual(validation["status"], "valid", validation["errors"])
 
+    def test_config_store_rejects_resolution_step_missing_required_react_parameter(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
+            tools = provider_mail_tool_payload()
+            monitor_tool = next(item for item in tools["tools"] if item["tool_name"] == "n8n_monitor_provider_channel_repair")
+            monitor_tool["parameters_schema"]["required"] = [
+                "host",
+                "poll_interval_minutes",
+                "timeout_minutes",
+            ]
+            monitor_tool["parameters_schema"]["properties"]["poll_interval_minutes"] = {"type": "integer"}
+            monitor_tool["parameters_schema"]["properties"]["timeout_minutes"] = {"type": "integer"}
+            self.force_active_payload(store, "tools", tools)
+            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
+            profile = provider_mail_resolution_profile(
+                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
+            )
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+
+            self.assertEqual(validation["status"], "invalid")
+            self.assertTrue(
+                any("poll_interval_minutes" in error for error in validation["errors"])
+                and any("timeout_minutes" in error for error in validation["errors"]),
+                validation["errors"],
+            )
+
+    def test_config_store_accepts_resolution_step_required_react_defaults(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
+            tools = provider_mail_tool_payload()
+            monitor_tool = next(item for item in tools["tools"] if item["tool_name"] == "n8n_monitor_provider_channel_repair")
+            monitor_tool["parameters_schema"]["required"] = [
+                "host",
+                "poll_interval_minutes",
+                "timeout_minutes",
+            ]
+            monitor_tool["parameters_schema"]["properties"]["poll_interval_minutes"] = {"type": "integer", "default": 1}
+            monitor_tool["parameters_schema"]["properties"]["timeout_minutes"] = {"type": "integer", "default": 15}
+            self.force_active_payload(store, "tools", tools)
+            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
+            profile = provider_mail_resolution_profile(
+                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
+            )
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+            launch = store._profile_step_launch(
+                profile=profile,
+                step=profile["enrichment_steps"][1],
+                tool_by_name={item["tool_name"]: item for item in tools["tools"]},
+                endpoint_by_id={item["endpoint_id"]: item for item in provider_mail_endpoint_payload()["endpoints"]},
+                delivery_defaults={},
+            )
+
+            self.assertEqual(validation["status"], "valid", validation["errors"])
+            self.assertEqual(launch["parameter_bindings"]["poll_interval_minutes"], "constant:1")
+            self.assertEqual(launch["parameter_bindings"]["timeout_minutes"], "constant:15")
+
     def test_config_store_rejects_plain_output_hint_from_wrong_last_step(self) -> None:
         with TemporaryDirectory() as tempdir:
             store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
@@ -1036,6 +1122,137 @@ class ConfigAssistantTest(unittest.TestCase):
                 output_error,
             )
             self.assertIn("Доступные поля результата: async_delivery, message, runbook_status", output_error)
+
+    def test_config_store_validates_output_hint_against_endpoint_response_contract(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
+            self.force_active_payload(store, "tools", provider_mail_tool_payload())
+            endpoints = provider_mail_endpoint_payload()
+            endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]["response_schema"] = {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            }
+            self.force_active_payload(store, "integration_endpoints", endpoints)
+            profile = provider_mail_resolution_profile(
+                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
+            )
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+
+            self.assertEqual(validation["status"], "invalid")
+            output_error = next(
+                (
+                    error
+                    for error in validation["errors"]
+                    if "Тело письма провайдера" in error and "body" in error
+                ),
+                "",
+            )
+            self.assertIn('Профиль "Получить письмо провайдера" (profile.provider_mail)', output_error)
+            self.assertIn('шаг 1 "Дождаться письма" (step1)', output_error)
+            self.assertIn("контракт не содержит именованных полей", output_error)
+
+    def test_config_store_validates_external_event_output_hint_against_async_contract(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
+            self.force_active_payload(store, "tools", provider_mail_tool_payload())
+            endpoints = provider_mail_endpoint_payload()
+            operation = endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]
+            operation["response_schema"] = {
+                "type": "object",
+                "required": ["runbook_status", "async_delivery"],
+                "properties": {
+                    "runbook_status": {"const": "accepted"},
+                    "async_delivery": {"const": True},
+                },
+                "additionalProperties": True,
+            }
+            operation["mock_output"] = {
+                "runbook_status": "accepted",
+                "async_delivery": True,
+            }
+            operation["async_event_contracts"] = {
+                "wait_for_email_by_ticket_completed": {
+                    "display_name": "Письмо найдено",
+                    "description": "Финальный результат ожидания письма.",
+                    "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+                    "result_schema": wait_for_email_by_ticket_tool()["result_schema"],
+                    "contract_version": "1.0",
+                    "contract_status": "valid",
+                }
+            }
+            self.force_active_payload(store, "integration_endpoints", endpoints)
+            profile = provider_mail_resolution_profile(
+                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
+            )
+            profile["enrichment_steps"][0]["completion_policy"] = {
+                "mode": "external_event",
+                "expected_event_type": "wait_for_email_by_ticket_completed",
+                "max_wait_seconds": 900,
+                "timeout_action": "escalate_operator",
+                "result_transport": "kafka_event",
+            }
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+
+            self.assertEqual(validation["status"], "valid", validation["errors"])
+
+    def test_config_store_rejects_external_event_contract_from_other_operation(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
+            self.force_active_payload(store, "tools", provider_mail_tool_payload())
+            endpoints = provider_mail_endpoint_payload()
+            endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]["async_event_contracts"] = {
+                "wait_for_email_by_ticket_completed": {
+                    "display_name": "Письмо найдено",
+                    "statuses": ["success", "error", "timeout"],
+                    "result_schema": wait_for_email_by_ticket_tool()["result_schema"],
+                    "contract_version": "1.0",
+                    "contract_status": "valid",
+                }
+            }
+            self.force_active_payload(store, "integration_endpoints", endpoints)
+            profile = provider_mail_resolution_profile(
+                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
+            )
+            profile["enrichment_steps"][1]["completion_policy"] = {
+                "mode": "external_event",
+                "expected_event_type": "wait_for_email_by_ticket_completed",
+                "max_wait_seconds": 900,
+                "timeout_action": "escalate_operator",
+                "result_transport": "kafka_event",
+            }
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+
+            self.assertEqual(validation["status"], "invalid")
+            error = next(
+                (
+                    item
+                    for item in validation["errors"]
+                    if "wait_for_email_by_ticket_completed" in item
+                    and "mock/monitor_provider_channel_repair" in item
+                ),
+                "",
+            )
+            self.assertIn("endpoint-операция mock/monitor_provider_channel_repair", error)
+            self.assertIn("не содержит async_event_contracts", error)
 
     def test_attribute_resolution_direct_mapping_reads_output_from_referenced_step(self) -> None:
         with TemporaryDirectory() as tempdir:
@@ -1258,6 +1475,36 @@ class ConfigAssistantTest(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(item, {"login": "ivanov"})
         self.assertEqual(summary["result_path"], "users")
+
+    def test_operation_response_items_keeps_root_source_hint_for_top_level_field(self) -> None:
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "router_candidates": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+                "email_result": {
+                    "type": "object",
+                    "properties": {"body": {"type": "string"}},
+                },
+            },
+        }
+
+        count, item, summary = operation_response_items(
+            {
+                "message": "Письмо провайдеру отправлено.",
+                "router_candidates": [],
+                "email_result": {"body": "ok"},
+            },
+            response_schema,
+            [{"slot_id": "provider_mail_body", "source_hint": "message"}],
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(item["message"], "Письмо провайдеру отправлено.")
+        self.assertEqual(summary["result_path"], "")
 
     def test_service_scenario_accepts_known_react_call_scope(self) -> None:
         with TemporaryDirectory() as tempdir:

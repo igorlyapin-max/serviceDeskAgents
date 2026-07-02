@@ -13,9 +13,10 @@ Use this project-local skill after the global `n8n-runbook-conventions` rules. T
 - Default inbound external result topic: `external.events`.
 - Kafka/Redpanda from host: `127.0.0.1:19092`.
 - Kafka/Redpanda from docker network: `redpanda:9092`.
-- Env: `KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092`, `TOOL_COMMAND_TOPIC=tool.commands`, `EXTERNAL_EVENT_TOPIC=external.events`.
+- Env: `KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092`, `TOOL_COMMAND_TOPIC=tool.commands`, `EXTERNAL_EVENT_TOPIC=external.events`, `AGENT_TASK_TOPIC=agent.tasks`.
 - n8n webhook base URL: `N8N_WEBHOOK_BASE_URL=http://127.0.0.1:5678/webhook`.
-- Orchestrator callback base: `ORCHESTRATOR_PUBLIC_URL=http://127.0.0.1:18088`.
+- Orchestrator callback base from host tools: `http://127.0.0.1:18088`.
+- Orchestrator callback base from dockerized n8n: `ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088`.
 - Long-running n8n callback: `POST /external-events/n8n` with `X-ServiceDesk-Callback-Token`.
 
 ## Workflow Contract
@@ -27,6 +28,7 @@ Use this project-local skill after the global `n8n-runbook-conventions` rules. T
 - Each returned ExternalEvent must use a stable per-event `idempotency_key`, for example `<idempotency_key_base>:<event_id>`.
 - Kafka result delivery is accepted only for waits with `result_transport=kafka_event|both` and only from the expected `result_topic`.
 - n8n must return external events only; it must not close or escalate cases directly.
+- Long-running polling runbooks must emit compact `progress` ExternalEvent diagnostics on each polling cycle before waiting again. For provider/email polling on this stand include `service_request`, `reply_mailbox_address`, `mailbox_indexed_count`, `match_count`, `poll_iteration`, `last_poll_at`, `next_poll_at`, and the n8n execution/correlation identifiers when available.
 
 ## Source Of Truth
 

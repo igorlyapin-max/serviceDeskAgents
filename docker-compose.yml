@@ -1,5 +1,73 @@
 name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}
 
+x-orchestrator-image: &orchestrator-image
+  image: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-orchestrator:local
+  build:
+    context: .
+    dockerfile: Dockerfile.orchestrator
+
+x-orchestrator-env: &orchestrator-env
+  APP_ENV: ${APP_ENV:-local}
+  SERVICE_DESK_ENV: ${APP_ENV:-local}
+  ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-18088}
+  ORCHESTRATOR_STATE_DB: /app/state/orchestrator.sqlite
+  ORCHESTRATOR_PUBLIC_URL: ${COMPOSE_ORCHESTRATOR_PUBLIC_URL:-http://orchestrator:18088}
+  CMDBUILD_BASE_URL: ${CMDBUILD_BASE_URL:-http://hostmachine:8090/cmdbuild}
+  SECURITY_AUTH_MODE: ${SECURITY_AUTH_MODE:-dev_header}
+  SECURITY_DEV_ACTOR: ${SECURITY_DEV_ACTOR:-admin-1}
+  SECURITY_RATE_LIMIT_PER_MINUTE: ${SECURITY_RATE_LIMIT_PER_MINUTE:-600}
+  METRICS_ALLOWED_IPS: ${METRICS_ALLOWED_IPS:-127.0.0.1,::1}
+  INTEGRATION_CALLBACK_TOKEN: ${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}
+  INTEGRATION_CALLBACK_TOKEN__N8N: ${INTEGRATION_CALLBACK_TOKEN__N8N:-${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_SINKS: ${LOG_SINKS:-stdout,jsonl}
+  LOG_JSONL_PATH: ${LOG_JSONL_PATH:-state/logs/servicedesk-events.jsonl}
+  DEBUG_LOGGING_ENABLED: ${DEBUG_LOGGING_ENABLED:-false}
+  DEBUG_LOGGING_LEVEL: ${DEBUG_LOGGING_LEVEL:-Basic}
+  READYZ_STRICT: ${READYZ_STRICT:-false}
+  READYZ_NETWORK_TIMEOUT_SECONDS: ${READYZ_NETWORK_TIMEOUT_SECONDS:-1.5}
+  ASYNC_RUNTIME_HEARTBEAT_INTERVAL_SECONDS: ${ASYNC_RUNTIME_HEARTBEAT_INTERVAL_SECONDS:-5}
+  ASYNC_RUNTIME_HEARTBEAT_STALE_SECONDS: ${ASYNC_RUNTIME_HEARTBEAT_STALE_SECONDS:-30}
+  KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+  KAFKA_API_VERSION: ${ORCHESTRATOR_KAFKA_API_VERSION:-2.3}
+  KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
+  KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+  KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+  KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+  KAFKA_SSL_CA_FILE: ${KAFKA_SSL_CA_FILE:-}
+  KAFKA_SSL_CERT_FILE: ${KAFKA_SSL_CERT_FILE:-}
+  KAFKA_SSL_KEY_FILE: ${KAFKA_SSL_KEY_FILE:-}
+  KAFKA_SSL_CHECK_HOSTNAME: ${KAFKA_SSL_CHECK_HOSTNAME:-true}
+  TOOL_COMMAND_TOPIC: ${TOOL_COMMAND_TOPIC:-tool.commands}
+  TOOL_COMMAND_WORKER_GROUP_ID: ${TOOL_COMMAND_WORKER_GROUP_ID:-servicedesk-tool-workers}
+  AGENT_TASK_TOPIC: ${AGENT_TASK_TOPIC:-agent.tasks}
+  AGENT_TASK_LEASE_SECONDS: ${AGENT_TASK_LEASE_SECONDS:-60}
+  EXTERNAL_EVENT_TOPIC: ${EXTERNAL_EVENT_TOPIC:-external.events}
+  EXTERNAL_EVENT_WORKER_GROUP_ID: ${EXTERNAL_EVENT_WORKER_GROUP_ID:-servicedesk-external-event-workers}
+  EXTERNAL_EVENT_WORKER_OFFSET_RESET: ${EXTERNAL_EVENT_WORKER_OFFSET_RESET:-earliest}
+  N8N_WEBHOOK_BASE_URL: http://n8n:5678/webhook
+  N8N_HEALTH_URL: http://n8n:5678/healthz
+  N8N_ENVIRONMENT: ${N8N_ENVIRONMENT:-local}
+  N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:?Set N8N_WEBHOOK_TOKEN in .env}
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
+  LITELLM_BASE_URL: ${COMPOSE_LITELLM_BASE_URL:-http://litellm:4000/v1}
+  LITELLM_PUBLIC_BASE_URL: ${LITELLM_PUBLIC_BASE_URL:-http://127.0.0.1:${LITELLM_PORT:-4000}/v1}
+  MODEL_ACTIVE_PROVIDER: ${MODEL_ACTIVE_PROVIDER:-vllm_cpu}
+  LITELLM_MODEL_ALIAS: ${LITELLM_MODEL_ALIAS:-local-opt-125m}
+  LITELLM_UPSTREAM_MODEL: ${LITELLM_UPSTREAM_MODEL:-hosted_vllm/facebook/opt-125m}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_API_KEY_ENV: ${OPENAI_API_KEY_ENV:-OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_MODEL_ALIAS: ${OPENAI_MODEL_ALIAS:-openai-primary}
+  OPENAI_MODEL: ${OPENAI_MODEL:-openai/gpt-4.1-mini}
+  OPENAI_CONTEXT_LENGTH: ${OPENAI_CONTEXT_LENGTH:-128000}
+  OPENAI_MAX_TOKENS: ${OPENAI_MAX_TOKENS:-4096}
+  OPENAI_REQUESTS_PER_MINUTE: ${OPENAI_REQUESTS_PER_MINUTE:-60}
+  OPENAI_TOKENS_PER_MINUTE: ${OPENAI_TOKENS_PER_MINUTE:-120000}
+  INTEGRATION_ENDPOINT_PROFILE: ${INTEGRATION_ENDPOINT_PROFILE:-mock}
+  ZABBIX_DIRECT_BASE_URL: ${ZABBIX_DIRECT_BASE_URL:-http://127.0.0.1:8082}
+  CMDB_DIRECT_BASE_URL: ${CMDB_DIRECT_BASE_URL:-http://127.0.0.1:8081}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -89,22 +157,176 @@ services:
       WEBHOOK_URL: http://localhost:${N8N_PORT:-5678}/
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
       N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:?Set N8N_WEBHOOK_TOKEN in .env}
-      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+      N8N_OPENAPI_DEFAULT_LOCALE: ${N8N_OPENAPI_DEFAULT_LOCALE:-ru}
+      N8N_INTERNAL_WEBHOOK_BASE_URL: ${N8N_INTERNAL_WEBHOOK_BASE_URL:-http://127.0.0.1:5678/webhook}
+      SERVICE_DESK_ENV: ${APP_ENV:-local}
+      APP_ENV: ${APP_ENV:-local}
+      N8N_ENVIRONMENT: ${N8N_ENVIRONMENT:-local}
+      N8N_WORKFLOW_DEBUG: ${N8N_WORKFLOW_DEBUG:-off}
+      ORCHESTRATOR_PUBLIC_URL: ${COMPOSE_ORCHESTRATOR_PUBLIC_URL:-http://orchestrator:18088}
+      CMDBUILD_BASE_URL: ${CMDBUILD_BASE_URL:-http://hostmachine:8090/cmdbuild}
+      INTEGRATION_CALLBACK_TOKEN: ${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}
+      INTEGRATION_CALLBACK_TOKEN__N8N: ${INTEGRATION_CALLBACK_TOKEN__N8N:-${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}}
+      KAFKA_BOOTSTRAP_SERVERS: ${N8N_KAFKA_BOOTSTRAP_SERVERS:-redpanda:9092}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
+      KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+      KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+      KAFKA_SSL_CA_FILE: ${KAFKA_SSL_CA_FILE:-}
+      KAFKA_SSL_CERT_FILE: ${KAFKA_SSL_CERT_FILE:-}
+      KAFKA_SSL_KEY_FILE: ${KAFKA_SSL_KEY_FILE:-}
+      KAFKA_SSL_CHECK_HOSTNAME: ${KAFKA_SSL_CHECK_HOSTNAME:-true}
+      EXTERNAL_EVENT_TOPIC: ${EXTERNAL_EVENT_TOPIC:-external.events}
+      ZABBIX_RUNBOOK_REQUIRED_ORIGINS: ${ZABBIX_RUNBOOK_REQUIRED_ORIGINS:-}
+      ZABBIX_API_URLS_BY_ORIGIN: ${ZABBIX_API_URLS_BY_ORIGIN:-}
+      ZABBIX_API_TOKENS_BY_ORIGIN: ${ZABBIX_API_TOKENS_BY_ORIGIN:-}
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       GENERIC_TIMEZONE: Europe/Moscow
       TZ: Europe/Moscow
     ports:
       - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    extra_hosts:
+      - "hostmachine:host-gateway"
+      - "host.docker.internal:host-gateway"
     volumes:
       - n8n-data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  orchestrator:
+    <<: *orchestrator-image
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-orchestrator
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    environment:
+      <<: *orchestrator-env
+    command:
+      - python
+      - -m
+      - uvicorn
+      - apps.orchestrator.app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18088"
+    ports:
+      - "127.0.0.1:${ORCHESTRATOR_PORT:-18088}:18088"
+    volumes:
+      - ./state:/app/state
+      - ./tmp:/app/tmp
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:18088/healthz', timeout=2).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  async-outbox-publisher:
+    <<: *orchestrator-image
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-outbox-publisher
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+    command:
+      - python
+      - -m
+      - apps.orchestrator.app.kafka_runtime
+      - publisher
+      - --topic
+      - ${TOOL_COMMAND_TOPIC:-tool.commands}
+      - --interval-seconds
+      - ${OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
+    volumes:
+      - ./state:/app/state
+      - ./tmp:/app/tmp
+
+  async-tool-worker:
+    <<: *orchestrator-image
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-tool-worker
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+    command:
+      - python
+      - -m
+      - apps.orchestrator.app.kafka_runtime
+      - worker
+      - --topic
+      - ${TOOL_COMMAND_TOPIC:-tool.commands}
+    volumes:
+      - ./state:/app/state
+      - ./tmp:/app/tmp
+
+  async-external-event-worker:
+    <<: *orchestrator-image
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-external-event-worker
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+    command:
+      - python
+      - -m
+      - apps.orchestrator.app.kafka_runtime
+      - external-event-worker
+      - --topic
+      - ${EXTERNAL_EVENT_TOPIC:-external.events}
+    volumes:
+      - ./state:/app/state
+      - ./tmp:/app/tmp
+
+  async-agent-task-worker:
+    <<: *orchestrator-image
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-agent-task-worker
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      <<: *orchestrator-env
+    command:
+      - python
+      - -m
+      - apps.orchestrator.app.kafka_runtime
+      - agent-task-worker
+      - --topic
+      - ${AGENT_TASK_TOPIC:-agent.tasks}
+    volumes:
+      - ./state:/app/state
+      - ./tmp:/app/tmp
 
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-litellm
     restart: unless-stopped
-    profiles:
-      - llm
     command: ["--config", "/app/config/litellm.yaml", "--host", "0.0.0.0", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}

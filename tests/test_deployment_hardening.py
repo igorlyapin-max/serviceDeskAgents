@@ -38,12 +38,12 @@ class DeploymentHardeningTest(unittest.TestCase):
         ]:
             self.assertNotIn(weak_value, checked_text)
 
-    def test_n8n_postgres_init_uses_environment_and_blocks_node_env_access(self) -> None:
+    def test_n8n_postgres_init_uses_environment_and_allows_required_code_env_access(self) -> None:
         compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         init_script = (REPO_ROOT / "infra/postgres/init/00-create-n8n-db.sh").read_text(encoding="utf-8")
 
         self.assertIn("N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?", compose)
-        self.assertIn('N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"', compose)
+        self.assertIn("N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}", compose)
         self.assertIn('N8N_DB_PASSWORD is required', init_script)
         self.assertIn("quote_literal(:'n8n_password')", init_script)
 

@@ -14,8 +14,17 @@ from .action_gates import (
     utc_now,
 )
 from .cases import CaseStore, new_case_id
-from .config_registry import DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC, ConfigStore, default_model_routing, default_prompt_catalog
-from .contracts import CONTRACTS_ROOT, ContractRegistry, load_json
+from .config_registry import (
+    DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
+    ConfigStore,
+    async_event_types_for_operation,
+    default_async_completion_policy_for_operation,
+    default_model_routing,
+    default_prompt_catalog,
+    operation_response_looks_like_async_ack,
+    runtime_model_routing,
+)
+from .contracts import CONTRACTS_ROOT, ContractRegistry, ContractValidationError, load_json
 from .feedback import FeedbackStore
 from .integrations import IntegrationDispatcher, ToolRegistry
 from .knowledge import KnowledgeIndexer, KnowledgeRetriever
@@ -177,6 +186,17 @@ class TicketWorkflow:
             request["action_id"]: request["gate_id"]
             for request in approval_requests
         }
+        processing_context_created = self._ensure_processing_context_for_async_actions(
+            ticket,
+            case_id=case_id,
+            ticket_id=ticket_id,
+            workflow_state=workflow_state,
+            ai_decision=ai_decision,
+            execution_policy_results=execution_policy_results,
+            approval_requests=approval_requests,
+            rag_trace=rag_trace,
+            proposed_actions=proposed_actions,
+        )
         tool_results = self._dispatch_tool_node(
             case_id,
             ticket_id,
@@ -198,8 +218,61 @@ class TicketWorkflow:
             "approval_requests": approval_requests,
             "rag_trace": rag_trace,
         }
-        self.case_store.create_from_analysis(ticket, analysis)
+        if processing_context_created:
+            self.case_store.update_from_analysis(ticket, analysis)
+            if self.processing_store:
+                self.processing_store.finalize_analysis_run(ticket, analysis)
+        else:
+            self.case_store.create_from_analysis(ticket, analysis)
         return analysis
+
+    def _ensure_processing_context_for_async_actions(
+        self,
+        ticket: dict[str, Any],
+        *,
+        case_id: str,
+        ticket_id: str,
+        workflow_state: dict[str, Any],
+        ai_decision: dict[str, Any],
+        execution_policy_results: list[dict[str, Any]],
+        approval_requests: list[dict[str, Any]],
+        rag_trace: dict[str, Any],
+        proposed_actions: list[dict[str, Any]],
+    ) -> bool:
+        if not self.processing_store:
+            return False
+        if not self._has_external_event_action(proposed_actions):
+            return False
+
+        analysis_context = {
+            "case_id": case_id,
+            "ticket_id": ticket_id,
+            "workflow_state": workflow_state,
+            "ai_decision": ai_decision,
+            "execution_policy_results": execution_policy_results,
+            "operator_message": ai_decision["operator_message"],
+            "tool_results": [],
+            "tool_trace": [],
+            "approval_requests": approval_requests,
+            "rag_trace": rag_trace,
+            "async_dispatch_in_progress": True,
+        }
+        self.case_store.create_from_analysis(ticket, analysis_context)
+        self.processing_store.begin_analysis_run_for_async_dispatch(ticket, analysis_context)
+        return True
+
+    @staticmethod
+    def _has_external_event_action(actions: list[dict[str, Any]]) -> bool:
+        for action in actions:
+            extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+            completion_policy = extensions.get("completion_policy")
+            if (
+                isinstance(completion_policy, dict)
+                and completion_policy.get("mode") == "external_event"
+                and bool(completion_policy.get("expected_event_type"))
+            ):
+                return True
+        return False
 
     def dispatch_tool(
         self,
@@ -239,9 +312,17 @@ class TicketWorkflow:
                 deadline_seconds=completion_policy.get("max_wait_seconds"),
                 reason=f"Ожидание результата ReAct-вызова {invocation['tool_name']}.",
             )
+            tool_result = self._async_tool_queued_result(invocation, queued, completion_policy)
+            self._attach_async_delivery_diagnostics(tool_result)
             return {
                 "invocation": queued["command"]["invocation"],
-                "tool_result": self._async_tool_queued_result(invocation, queued, completion_policy),
+                "tool_result": tool_result,
+            }
+        async_contract_error = self._missing_async_contract_result(invocation, completion_policy)
+        if async_contract_error:
+            return {
+                "invocation": invocation,
+                "tool_result": async_contract_error,
             }
         result = self.integration_dispatcher.dispatch(invocation)
         return {
@@ -327,8 +408,8 @@ class TicketWorkflow:
 
     def model_config(self) -> dict[str, Any]:
         if self.config_store:
-            return self.config_store.active_payload("model_routing")
-        return default_model_routing()
+            return runtime_model_routing(self.config_store.active_payload("model_routing"))
+        return runtime_model_routing(default_model_routing())
 
     def prompt_catalog(self) -> dict[str, Any]:
         if self.config_store:
@@ -455,7 +536,10 @@ class TicketWorkflow:
         }
 
     def get_case(self, case_id: str) -> dict[str, Any]:
-        return self.case_store.require(case_id)
+        case = self.case_store.require(case_id)
+        if self.processing_store is not None:
+            return self.processing_store.enrich_async_tool_results(case)
+        return case
 
     def get_case_timeline(self, case_id: str) -> dict[str, Any]:
         return self.case_store.timeline(case_id)
@@ -948,14 +1032,18 @@ class TicketWorkflow:
         }
         for action in actions:
             policy = policy_by_action_id[action["action_id"]]
-            dispatch_result = self.dispatch_tool(
-                action,
-                policy,
-                case_id=case_id,
-                ticket_id=ticket_id,
-                approved_by_operator=False,
-            )
-            tool_result = dispatch_result["tool_result"]
+            try:
+                dispatch_result = self.dispatch_tool(
+                    action,
+                    policy,
+                    case_id=case_id,
+                    ticket_id=ticket_id,
+                    approved_by_operator=False,
+                )
+                tool_result = dispatch_result["tool_result"]
+            except ContractValidationError as error:
+                tool_result = self._dispatch_validation_error_result(action, policy, error)
+            self._attach_async_delivery_diagnostics(tool_result)
             gate_id = gate_by_action_id.get(action["action_id"])
             if gate_id:
                 extensions = tool_result.setdefault("extensions", {})
@@ -964,6 +1052,64 @@ class TicketWorkflow:
             results.append(tool_result)
         return results
 
+    def _attach_async_delivery_diagnostics(self, tool_result: dict[str, Any]) -> None:
+        if not self.processing_store:
+            return
+        extensions = tool_result.get("extensions")
+        if not isinstance(extensions, dict):
+            return
+        snapshot = self.processing_store.async_tool_delivery_snapshot(extensions.get("async_wait"))
+        if not snapshot:
+            return
+        extensions["async_delivery"] = snapshot
+        extensions["diagnostic_status"] = snapshot["status"]
+
+    def _dispatch_validation_error_result(
+        self,
+        action: dict[str, Any],
+        policy: dict[str, Any],
+        error: ContractValidationError,
+    ) -> dict[str, Any]:
+        action_extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        endpoint_id = action_extensions.get("endpoint_id") or "unknown"
+        operation_id = action_extensions.get("operation_id") or "unknown"
+        source_extensions = {
+            key: copy.deepcopy(value)
+            for key in ("source_profile_id", "source_step_id", "debug_launch_id")
+            if (value := action_extensions.get(key)) not in (None, "", {}, [])
+        }
+        result = {
+            "schema_version": "1.0",
+            "invocation_id": f"not-dispatched-{uuid.uuid4().hex[:12]}",
+            "action_id": action.get("action_id") or "unknown-action",
+            "tool_name": action.get("tool_name") or "unknown-tool",
+            "endpoint_id": endpoint_id,
+            "adapter_type": "queue",
+            "operation_id": operation_id,
+            "status": "error",
+            "policy_rule_id": policy.get("policy_rule_id") or "dispatch.validation_error",
+            "duration_ms": 0,
+            "attempts": 0,
+            "error": {
+                "code": "not_dispatched",
+                "message": "; ".join(error.errors) or str(error),
+            },
+            "extensions": {
+                **source_extensions,
+                "diagnostic_status": "not_dispatched",
+                "contract_name": error.contract_name,
+                "trace": {
+                    "react_parameters": copy.deepcopy(action.get("parameters") or {}),
+                    "endpoint_id": endpoint_id,
+                    "operation_id": operation_id,
+                    "execution_mode": policy.get("execution_mode"),
+                    **source_extensions,
+                },
+            },
+        }
+        self.contracts.require_valid("tool_result", result)
+        return result
+
     def _completion_policy_for_invocation(
         self,
         action: dict[str, Any],
@@ -971,13 +1117,154 @@ class TicketWorkflow:
         *,
         preferred_launch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        async_default = self._default_async_completion_policy_for_invocation(invocation)
         extensions = action.get("extensions") or {}
         completion_policy = extensions.get("completion_policy")
         if isinstance(completion_policy, dict):
-            return copy.deepcopy(completion_policy)
+            policy = copy.deepcopy(completion_policy)
+            return self._completion_policy_with_async_defaults(policy, async_default)
         if preferred_launch:
-            return copy.deepcopy(preferred_launch.get("completion_policy") or {"mode": "sync"})
+            policy = copy.deepcopy(preferred_launch.get("completion_policy") or {"mode": "sync"})
+            return self._completion_policy_with_async_defaults(policy, async_default)
+        if async_default:
+            return async_default
         return {"mode": "sync", "max_wait_seconds": 0, "timeout_action": "resume_agent"}
+
+    @staticmethod
+    def _completion_policy_with_async_defaults(
+        policy: dict[str, Any],
+        async_default: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not async_default:
+            return policy
+        if not policy or policy.get("mode") == "sync":
+            return copy.deepcopy(async_default)
+        if policy.get("mode") != "external_event":
+            return policy
+        merged = copy.deepcopy(policy)
+        for key in ("expected_event_type", "max_wait_seconds", "timeout_action"):
+            if not merged.get(key) and async_default.get(key):
+                merged[key] = async_default[key]
+        for key in ("result_transport", "result_topic"):
+            if not merged.get(key) and async_default.get(key):
+                merged[key] = async_default[key]
+        return merged
+
+    def _default_async_completion_policy_for_invocation(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.config_store:
+            return None
+        endpoint_id = invocation.get("endpoint_id")
+        operation_id = invocation.get("operation_id")
+        if not endpoint_id or not operation_id:
+            return None
+        try:
+            endpoint = next(
+                (
+                    item
+                    for item in self.config_store.active_payload("integration_endpoints").get("endpoints", [])
+                    if item.get("endpoint_id") == endpoint_id
+                ),
+                None,
+            )
+            operation = (endpoint or {}).get("operations", {}).get(operation_id)
+            delivery_defaults = self._delivery_defaults_for_operation(endpoint_id, operation_id)
+        except Exception:
+            return None
+        return default_async_completion_policy_for_operation(
+            operation,
+            operation_id=operation_id,
+            delivery_defaults=delivery_defaults,
+        )
+
+    def _delivery_defaults_for_operation(self, endpoint_id: str, operation_id: str) -> dict[str, Any]:
+        if not self.config_store:
+            return {}
+        workflows = self.config_store.active_payload("n8n_workflows").get("workflows", [])
+        fallback_delivery: dict[str, Any] | None = None
+        for workflow in workflows:
+            if workflow.get("endpoint_id") != endpoint_id:
+                continue
+            delivery = workflow.get("result_delivery") or {}
+            if not delivery:
+                continue
+            operations = workflow.get("operations") or []
+            if operation_id not in operations:
+                if not operations and fallback_delivery is None:
+                    fallback_delivery = delivery
+                continue
+            return {
+                "result_transport": delivery.get("default_transport") or "http_callback",
+                "result_topic": delivery.get("default_result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
+            }
+        if fallback_delivery:
+            return {
+                "result_transport": fallback_delivery.get("default_transport") or "http_callback",
+                "result_topic": fallback_delivery.get("default_result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
+            }
+        return {}
+
+    def _missing_async_contract_result(
+        self,
+        invocation: dict[str, Any],
+        completion_policy: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if invocation.get("adapter_type") != "n8n_webhook":
+            return None
+        if completion_policy.get("mode") == "external_event":
+            return None
+        operation = self._operation_for_invocation(invocation)
+        if async_event_types_for_operation(operation):
+            return None
+        if not operation_response_looks_like_async_ack(operation):
+            return None
+        result = IntegrationDispatcher._base_result(
+            invocation,
+            "error",
+            error={
+                "code": "async_event_contract_missing",
+                "message": (
+                    f"Endpoint-операция {invocation.get('endpoint_id')}/{invocation.get('operation_id')} "
+                    "выглядит как асинхронный ACK (runbook_status/async_delivery), но не содержит "
+                    "async_event_contracts. Переимпортируйте OpenAPI-контракт n8n с x-result-delivery "
+                    "или исправьте контракт операции перед запуском."
+                ),
+            },
+            extensions={
+                "diagnostic_status": "async_event_contract_missing",
+                "root_cause": "endpoint_operation_without_async_event_contracts",
+            },
+        )
+        try:
+            binding = self.tool_registry.resolve(
+                invocation["tool_name"],
+                endpoint_id=invocation.get("endpoint_id"),
+                operation_id=invocation.get("operation_id"),
+            )
+            result = IntegrationDispatcher._with_trace(result, invocation, binding)
+        except Exception:
+            pass
+        self.contracts.require_valid("tool_result", result)
+        return result
+
+    def _operation_for_invocation(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.config_store:
+            return None
+        endpoint_id = invocation.get("endpoint_id")
+        operation_id = invocation.get("operation_id")
+        if not endpoint_id or not operation_id:
+            return None
+        try:
+            endpoint = next(
+                (
+                    item
+                    for item in self.config_store.active_payload("integration_endpoints").get("endpoints", [])
+                    if item.get("endpoint_id") == endpoint_id
+                ),
+                None,
+            )
+            return (endpoint or {}).get("operations", {}).get(operation_id)
+        except Exception:
+            return None
 
     def _preferred_launch_for_action(self, action: dict[str, Any]) -> dict[str, Any] | None:
         extensions = action.get("extensions") or {}
@@ -1032,8 +1319,15 @@ class TicketWorkflow:
             invocation,
             "success",
             output={
-                "runbook_status": "queued",
+                "runbook_status": "accepted",
                 "message": "Асинхронный ReAct-вызов поставлен в очередь выполнения.",
+                "async_delivery": True,
+                "wait_id": wait["wait_id"],
+                "correlation_id": wait["correlation_id"],
+                "result_transport": command.get("result_transport"),
+                "result_topic": command.get("result_topic"),
+                "invocation_id": invocation.get("invocation_id"),
+                "action_id": invocation.get("operation_id"),
             },
             extensions={
                 "mock": False,
@@ -1049,7 +1343,11 @@ class TicketWorkflow:
                 },
             },
         )
-        binding = self.tool_registry.resolve(invocation["tool_name"])
+        binding = self.tool_registry.resolve(
+            invocation["tool_name"],
+            endpoint_id=invocation.get("endpoint_id"),
+            operation_id=invocation.get("operation_id"),
+        )
         result = IntegrationDispatcher._with_trace(result, invocation, binding)
         self.contracts.require_valid("tool_result", result)
         self.tool_registry.validate_result(result)
@@ -1059,6 +1357,7 @@ class TicketWorkflow:
     def _build_tool_trace(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         trace = []
         for result in tool_results:
+            extensions = result.get("extensions", {})
             trace.append(
                 {
                     "invocation_id": result["invocation_id"],
@@ -1072,8 +1371,11 @@ class TicketWorkflow:
                     "duration_ms": result["duration_ms"],
                     "attempts": result["attempts"],
                     "error_code": result.get("error", {}).get("code"),
-                    "gate_id": result.get("extensions", {}).get("gate_id"),
-                    "mock": result.get("extensions", {}).get("mock", False),
+                    "gate_id": extensions.get("gate_id"),
+                    "mock": extensions.get("mock", False),
+                    "source_profile_id": extensions.get("source_profile_id"),
+                    "source_step_id": extensions.get("source_step_id"),
+                    "debug_launch_id": extensions.get("debug_launch_id"),
                 }
             )
         return trace

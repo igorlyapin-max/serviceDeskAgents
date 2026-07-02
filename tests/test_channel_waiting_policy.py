@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from apps.orchestrator.app import config_registry
 from apps.orchestrator.app.config_registry import (
     ConfigRegistryError,
     ConfigStore,
@@ -11,8 +14,10 @@ from apps.orchestrator.app.config_registry import (
     default_classification_routes,
     default_escalation_policies,
     default_interaction_channels,
+    default_model_routing,
     default_slot_schemas,
     normalize_channel_waiting_policy,
+    runtime_model_routing,
 )
 from apps.orchestrator.app.contracts import ContractRegistry
 
@@ -213,6 +218,94 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
                     text="Иванов Иван не может войти в доменную учетную запись",
                     channel_id="missing_channel",
                 )
+
+    def test_runtime_model_routing_overrides_litellm_url(self) -> None:
+        payload = default_model_routing()
+        payload["gateway"]["base_url"] = "http://127.0.0.1:4000/v1"
+        payload["providers"]["vllm_cpu"]["base_url"] = "http://127.0.0.1:4000/v1"
+
+        with patch.dict(
+            "os.environ",
+            {
+                "LITELLM_BASE_URL": "http://litellm:4000/v1",
+                "LITELLM_PUBLIC_BASE_URL": "http://127.0.0.1:4000/v1",
+            },
+            clear=False,
+        ):
+            normalized = runtime_model_routing(payload)
+
+        self.assertEqual(normalized["gateway"]["base_url"], "http://litellm:4000/v1")
+        self.assertEqual(normalized["providers"]["vllm_cpu"]["base_url"], "http://litellm:4000/v1")
+        self.assertEqual(normalized["runtime"]["litellm_public_base_url"], "http://127.0.0.1:4000/v1")
+        self.assertTrue(normalized["runtime"]["litellm_runtime_override_applied"])
+
+    def test_simulation_uses_runtime_model_routing_for_llm_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            slot_payload = copy.deepcopy(store.active_payload("slot_schemas"))
+            password_schema = next(
+                schema for schema in slot_payload["slot_schemas"]
+                if schema["slot_schema_id"] == "slot.password_reset"
+            )
+            password_schema["stages"] = [
+                {
+                    "stage_id": "stage.identity",
+                    "display_name": "Идентификация",
+                    "order": 1,
+                    "slots": [
+                        {
+                            "slot_id": "user_fio",
+                            "display_name": "ФИО пользователя",
+                            "priority_group": "who",
+                            "required": True,
+                            "fill_method": "llm_extraction",
+                            "extraction_instruction": "Извлеки ФИО пользователя из текста обращения.",
+                        }
+                    ],
+                }
+            ]
+            password_schema["slots"] = password_schema["stages"][0]["slots"]
+            password_schema["question_order"] = ["user_fio"]
+
+            model_payload = default_model_routing()
+            model_payload["gateway"]["base_url"] = "http://127.0.0.1:4000/v1"
+            captured_model_configs: list[dict] = []
+
+            def fake_invoke_slot_extraction_model(**kwargs: object) -> dict:
+                captured_model_configs.append(copy.deepcopy(kwargs["model_config"]))  # type: ignore[index]
+                return {
+                    "status": "success",
+                    "provider": "OpenAI API",
+                    "model": "openai-primary",
+                    "gateway_base_url": kwargs["model_config"]["gateway"]["base_url"],  # type: ignore[index]
+                    "runtime_override_applied": True,
+                    "duration_ms": 1,
+                    "usage": {},
+                    "redaction": {},
+                    "slots": {
+                        "user_fio": {
+                            "value": "Иванов Иван",
+                            "confidence": 0.99,
+                            "reason": "Тестовое извлечение.",
+                        }
+                    },
+                }
+
+            with (
+                store.active_payload_overrides({"slot_schemas": slot_payload, "model_routing": model_payload}),
+                patch.dict("os.environ", {"LITELLM_BASE_URL": "http://litellm:4000/v1"}, clear=False),
+                patch.object(config_registry, "invoke_slot_extraction_model", side_effect=fake_invoke_slot_extraction_model),
+            ):
+                simulation = store.simulate_scenario(
+                    "password_reset",
+                    text="Сбросьте пароль Иванову Ивану.",
+                    run_mode="llm",
+                )
+
+        self.assertEqual(captured_model_configs[0]["gateway"]["base_url"], "http://litellm:4000/v1")
+        trace_step = next(item for item in simulation["execution_trace"] if item["title"] == "Извлечение слотов моделью")
+        self.assertEqual(trace_step["details"]["gateway_base_url"], "http://litellm:4000/v1")
+        self.assertTrue(trace_step["details"]["runtime_override_applied"])
 
     def test_default_slot_schemas_do_not_define_waiting_timeouts(self) -> None:
         for slot_schema in default_slot_schemas()["slot_schemas"]:

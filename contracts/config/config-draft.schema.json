@@ -35,6 +35,43 @@
     "payload": {
       "type": "object"
     },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "collection",
+        "id_key",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "const": "collection_item"
+        },
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "id_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "upsert",
+            "delete"
+          ]
+        }
+      }
+    },
     "status": {
       "type": "string",
       "enum": [

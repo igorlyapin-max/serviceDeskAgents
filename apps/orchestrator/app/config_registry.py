@@ -85,6 +85,114 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
     "min_extraction_confidence": 0.70,
 }
 
+DEFAULT_EDITOR_REFERENCE_HIDDEN_FIELDS = [
+    {
+        "field": "accepted_at",
+        "contexts": ["react_output", "step_output", "wait"],
+        "display_name": "Accepted at",
+        "description": "Техническое время принятия async-команды или ожидания.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "action_id",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Action ID",
+        "description": "Технический идентификатор команды исполнения.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "async_delivery",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Async delivery",
+        "description": "Служебная metadata доставки async-результата.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "correlation_id",
+        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "display_name": "Correlation ID",
+        "description": "Технический идентификатор корреляции сообщений и callback.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "has_callback_url",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Has callback URL",
+        "description": "Служебный признак наличия callback URL.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "invocation_id",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Invocation ID",
+        "description": "Технический идентификатор вызова endpoint.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "message",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Message",
+        "description": "Служебное сообщение транспорта; бизнес-текст лучше брать из явных полей контракта.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "result_topic",
+        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "display_name": "Result topic",
+        "description": "Технический Kafka topic доставки результата.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "result_transport",
+        "contexts": ["react_output", "step_output", "wait"],
+        "display_name": "Result transport",
+        "description": "Технический способ доставки результата async-вызова.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "runbook_status",
+        "contexts": ["react_output", "step_output"],
+        "display_name": "Runbook status",
+        "description": "Транспортный статус запуска runbook, не итоговое бизнес-решение сценария.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "wait_id",
+        "contexts": ["react_output", "step_output", "wait"],
+        "display_name": "Wait ID",
+        "description": "Технический идентификатор состояния ожидания.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "idempotency_key",
+        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "display_name": "Idempotency key",
+        "description": "Технический ключ идемпотентности доставки команды.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "callback_url",
+        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "display_name": "Callback URL",
+        "description": "Технический URL callback для async-результата.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "event_type",
+        "contexts": ["react_output", "step_output", "wait"],
+        "display_name": "Event type",
+        "description": "Технический тип события во внешнем callback.",
+        "show_in_hints": False,
+    },
+    {
+        "field": "source",
+        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "display_name": "Source",
+        "description": "Служебный источник события или параметра.",
+        "show_in_hints": False,
+    },
+]
+
 STEP_SOURCE_REF_RE = re.compile(
     r"^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$"
 )
@@ -138,6 +246,7 @@ AGENT_OUTCOME_LABELS = {
     "success": "Завершено автоматически",
     "needs_review": "Требуется эскалация",
     "waiting": "Вопрос клиенту",
+    "waiting_external_event": "Ожидает n8n",
     "escalated": "Требуется эскалация",
     "error": "Ошибка",
 }
@@ -146,6 +255,7 @@ AGENT_OUTCOME_NEXT_STEPS = {
     "success": "Автообработка завершена; проверьте трассу и итоговые данные при необходимости.",
     "needs_review": "Передайте обращение оператору вместе с контекстом и трассой обработки.",
     "waiting": "Передайте клиенту уточняющий вопрос и продолжите обработку после ответа.",
+    "waiting_external_event": "Дождитесь terminal ExternalEvent от n8n; после callback сценарий продолжит обработку.",
     "escalated": "Проверьте пакет передачи и передайте обращение в настроенный канал эскалации.",
     "error": "Исправьте конфигурацию, mock или контракт и повторите тестовый прогон.",
 }
@@ -277,6 +387,45 @@ def schema_type(schema: dict[str, Any] | None) -> str | None:
     if isinstance(value, list):
         return next((str(item) for item in value if item != "null"), None)
     return str(value) if value else None
+
+
+def _schema_value_is_present(value: Any) -> bool:
+    return value not in (None, "")
+
+
+def coerce_schema_value(schema: dict[str, Any] | None, value: Any) -> Any:
+    if not isinstance(schema, dict) or not isinstance(value, str):
+        return value
+    expected_type = schema_type(schema)
+    text = value.strip()
+    if expected_type == "integer" and re.fullmatch(r"-?\d+", text):
+        try:
+            return int(text)
+        except ValueError:
+            return value
+    if expected_type == "number" and re.fullmatch(r"-?(?:\d+|\d+\.\d+)", text):
+        try:
+            return float(text) if "." in text else int(text)
+        except ValueError:
+            return value
+    if expected_type == "boolean":
+        lowered = text.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return value
+
+
+def coerce_schema_parameter_values(
+    schema: dict[str, Any] | None,
+    parameters: dict[str, Any] | None,
+) -> dict[str, Any]:
+    result = copy.deepcopy(parameters or {})
+    properties = schema_properties(schema)
+    for parameter, value in list(result.items()):
+        result[parameter] = coerce_schema_value(properties.get(parameter), value)
+    return result
 
 
 def schema_at_path(schema: dict[str, Any] | None, path: str | None) -> dict[str, Any] | None:
@@ -462,7 +611,7 @@ def default_result_mapping(
     operation: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     tool_schema = tool.get("result_schema", {})
-    response_schema = operation.get("response_schema") if operation else None
+    response_schema = operation_terminal_result_schema(operation) if operation else None
     response_properties = schema_properties(response_schema)
     result = {}
     for name in dict.fromkeys([
@@ -516,6 +665,12 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
             "blocked_by_configuration",
         }
     ]
+    pending_live_resolution = [
+        item
+        for item in simulation.get("attribute_resolution") or []
+        if item.get("status") == "pending_live_execution"
+        or item.get("decision") == "execute_react_call"
+    ]
     missing_slot_set = set(missing_slots)
     configuration_blocks = []
     for item in blocked_calls:
@@ -536,6 +691,9 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
     elif operator_escalation.get("required"):
         status = "escalated"
         summary = operator_escalation.get("reason") or "Агент завершил автообработку и подготовил передачу оператору."
+    elif pending_live_resolution:
+        status = "waiting_external_event"
+        summary = "Агент ожидает внешний результат ReAct-вызова или n8n workflow."
     elif simulation.get("awaiting_client_response") or simulation.get("next_question"):
         status = "waiting"
         summary = "Агенту не хватает данных: сформирован вопрос клиенту."
@@ -615,6 +773,139 @@ def object_schema(required: list[str], properties: dict[str, dict[str, Any]]) ->
 SYSTEM_OPERATION_PARAMETERS = {"invocation"}
 
 
+def schema_parameter_default(
+    schema: dict[str, Any] | None,
+    parameter_name: str,
+) -> tuple[bool, Any]:
+    parameter_schema = schema_properties(schema).get(parameter_name)
+    if not isinstance(parameter_schema, dict):
+        return False, None
+    for key in ("default", "x-servicedesk-default"):
+        if key in parameter_schema:
+            return True, copy.deepcopy(parameter_schema[key])
+    return False, None
+
+
+def _append_required_group(
+    groups: list[list[str]],
+    seen: set[tuple[str, ...]],
+    alternatives: list[str],
+) -> None:
+    clean = [
+        item
+        for item in dict.fromkeys(str(value) for value in alternatives if value)
+        if item not in SYSTEM_OPERATION_PARAMETERS
+    ]
+    if not clean:
+        return
+    key = tuple(sorted(clean))
+    if key in seen:
+        return
+    seen.add(key)
+    groups.append(clean)
+
+
+def schema_required_parameter_groups(schema: dict[str, Any] | None) -> list[list[str]]:
+    groups: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def visit(item: dict[str, Any] | None) -> None:
+        if not isinstance(item, dict):
+            return
+        for required_name in schema_required(item):
+            _append_required_group(groups, seen, [required_name])
+        for branch in item.get("allOf") or []:
+            if isinstance(branch, dict):
+                visit(branch)
+        for composition_key in ("anyOf", "oneOf"):
+            alternatives: list[str] = []
+            for branch in item.get(composition_key) or []:
+                if not isinstance(branch, dict):
+                    continue
+                branch_required = [
+                    str(required_name)
+                    for required_name in schema_required(branch)
+                    if required_name not in SYSTEM_OPERATION_PARAMETERS
+                ]
+                if len(branch_required) == 1:
+                    alternatives.append(branch_required[0])
+                else:
+                    for required_name in branch_required:
+                        _append_required_group(groups, seen, [required_name])
+            if alternatives:
+                _append_required_group(groups, seen, alternatives)
+
+    visit(schema)
+    return groups
+
+
+def missing_required_parameter_groups(
+    schema: dict[str, Any] | None,
+    parameters: dict[str, Any] | None,
+) -> list[list[str]]:
+    values = parameters or {}
+    missing = []
+    for group in schema_required_parameter_groups(schema):
+        if any(_schema_value_is_present(values.get(parameter)) for parameter in group):
+            continue
+        if any(schema_parameter_default(schema, parameter)[0] for parameter in group):
+            continue
+        missing.append(group)
+    return missing
+
+
+def format_required_parameter_group(group: list[str]) -> str:
+    return " или ".join(group)
+
+
+def apply_schema_parameter_defaults(
+    schema: dict[str, Any] | None,
+    parameters: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    result = coerce_schema_parameter_values(schema, parameters)
+    applied: dict[str, Any] = {}
+    for group in schema_required_parameter_groups(schema):
+        if any(_schema_value_is_present(result.get(parameter)) for parameter in group):
+            continue
+        for parameter in group:
+            has_default, default_value = schema_parameter_default(schema, parameter)
+            if not has_default:
+                continue
+            properties = schema_properties(schema)
+            value = coerce_schema_value(properties.get(parameter), copy.deepcopy(default_value))
+            result[parameter] = value
+            applied[parameter] = value
+            break
+    return coerce_schema_parameter_values(schema, result), applied
+
+
+def constant_source_ref(value: Any) -> str:
+    if isinstance(value, bool):
+        return f"constant:{str(value).lower()}"
+    if isinstance(value, (int, float)):
+        return f"constant:{value}"
+    if isinstance(value, (dict, list)):
+        return f"constant:{json.dumps(value, ensure_ascii=False, sort_keys=True)}"
+    return f"constant:{value}"
+
+
+def parameter_mapping_with_schema_defaults(
+    schema: dict[str, Any] | None,
+    mapping: dict[str, Any] | None,
+) -> dict[str, str]:
+    result = {str(key): str(value) for key, value in (mapping or {}).items()}
+    for group in schema_required_parameter_groups(schema):
+        if any(parameter in result for parameter in group):
+            continue
+        for parameter in group:
+            has_default, default_value = schema_parameter_default(schema, parameter)
+            if not has_default:
+                continue
+            result[parameter] = constant_source_ref(default_value)
+            break
+    return result
+
+
 def snake_case_name(value: str) -> str:
     return re.sub(r"(?<!^)([A-Z])", r"_\1", str(value or "")).lower()
 
@@ -662,6 +953,15 @@ def react_visible_parameter_schema(schema: dict[str, Any] | None) -> dict[str, A
     }
     if not hidden_names:
         return normalized
+    for hidden_name in hidden_names:
+        hidden_schema = properties.get(hidden_name)
+        canonical_name = snake_case_name(hidden_name)
+        canonical_schema = properties.get(canonical_name)
+        if not isinstance(hidden_schema, dict) or not isinstance(canonical_schema, dict):
+            continue
+        for default_key in ("default", "x-servicedesk-default"):
+            if default_key in hidden_schema and default_key not in canonical_schema:
+                canonical_schema[default_key] = copy.deepcopy(hidden_schema[default_key])
     normalized["properties"] = {
         name: property_schema
         for name, property_schema in properties.items()
@@ -684,8 +984,8 @@ CANONICAL_REACT_PARAMETER_SCHEMAS = {
         ["ticket_number", "poll_interval_minutes", "timeout_minutes"],
         {
             "ticket_number": string_property("Номер заявки"),
-            "poll_interval_minutes": {"type": "integer", "title": "Интервал опроса, минут"},
-            "timeout_minutes": {"type": "integer", "title": "Таймаут ожидания, минут"},
+            "poll_interval_minutes": {"type": "integer", "title": "Интервал опроса, минут", "default": 1},
+            "timeout_minutes": {"type": "integer", "title": "Таймаут ожидания, минут", "default": 15},
         },
     ),
     "start_systemcenter_runbook": object_schema(
@@ -883,6 +1183,82 @@ def normalize_tool_launch_completion_policy(launch: dict[str, Any]) -> None:
         if result_topic:
             result["result_topic"] = result_topic
     launch["completion_policy"] = result
+
+
+def async_event_types_for_operation(operation: dict[str, Any] | None) -> list[str]:
+    if not isinstance(operation, dict):
+        return []
+    async_contracts = operation.get("async_event_contracts") or {}
+    if not isinstance(async_contracts, dict):
+        return []
+    return [
+        event_type
+        for event_type, contract in sorted(async_contracts.items())
+        if isinstance(contract, dict) and contract.get("contract_status") != "broken"
+    ]
+
+
+def operation_response_looks_like_async_ack(operation: dict[str, Any] | None) -> bool:
+    if not isinstance(operation, dict):
+        return False
+    response_schema = operation.get("response_schema")
+    properties = schema_properties(response_schema)
+    required = set(schema_required(response_schema))
+    return (
+        "async_delivery" in properties
+        and "runbook_status" in properties
+        and (
+            "async_delivery" in required
+            or properties.get("async_delivery", {}).get("const") is True
+        )
+    )
+
+
+def operation_terminal_result_schema(operation: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(operation, dict):
+        return None
+    async_contracts = operation.get("async_event_contracts") or {}
+    if len(async_contracts) == 1:
+        contract = next(iter(async_contracts.values()))
+        if isinstance(contract, dict) and isinstance(contract.get("result_schema"), dict):
+            return contract["result_schema"]
+    return operation.get("response_schema")
+
+
+def default_async_completion_policy_for_operation(
+    operation: dict[str, Any] | None,
+    *,
+    operation_id: str | None = None,
+    delivery_defaults: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    event_types = async_event_types_for_operation(operation)
+    if len(event_types) != 1:
+        return None
+    defaults = copy.deepcopy(delivery_defaults or {})
+    result_delivery = (
+        operation.get("extensions", {}).get("result_delivery")
+        if isinstance(operation, dict) and isinstance(operation.get("extensions"), dict)
+        else None
+    )
+    if isinstance(result_delivery, dict):
+        if not defaults.get("result_transport") and result_delivery.get("default_transport"):
+            defaults["result_transport"] = result_delivery["default_transport"]
+        if not defaults.get("result_topic") and result_delivery.get("default_result_topic"):
+            defaults["result_topic"] = result_delivery["default_result_topic"]
+    policy = {
+        "mode": "external_event",
+        "max_wait_seconds": int(defaults.get("max_wait_seconds") or 86400),
+        "timeout_action": str(defaults.get("timeout_action") or "escalate_operator"),
+        "expected_event_type": event_types[0],
+        "result_transport": str(defaults.get("result_transport") or "http_callback"),
+        "result_topic": str(defaults.get("result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC),
+    }
+    launch = {
+        "operation_id": operation_id,
+        "completion_policy": policy,
+    }
+    normalize_tool_launch_completion_policy(launch)
+    return launch["completion_policy"]
 
 
 def normalize_enrichment_step_launch(enrichment_step: dict[str, Any]) -> None:
@@ -1202,6 +1578,33 @@ def normalize_confidence_thresholds(
             continue
         result[key] = float(value)
     return result
+
+
+def normalize_editor_reference_hints(hints: dict[str, Any] | None) -> dict[str, Any]:
+    defaults = copy.deepcopy(DEFAULT_EDITOR_REFERENCE_HIDDEN_FIELDS)
+    by_key: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {
+        (
+            str(item.get("field") or ""),
+            tuple(sorted(str(context) for context in item.get("contexts") or [])),
+        ): item
+        for item in defaults
+    }
+    configured_items = (hints or {}).get("hidden_fields", []) if isinstance(hints, dict) else []
+    for item in configured_items:
+        field = str(item.get("field") or "").strip()
+        contexts = [str(context).strip() for context in item.get("contexts") or [] if str(context).strip()]
+        if not field or not contexts:
+            continue
+        key = (field, tuple(sorted(contexts)))
+        current = by_key.get(key, {})
+        by_key[key] = {
+            "field": field,
+            "contexts": contexts,
+            "display_name": str(item.get("display_name") or current.get("display_name") or field),
+            "description": str(item.get("description") or current.get("description") or field),
+            "show_in_hints": bool(item.get("show_in_hints")),
+        }
+    return {"hidden_fields": list(by_key.values())}
 
 
 def validate_confidence_thresholds(thresholds: dict[str, Any] | None, label: str, *, require_all: bool = False) -> list[str]:
@@ -1605,6 +2008,8 @@ def next_slot_question(
     if slot_fill_method(slot) == "resolution_profile":
         profile = profile_by_id.get(slot.get("resolution_profile_id", ""))
         if profile:
+            if resolution_profile_human_action(profile) != "ask_client":
+                return None
             return resolution_profile_question(profile) or slot_question_text(slot)
     return slot_question_text(slot)
 
@@ -1618,6 +2023,38 @@ def select_model_provider(model_config: dict[str, Any], alias: str | None) -> di
     if active_provider in providers:
         return providers[active_provider]
     return next((provider for provider in providers.values() if provider.get("enabled")), None)
+
+
+def runtime_model_routing(model_config: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(model_config)
+    gateway = payload.get("gateway")
+    if not isinstance(gateway, dict):
+        gateway = {}
+        payload["gateway"] = gateway
+
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+        payload["runtime"] = runtime
+
+    public_url = os.getenv("LITELLM_PUBLIC_BASE_URL", "").strip()
+    if not public_url:
+        public_url = f"http://127.0.0.1:{os.getenv('LITELLM_PORT', '4000')}/v1"
+    runtime["litellm_public_base_url"] = public_url
+
+    runtime_url = os.getenv("LITELLM_BASE_URL", "").strip()
+    runtime["litellm_runtime_override_applied"] = False
+    if runtime_url and gateway.get("type") == "litellm":
+        previous_url = str(gateway.get("base_url") or "").strip()
+        gateway["base_url"] = runtime_url
+        runtime["litellm_runtime_base_url"] = runtime_url
+        runtime["litellm_runtime_override_applied"] = previous_url != runtime_url
+        providers = payload.get("providers")
+        if isinstance(providers, dict):
+            for provider in providers.values():
+                if isinstance(provider, dict) and provider.get("provider_type") in {"vllm_cpu", "litellm"}:
+                    provider["base_url"] = runtime_url
+    return payload
 
 
 def parse_json_object(raw_text: str) -> dict[str, Any]:
@@ -1719,6 +2156,11 @@ def invoke_slot_extraction_model(
         }
 
     model_name = alias if gateway.get("type") == "litellm" and alias else provider.get("model")
+    runtime = model_config.get("runtime", {}) if isinstance(model_config.get("runtime"), dict) else {}
+    model_runtime_details = {
+        "gateway_base_url": base_url,
+        "runtime_override_applied": bool(runtime.get("litellm_runtime_override_applied")),
+    }
     api_key = os.getenv("LITELLM_MASTER_KEY", "").strip() if gateway.get("type") == "litellm" else ""
     if not api_key:
         api_key = os.getenv(provider.get("api_key_env", ""), "").strip()
@@ -1764,6 +2206,7 @@ def invoke_slot_extraction_model(
             "status": "error",
             "provider": provider.get("display_name"),
             "model": model_name,
+            **model_runtime_details,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "redaction": redaction.as_dict(),
             "error": {
@@ -1776,6 +2219,7 @@ def invoke_slot_extraction_model(
             "status": "error",
             "provider": provider.get("display_name"),
             "model": model_name,
+            **model_runtime_details,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "redaction": redaction.as_dict(),
             "error": {
@@ -1788,6 +2232,7 @@ def invoke_slot_extraction_model(
             "status": "error",
             "provider": provider.get("display_name"),
             "model": model_name,
+            **model_runtime_details,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "redaction": redaction.as_dict(),
             "error": {
@@ -1808,6 +2253,7 @@ def invoke_slot_extraction_model(
             "status": "error",
             "provider": provider.get("display_name"),
             "model": model_name,
+            **model_runtime_details,
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "raw_content": content[:1000],
             "redaction": redaction.as_dict(),
@@ -1821,6 +2267,7 @@ def invoke_slot_extraction_model(
         "status": "success",
         "provider": provider.get("display_name"),
         "model": model_name,
+        **model_runtime_details,
         "duration_ms": int((time.perf_counter() - started) * 1000),
         "usage": body.get("usage", {}),
         "redaction": redaction.as_dict(),
@@ -2552,6 +2999,11 @@ def operation_result_selector_path(
         for root in (root_attribute(rule.get("source_hint")) for rule in output_slots_order or [])
         if root
     }
+    response_properties = schema_properties(response_schema)
+    if source_roots and any(root in response_properties for root in source_roots):
+        container_roots = {container["path"] for container in containers}
+        if not any(root in container_roots for root in source_roots):
+            return "", None
     explicit_matches = [container for container in containers if container["path"] in source_roots]
     if len(explicit_matches) == 1:
         return explicit_matches[0]["path"], None
@@ -2649,6 +3101,32 @@ def output_slot_error_context(
         f"поле \"{local_hint}\" отсутствует в результате {step_prefix} {step_label} / "
         f"ReAct-вызов {tool_label}. Доступные поля результата: {available_text}."
     )
+
+
+def enrichment_step_result_schema(
+    step: dict[str, Any],
+    *,
+    tool_by_name: dict[str, dict[str, Any]],
+    endpoint_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    tool = tool_by_name.get(step.get("react_call") or "")
+    if not tool:
+        return None, None, None
+    binding = select_tool_binding(
+        tool,
+        endpoint_id=step.get("endpoint_id"),
+        operation_id=step.get("operation_id"),
+    )
+    endpoint = endpoint_by_id.get((binding or {}).get("endpoint_id") or "")
+    operation = (endpoint or {}).get("operations", {}).get((binding or {}).get("operation_id") or "")
+    if not operation:
+        return tool.get("result_schema"), tool, None
+    completion_policy = step.get("completion_policy") or {}
+    if completion_policy.get("mode") == "external_event":
+        event_type = completion_policy.get("expected_event_type")
+        async_contract = (operation.get("async_event_contracts") or {}).get(event_type or "")
+        return (async_contract or {}).get("result_schema"), tool, operation
+    return operation.get("response_schema") or tool.get("result_schema"), tool, operation
 
 
 def operation_response_items(
@@ -3503,9 +3981,6 @@ class ConfigStore:
         }.get(status)
         payload_key = "error" if status == "error" else "result"
         schema = async_contract.get(schema_key or "") if schema_key else None
-        if status == "progress" and not schema:
-            schema = async_contract.get("result_schema")
-            schema_key = "result_schema"
         if schema:
             if payload_key not in event:
                 errors.append(f"{event_type} status={status} должен содержать {payload_key}.")
@@ -3628,6 +4103,9 @@ class ConfigStore:
             normalized["confidence_defaults"] = normalize_confidence_thresholds(
                 normalized.get("confidence_defaults"),
                 require_all=True,
+            )
+            normalized["editor_reference_hints"] = normalize_editor_reference_hints(
+                normalized.get("editor_reference_hints"),
             )
             for policy in normalized.get("policies", []):
                 scenario_id = policy.pop("scenario_id", None)
@@ -3801,6 +4279,13 @@ class ConfigStore:
         endpoint = endpoint_by_id.get(endpoint_id or "")
         operation = (endpoint or {}).get("operations", {}).get(operation_id or "")
         policy = copy.deepcopy(step.get("completion_policy") or {})
+        async_default_policy = default_async_completion_policy_for_operation(
+            operation,
+            operation_id=operation_id,
+            delivery_defaults=delivery_defaults.get((endpoint_id or "", operation_id or ""), {}),
+        )
+        if async_default_policy and (not policy or policy.get("mode") == "sync"):
+            policy = async_default_policy
         if policy.get("mode") == "external_event":
             defaults = delivery_defaults.get((endpoint_id or "", operation_id or ""), {})
             policy.setdefault("result_transport", defaults.get("result_transport") or "http_callback")
@@ -3816,7 +4301,10 @@ class ConfigStore:
         if completion_policy.get("mode") == "external_event":
             defaults = delivery_defaults.get((endpoint_id or "", operation_id or ""), {})
             completion_policy.setdefault("result_topic", defaults.get("result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC)
-        parameter_mapping = copy.deepcopy(step.get("parameter_mapping") or {})
+        parameter_mapping = parameter_mapping_with_schema_defaults(
+            (tool or {}).get("parameters_schema", {}),
+            copy.deepcopy(step.get("parameter_mapping") or {}),
+        )
         return {
             "launch_id": f"{profile.get('profile_id')}.{step.get('step_id')}",
             "profile_id": profile.get("profile_id"),
@@ -4698,6 +5186,10 @@ class ConfigStore:
                         f"{', '.join(unresolved_step_parameters)}."
                     ),
                 }
+            parameters, applied_parameter_defaults = apply_schema_parameter_defaults(
+                tool.get("parameters_schema", {}),
+                parameters,
+            )
             if adapter_type == "mock" and not simulation_options["allow_mock_integrations"]:
                 append_trace(
                     execution_trace,
@@ -4711,6 +5203,7 @@ class ConfigStore:
                         "operation_id": operation_id,
                         "parameter_sources": parameter_sources,
                         "parameters": parameters,
+                        "applied_parameter_defaults": applied_parameter_defaults,
                         "result": {"status": "not_executed", "reason": "Mock-интеграции выключены в выбранном режиме."},
                     },
                 )
@@ -4732,6 +5225,7 @@ class ConfigStore:
                         "operation_id": operation_id,
                         "parameter_sources": parameter_sources,
                         "parameters": parameters,
+                        "applied_parameter_defaults": applied_parameter_defaults,
                         "result": {"status": "not_executed", "reason": "Read-only интеграции выключены в выбранном режиме."},
                     },
                 )
@@ -4752,6 +5246,7 @@ class ConfigStore:
                         "endpoint_id": endpoint_id,
                         "operation_id": operation_id,
                         "parameters": parameters,
+                        "applied_parameter_defaults": applied_parameter_defaults,
                         "result": {
                             "status": "ready_for_execution",
                             "reason": "Операция будет выполнена при анализе заявки.",
@@ -4773,6 +5268,7 @@ class ConfigStore:
                             "completion_policy": launch.get("completion_policy"),
                             "parameter_sources": parameter_sources,
                             "parameters": parameters,
+                            "applied_parameter_defaults": applied_parameter_defaults,
                             "result": enrichment_step_results[step_id]["result"],
                         },
                     )
@@ -4795,6 +5291,7 @@ class ConfigStore:
                         "operation_id": operation_id,
                         "parameter_sources": parameter_sources,
                         "parameters": parameters,
+                        "applied_parameter_defaults": applied_parameter_defaults,
                         "result": {
                             "status": "not_executed",
                             "reason": "В режиме проверки без выполнения нужен тестовый ответ операции.",
@@ -4817,6 +5314,7 @@ class ConfigStore:
                 "endpoint_id": endpoint_id,
                 "operation_id": operation_id,
                 "parameters": parameters,
+                "applied_parameter_defaults": applied_parameter_defaults,
                 "result": mock_output,
                 "completion_policy": launch.get("completion_policy"),
             }
@@ -4835,6 +5333,7 @@ class ConfigStore:
                     "completion_policy": launch.get("completion_policy"),
                     "parameter_sources": parameter_sources,
                     "parameters": parameters,
+                    "applied_parameter_defaults": applied_parameter_defaults,
                     "result": mock_output,
                 },
             )
@@ -5074,7 +5573,7 @@ class ConfigStore:
         llm_error: dict[str, Any] | None = None
         if llm_slots and simulation_options["allow_llm"]:
             model_result = invoke_slot_extraction_model(
-                model_config=self.active_payload("model_routing"),
+                model_config=runtime_model_routing(self.active_payload("model_routing")),
                 scenario=detail["scenario"],
                 slots=llm_slots,
                 text=text,
@@ -5093,6 +5592,8 @@ class ConfigStore:
                     details={
                         "provider": model_result.get("provider"),
                         "model": model_result.get("model"),
+                        "gateway_base_url": model_result.get("gateway_base_url"),
+                        "runtime_override_applied": model_result.get("runtime_override_applied"),
                         "duration_ms": model_result.get("duration_ms"),
                         "usage": model_result.get("usage", {}),
                         "redaction": model_result.get("redaction", {}),
@@ -5111,6 +5612,8 @@ class ConfigStore:
                     details={
                         "provider": model_result.get("provider"),
                         "model": model_result.get("model"),
+                        "gateway_base_url": model_result.get("gateway_base_url"),
+                        "runtime_override_applied": model_result.get("runtime_override_applied"),
                         "code": llm_error.get("code"),
                         "redaction": model_result.get("redaction", {}),
                     },
@@ -5424,6 +5927,11 @@ class ConfigStore:
             for item in resolution_steps
             if item.get("status") == "operator_handoff" or item.get("decision") == "handoff"
         ]
+        resolution_pending_live = [
+            item
+            for item in resolution_steps
+            if item.get("status") == "pending_live_execution" or item.get("decision") == "execute_react_call"
+        ]
         blocking_configuration = any(
             item.get("unknown_required_slots")
             or any(
@@ -5436,6 +5944,8 @@ class ConfigStore:
             final_decision = "continue_slot_filling"
         elif resolution_operator_handoffs:
             final_decision = "operator_handoff"
+        elif resolution_pending_live:
+            final_decision = "waiting_external_event"
         elif missing_slots:
             final_decision = "pending_auto_fill"
         elif blocking_configuration:
@@ -5568,6 +6078,7 @@ class ConfigStore:
         payload: dict[str, Any],
         created_by: str,
         base_version_id: str | None = None,
+        scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_domain(domain)
         now = utc_now()
@@ -5583,6 +6094,8 @@ class ConfigStore:
         }
         if base_version_id:
             draft["base_version_id"] = base_version_id
+        if scope:
+            draft["scope"] = copy.deepcopy(scope)
         self.contracts.require_valid("config_draft", draft)
         with self._connect() as connection:
             connection.execute(
@@ -5612,21 +6125,168 @@ class ConfigStore:
 
     def validate_draft(self, draft_id: str) -> dict[str, Any]:
         draft = self.require_draft(draft_id)
-        active_overrides, override_errors = self._draft_validation_overrides(draft)
-        validation = self.validate_payload(
-            draft["domain"],
-            draft["payload"],
-            active_overrides=active_overrides,
-        )
-        if override_errors:
-            validation["errors"] = [*override_errors, *validation.get("errors", [])]
-            validation["status"] = "invalid"
-            for gate in validation.get("gates", []):
-                gate["status"] = "failed"
+        if self.is_scoped_attribute_resolution_profile_draft(draft):
+            validation = self._validate_scoped_attribute_resolution_profile_draft(draft)
+        else:
+            active_overrides, override_errors = self._draft_validation_overrides(draft)
+            validation = self.validate_payload(
+                draft["domain"],
+                draft["payload"],
+                active_overrides=active_overrides,
+            )
+            if override_errors:
+                validation["errors"] = [*override_errors, *validation.get("errors", [])]
+                validation["status"] = "invalid"
+                for gate in validation.get("gates", []):
+                    gate["status"] = "failed"
         draft["validation"] = validation
         draft["status"] = "valid" if validation["status"] == "valid" else "invalid"
         draft["updated_at"] = utc_now()
         return self._save_draft(draft)
+
+    @staticmethod
+    def _draft_scope_key(scope: dict[str, Any] | None) -> tuple[str, str, str, str] | None:
+        if not isinstance(scope, dict):
+            return None
+        if scope.get("type") != "collection_item":
+            return None
+        collection = str(scope.get("collection") or "")
+        id_key = str(scope.get("id_key") or "")
+        item_id = str(scope.get("id") or "")
+        if not collection or not id_key or not item_id:
+            return None
+        return ("collection_item", collection, id_key, item_id)
+
+    @staticmethod
+    def _draft_scope_action(scope: dict[str, Any] | None) -> str:
+        action = str((scope or {}).get("action") or "upsert")
+        return action if action in {"upsert", "delete"} else "upsert"
+
+    def is_scoped_attribute_resolution_profile_draft(self, draft: dict[str, Any]) -> bool:
+        return (
+            draft.get("domain") == "attribute_resolution_profiles"
+            and self._draft_scope_key(draft.get("scope")) is not None
+            and draft.get("scope", {}).get("collection") == "profiles"
+            and draft.get("scope", {}).get("id_key") == "profile_id"
+        )
+
+    def _scoped_profile_id(self, draft: dict[str, Any]) -> str:
+        return str((draft.get("scope") or {}).get("id") or "")
+
+    @staticmethod
+    def _profile_from_payload(payload: dict[str, Any], profile_id: str) -> dict[str, Any] | None:
+        return next(
+            (profile for profile in payload.get("profiles", []) if profile.get("profile_id") == profile_id),
+            None,
+        )
+
+    @staticmethod
+    def _slot_schema_slot_ids(slot_schema: dict[str, Any] | None) -> set[str]:
+        if not slot_schema:
+            return set()
+        slot_ids = {
+            slot.get("slot_id")
+            for slot in slot_schema.get("slots", [])
+            if slot.get("slot_id")
+        }
+        for stage in slot_schema.get("stages", []) or []:
+            slot_ids.update(
+                slot.get("slot_id")
+                for slot in stage.get("slots", []) or []
+                if slot.get("slot_id")
+            )
+        return {str(slot_id) for slot_id in slot_ids if slot_id}
+
+    def _scoped_profile_slot_errors(self, profile: dict[str, Any]) -> list[str]:
+        slot_schema_id = profile.get("slot_schema_id") or ""
+        slot_schema = next(
+            (
+                item
+                for item in self.active_payload("slot_schemas").get("slot_schemas", [])
+                if item.get("slot_schema_id") == slot_schema_id
+            ),
+            None,
+        )
+        if not slot_schema:
+            return []
+        active_slot_ids = self._slot_schema_slot_ids(slot_schema)
+        declared_slot_ids = {
+            rule.get("slot_id")
+            for rule in profile.get("output_slots_order", []) or []
+            if rule.get("slot_id")
+        }
+        if profile.get("target_slot_id"):
+            declared_slot_ids.add(profile["target_slot_id"])
+        missing_slot_ids = sorted(slot_id for slot_id in declared_slot_ids if slot_id not in active_slot_ids)
+        if not missing_slot_ids:
+            return []
+        return [
+            "Профиль нельзя активировать отдельно: выходные слоты отсутствуют в активной схеме "
+            f"{slot_schema.get('display_name') or slot_schema_id}: {', '.join(missing_slot_ids)}. "
+            "Используйте «Активировать пакет», чтобы применить профиль вместе со схемой слотов."
+        ]
+
+    def _scoped_profile_delete_errors(self, profile_id: str) -> list[str]:
+        refs: list[str] = []
+        for slot_schema in self.active_payload("slot_schemas").get("slot_schemas", []):
+            schema_name = slot_schema.get("display_name") or slot_schema.get("slot_schema_id")
+            for stage in slot_schema.get("stages", []) or []:
+                stage_name = stage.get("display_name") or stage.get("stage_id")
+                if stage.get("resolution_profile_id") == profile_id:
+                    refs.append(f'{schema_name} / этап "{stage_name}"')
+                for slot in stage.get("slots", []) or []:
+                    if slot.get("resolution_profile_id") == profile_id:
+                        refs.append(f'{schema_name} / слот "{slot.get("display_name") or slot.get("slot_id")}"')
+            for slot in slot_schema.get("slots", []) or []:
+                if slot.get("resolution_profile_id") == profile_id:
+                    refs.append(f'{schema_name} / слот "{slot.get("display_name") or slot.get("slot_id")}"')
+        if not refs:
+            return []
+        return [
+            "Профиль нельзя удалить отдельно: он используется в схеме слотов. "
+            f"Связи: {', '.join(dict.fromkeys(refs))}. "
+            "Сначала уберите связи или используйте инструмент обслуживания конфигурации."
+        ]
+
+    def _validate_scoped_attribute_resolution_profile_draft(self, draft: dict[str, Any]) -> dict[str, Any]:
+        profile_id = self._scoped_profile_id(draft)
+        action = self._draft_scope_action(draft.get("scope"))
+        contract_name = CONFIG_DOMAINS["attribute_resolution_profiles"].contract_name
+        errors: list[str] = []
+        if not profile_id:
+            errors.append("Scoped draft профиля должен содержать scope.id.")
+        if action == "delete":
+            if not self._profile_from_payload(self.active_payload("attribute_resolution_profiles"), profile_id):
+                errors.append(f"Профиль для удаления не найден в активной конфигурации: {profile_id}.")
+            errors.extend(self._scoped_profile_delete_errors(profile_id))
+        else:
+            profile = self._profile_from_payload(draft.get("payload") or {}, profile_id)
+            if not profile:
+                errors.append(f"Scoped draft не содержит профиль {profile_id}.")
+            else:
+                scoped_payload = {
+                    "schema_version": "1.0",
+                    "profiles": [copy.deepcopy(profile)],
+                }
+                validation = self.validate_payload("attribute_resolution_profiles", scoped_payload)
+                errors.extend(validation.get("errors") or [])
+                errors.extend(self._scoped_profile_slot_errors(profile))
+        return {
+            "schema_version": "1.0",
+            "domain": "attribute_resolution_profiles",
+            "contract_name": contract_name,
+            "status": "invalid" if errors else "valid",
+            "validated_at": utc_now(),
+            "errors": errors,
+            "scope": copy.deepcopy(draft.get("scope")),
+            "gates": [
+                {
+                    "gate_id": "scoped_profile",
+                    "status": "failed" if errors else "passed",
+                    "message": "Валидация одного профиля разрешения завершена.",
+                }
+            ],
+        }
 
     def _draft_validation_overrides(
         self,
@@ -5699,6 +6359,47 @@ class ConfigStore:
             for row in rows
             if str(row["draft_id"]) not in preserve_draft_ids
         ]
+        if draft_ids:
+            connection.executemany(
+                "delete from config_drafts where draft_id = ?",
+                [(draft_id,) for draft_id in draft_ids],
+            )
+        return draft_ids
+
+    def _delete_drafts_for_same_scope_operator(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        domain: str,
+        operator_id: str,
+        scope: dict[str, Any] | None,
+        preserve_draft_ids: set[str],
+    ) -> list[str]:
+        scope_key = self._draft_scope_key(scope)
+        if not operator_id or not scope_key:
+            return []
+        rows = connection.execute(
+            """
+            select draft_id, draft_json
+            from config_drafts
+            where domain = ?
+              and created_by = ?
+              and status in ('draft', 'valid', 'invalid', 'regression_passed')
+            order by updated_at desc, draft_id desc
+            """,
+            (domain, operator_id),
+        ).fetchall()
+        draft_ids: list[str] = []
+        for row in rows:
+            draft_id = str(row["draft_id"])
+            if draft_id in preserve_draft_ids:
+                continue
+            try:
+                candidate = json.loads(row["draft_json"])
+            except json.JSONDecodeError:
+                continue
+            if self._draft_scope_key(candidate.get("scope")) == scope_key:
+                draft_ids.append(draft_id)
         if draft_ids:
             connection.executemany(
                 "delete from config_drafts where draft_id = ?",
@@ -5961,6 +6662,8 @@ class ConfigStore:
             raise ConfigRegistryError("Черновик должен пройти валидацию перед активацией.")
         if regression is None or regression.get("status") not in {"passed", "skipped"}:
             raise ConfigRegistryError("Черновик должен пройти регрессионную проверку перед активацией.")
+        if self.is_scoped_attribute_resolution_profile_draft(draft):
+            return self._activate_scoped_attribute_resolution_profile_draft(draft, activated_by)
 
         previous_version_id = self.active_version_id(draft["domain"])
         activated_at = utc_now()
@@ -6040,6 +6743,112 @@ class ConfigStore:
                 connection,
                 domain=draft["domain"],
                 operator_id=activated_by,
+                preserve_draft_ids={draft["draft_id"]},
+            )
+        return version
+
+    def _activate_scoped_attribute_resolution_profile_draft(
+        self,
+        draft: dict[str, Any],
+        activated_by: str,
+    ) -> dict[str, Any]:
+        validation = self._validate_scoped_attribute_resolution_profile_draft(draft)
+        if validation.get("status") != "valid":
+            raise ConfigRegistryError(
+                "Итоговая конфигурация после активации профиля невалидна: "
+                + "; ".join(validation.get("errors") or [])
+            )
+        domain = "attribute_resolution_profiles"
+        profile_id = self._scoped_profile_id(draft)
+        action = self._draft_scope_action(draft.get("scope"))
+        previous_version_id = self.active_version_id(domain)
+        activated_at = utc_now()
+        next_payload = copy.deepcopy(self.active_payload(domain))
+        profiles = list(next_payload.get("profiles", []))
+        index = next((idx for idx, profile in enumerate(profiles) if profile.get("profile_id") == profile_id), -1)
+        if action == "delete":
+            if index >= 0:
+                profiles.pop(index)
+        else:
+            scoped_profile = self._profile_from_payload(draft.get("payload") or {}, profile_id)
+            if not scoped_profile:
+                raise ConfigRegistryError(f"Scoped draft не содержит профиль {profile_id}.")
+            if index >= 0:
+                profiles[index] = copy.deepcopy(scoped_profile)
+            else:
+                profiles.append(copy.deepcopy(scoped_profile))
+        next_payload["profiles"] = profiles
+        normalized_payload = self._normalize_payload(domain, next_payload)
+        version = {
+            "schema_version": "1.0",
+            "version_id": new_version_id(),
+            "domain": domain,
+            "payload": normalized_payload,
+            "source_draft_id": draft["draft_id"],
+            "activated_by": activated_by,
+            "activated_at": activated_at,
+            "validation": draft["validation"],
+            "regression": draft["regression"],
+        }
+        if previous_version_id:
+            version["previous_version_id"] = previous_version_id
+        self.contracts.require_valid("config_version", version)
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                insert into config_versions (
+                    version_id,
+                    domain,
+                    version_json,
+                    source_draft_id,
+                    activated_by,
+                    activated_at
+                )
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version["version_id"],
+                    version["domain"],
+                    self._to_json(version),
+                    version["source_draft_id"],
+                    version["activated_by"],
+                    version["activated_at"],
+                ),
+            )
+            connection.execute(
+                """
+                insert or replace into config_active (
+                    domain,
+                    version_id,
+                    activated_at
+                )
+                values (?, ?, ?)
+                """,
+                (version["domain"], version["version_id"], activated_at),
+            )
+            draft["status"] = "activated"
+            draft["updated_at"] = activated_at
+            connection.execute(
+                """
+                update config_drafts
+                set status = ?,
+                    draft_json = ?,
+                    updated_at = ?
+                where draft_id = ?
+                """,
+                (
+                    draft["status"],
+                    self._to_json(draft),
+                    draft["updated_at"],
+                    draft["draft_id"],
+                ),
+            )
+            self._delete_drafts_for_same_scope_operator(
+                connection,
+                domain=domain,
+                operator_id=activated_by,
+                scope=draft.get("scope"),
                 preserve_draft_ids={draft["draft_id"]},
             )
         return version
@@ -7230,7 +8039,7 @@ class ConfigStore:
             return errors
 
         tool_result_schema = tool.get("result_schema", default_response_schema())
-        operation_response_schema = operation.get("response_schema", default_response_schema())
+        operation_response_schema = operation_terminal_result_schema(operation) or default_response_schema()
         tool_result_properties = schema_properties(tool_result_schema)
         required_result_fields = schema_required(tool_result_schema)
         missing_result_fields = [
@@ -7626,20 +8435,72 @@ class ConfigStore:
                             )
                     last_step_tool = tool
                 completion_policy = enrichment_step.get("completion_policy") or {}
+                async_event_types = async_event_types_for_operation(operation)
+                if async_event_types and completion_policy.get("mode") == "sync":
+                    errors.append(
+                        f'{profile_id}.enrichment_steps[{index}] '
+                        f'Профиль "{profile.get("display_name")}" ({profile_id}) -> '
+                        f'Шаг {index} "{enrichment_step.get("step_name") or step_id}" ({step_id}) -> '
+                        f'ReAct-вызов "{(tool or {}).get("display_name") or enrichment_step.get("react_call")}" '
+                        f'({enrichment_step.get("react_call")}) связан с асинхронной endpoint-операцией '
+                        f'{(binding or {}).get("endpoint_id")}/{(binding or {}).get("operation_id")}, '
+                        'но completion_policy.mode=sync. Выберите режим external_event.'
+                    )
                 if completion_policy.get("mode") == "external_event":
                     expected_event_type = completion_policy.get("expected_event_type")
-                    async_contract = (operation or {}).get("async_event_contracts", {}).get(expected_event_type or "")
+                    async_contracts = (operation or {}).get("async_event_contracts", {}) or {}
+                    async_contract = async_contracts.get(expected_event_type or "")
+                    operation_ref = (
+                        f"{binding.get('endpoint_id')}/{binding.get('operation_id')}"
+                        if binding
+                        else f"{enrichment_step.get('endpoint_id')}/{enrichment_step.get('operation_id')}"
+                    )
                     if not expected_event_type:
                         errors.append(f"{step_label}.completion_policy должен содержать expected_event_type.")
                     elif not async_contract:
-                        errors.append(
-                            f"{step_label}.completion_policy ссылается на отсутствующий async_event_contracts."
-                            f"{expected_event_type}."
-                        )
+                        if not async_contracts:
+                            errors.append(
+                                f"{step_label}.completion_policy ожидает async_event_contracts."
+                                f"{expected_event_type}, но endpoint-операция {operation_ref} "
+                                "не содержит async_event_contracts."
+                            )
+                        else:
+                            available_events = ", ".join(sorted(async_contracts))
+                            errors.append(
+                                f"{step_label}.completion_policy ссылается на отсутствующий "
+                                f"async_event_contracts.{expected_event_type} в endpoint-операции "
+                                f"{operation_ref}. Доступные события: {available_events}."
+                            )
                     elif async_contract.get("contract_status") == "broken":
                         errors.append(
                             f"{step_label}.completion_policy использует broken async_event_contracts."
                             f"{expected_event_type}."
+                        )
+                if tool:
+                    parameter_mapping = enrichment_step.get("parameter_mapping", {})
+                    configured_parameters = {}
+                    if isinstance(parameter_mapping, dict):
+                        for parameter, source_ref in parameter_mapping.items():
+                            source, separator, source_value = str(source_ref).partition(":")
+                            if separator == ":" and source_value:
+                                configured_parameters[parameter] = (
+                                    source_value if source == "constant" else f"configured:{source}"
+                                )
+                    effective_parameters, _applied_defaults = apply_schema_parameter_defaults(
+                        tool.get("parameters_schema", {}),
+                        configured_parameters,
+                    )
+                    for required_group in missing_required_parameter_groups(
+                        tool.get("parameters_schema", {}),
+                        effective_parameters,
+                    ):
+                        errors.append(
+                            f'{profile_id}.enrichment_steps[{index}] '
+                            f'Профиль "{profile.get("display_name")}" ({profile_id}) -> '
+                            f'Шаг {index} "{enrichment_step.get("step_name") or step_id}" ({step_id}) -> '
+                            f'ReAct-вызов "{tool.get("display_name") or tool.get("tool_name")}" '
+                            f'({tool.get("tool_name")}) не заполняет обязательный параметр: '
+                            f'{format_required_parameter_group(required_group)}.'
                         )
                 for parameter, source_ref in enrichment_step.get("parameter_mapping", {}).items():
                     if tool:
@@ -7698,14 +8559,17 @@ class ConfigStore:
                                         f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестный "
                                         f"входной параметр {ref_react_call}: {field_path}"
                                     )
-                                if ref_tool and ref_kind == "output" and not schema_declares_path(
-                                    ref_tool.get("result_schema", {}),
-                                    field_path,
-                                ):
-                                    errors.append(
-                                        f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестное "
-                                        f"поле результата {ref_react_call}: {field_path}"
+                                if ref_tool and ref_kind == "output":
+                                    ref_result_schema, _, _ = enrichment_step_result_schema(
+                                        ref_step,
+                                        tool_by_name=tool_by_name,
+                                        endpoint_by_id=endpoint_by_id,
                                     )
+                                    if not schema_declares_path(ref_result_schema or {}, field_path):
+                                        errors.append(
+                                            f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестное "
+                                            f"поле результата {ref_react_call}: {field_path}"
+                                        )
                 seen_steps[step_id] = enrichment_step
 
             if output_slot_ids and profile.get("enrichment_steps"):
@@ -7724,7 +8588,12 @@ class ConfigStore:
 
                 for step_id, step_rules in rules_by_step.items():
                     source_ref = next((item for item in source_refs_by_slot.values() if item.get("step_id") == step_id), {})
-                    tool = tool_by_name.get(source_ref.get("react_call") or "")
+                    step_for_schema = source_ref.get("step") or {}
+                    result_schema, tool, _operation = enrichment_step_result_schema(
+                        step_for_schema,
+                        tool_by_name=tool_by_name,
+                        endpoint_by_id=endpoint_by_id,
+                    )
                     if not tool:
                         errors.append(
                             f"{profile_id} output_slots_order ссылается на неизвестный ReAct-вызов: "
@@ -7732,7 +8601,7 @@ class ConfigStore:
                         )
                         continue
                     result_path, selector_error = operation_result_selector_path(
-                        tool.get("result_schema", {}),
+                        result_schema or {},
                         step_rules,
                     )
                     if selector_error:
@@ -7740,7 +8609,7 @@ class ConfigStore:
                             f"{profile_id} результат ReAct-вызова {tool.get('tool_name')} в {step_id} "
                             f"неоднозначен: {selector_error}"
                         )
-                    selected_schema = selected_operation_result_schema(tool.get("result_schema", {}), result_path)
+                    selected_schema = selected_operation_result_schema(result_schema or {}, result_path)
                     for rule in step_rules:
                         source_ref = source_refs_by_slot.get(rule["slot_id"], {})
                         source_hint = source_ref.get("source_hint") or rule.get("source_hint")
@@ -8134,10 +9003,15 @@ class ConfigStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _require_domain(self, domain: str) -> None:
         if domain not in CONFIG_DOMAINS:
@@ -8907,6 +9781,7 @@ def default_orchestrator_policy() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "confidence_defaults": copy.deepcopy(DEFAULT_CONFIDENCE_THRESHOLDS),
+        "editor_reference_hints": normalize_editor_reference_hints(None),
         "policies": [
             {
                 "policy_id": f"policy.{item['scenario_id']}",

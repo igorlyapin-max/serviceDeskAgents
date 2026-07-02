@@ -5,12 +5,18 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from jsonschema import Draft202012Validator
 
+from .config_registry import (
+    apply_schema_parameter_defaults,
+    format_required_parameter_group,
+    missing_required_parameter_groups,
+)
 from .contracts import ContractRegistry, ContractValidationError
 from .http_client import urlopen_with_retry
 
@@ -34,10 +40,39 @@ SENSITIVE_TRACE_KEYWORDS = (
     "секрет",
     "ключ",
 )
+N8N_ACK_BODY_DIAGNOSTIC_MAX_LENGTH = 2000
+N8N_ACK_BODY_ALLOWED_KEYS = {
+    "accepted",
+    "action_id",
+    "async_delivery",
+    "correlation_id",
+    "event_type",
+    "invocation_id",
+    "result_topic",
+    "result_transport",
+    "runbook_status",
+    "source",
+    "status",
+    "wait_id",
+}
+TRACE_SOURCE_EXTENSION_KEYS = (
+    "source_profile_id",
+    "source_step_id",
+    "debug_launch_id",
+)
 
 
 def copy_invocation(value: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def trace_source_extensions(invocation: dict[str, Any]) -> dict[str, Any]:
+    extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+    return {
+        key: copy_invocation(value)
+        for key in TRACE_SOURCE_EXTENSION_KEYS
+        if (value := extensions.get(key)) not in (None, "", {}, [])
+    }
 
 
 def value_at_path(value: Any, path: str | None) -> Any:
@@ -143,14 +178,23 @@ class ToolRegistry:
         endpoint_id: str | None = None,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
+        action = copy_invocation(action)
         self.contracts.require_valid("proposed_action", action)
         self.contracts.require_valid("execution_policy_result", policy_result)
 
         binding = self.resolve(action["tool_name"], endpoint_id=endpoint_id, operation_id=operation_id)
+        action["parameters"], applied_react_defaults = apply_schema_parameter_defaults(
+            binding.tool["parameters_schema"],
+            action.get("parameters", {}),
+        )
         self._validate_action_against_tool(action, binding.tool)
         operation_parameters = self._build_operation_parameters(
             action["parameters"],
             binding.binding,
+        )
+        operation_parameters, applied_operation_defaults = apply_schema_parameter_defaults(
+            self._operation_parameters_validation_schema(binding.operation),
+            operation_parameters,
         )
         secret_operation_parameters = self._secret_operation_parameters(binding.binding)
         self._validate_operation_parameters(
@@ -181,6 +225,26 @@ class ToolRegistry:
             ),
             "retry_policy": binding.tool["policy"]["retry"],
         }
+        action_extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        source_extensions = {
+            key: copy_invocation(value)
+            for key in TRACE_SOURCE_EXTENSION_KEYS
+            if (value := action_extensions.get(key)) not in (None, "", {}, [])
+        }
+        if source_extensions:
+            invocation.setdefault("extensions", {}).update(source_extensions)
+        applied_defaults = {
+            **{
+                f"react.{parameter}": value
+                for parameter, value in applied_react_defaults.items()
+            },
+            **{
+                f"operation.{parameter}": value
+                for parameter, value in applied_operation_defaults.items()
+            },
+        }
+        if applied_defaults:
+            invocation.setdefault("extensions", {})["applied_parameter_defaults"] = applied_defaults
         if secret_operation_parameters:
             invocation.setdefault("extensions", {})["secret_operation_parameters"] = secret_operation_parameters
         if case_id:
@@ -196,6 +260,15 @@ class ToolRegistry:
     def validate_result(self, result: dict[str, Any]) -> None:
         if result["status"] not in {"success", "dry_run_completed"}:
             return
+        output = result.get("output", {})
+        if isinstance(output, dict) and output.get("async_delivery") is True:
+            runbook_status = str(output.get("runbook_status") or "").lower()
+            if runbook_status == "accepted" and (
+                output.get("wait_id")
+                or output.get("correlation_id")
+                or result.get("extensions", {}).get("async_wait")
+            ):
+                return
 
         tool = self.tools_by_name[result["tool_name"]]
         validator = Draft202012Validator(tool["result_schema"])
@@ -249,11 +322,23 @@ class ToolRegistry:
                 f"не совпадает с action_type в каталоге {tool['action_type']}"
             )
 
+        missing_groups = missing_required_parameter_groups(
+            tool["parameters_schema"],
+            action.get("parameters", {}),
+        )
+        for group in missing_groups:
+            errors.append(
+                "parameters: не заполнен обязательный параметр: "
+                f"{format_required_parameter_group(group)}"
+            )
+
         validator = Draft202012Validator(tool["parameters_schema"])
         for error in sorted(
             validator.iter_errors(action.get("parameters", {})),
             key=lambda item: list(item.path),
         ):
+            if missing_groups and error.validator in {"required", "anyOf", "oneOf", "allOf"}:
+                continue
             path = ".".join(str(part) for part in error.path)
             prefix = f"parameters.{path}" if path else "parameters"
             errors.append(f"{prefix}: {error.message}")
@@ -324,14 +409,22 @@ class ToolRegistry:
         operation: dict[str, Any],
         operation_parameters: dict[str, Any],
     ) -> None:
-        validator = Draft202012Validator(cls._operation_parameters_validation_schema(operation))
+        validation_schema = cls._operation_parameters_validation_schema(operation)
+        missing_groups = missing_required_parameter_groups(validation_schema, operation_parameters)
         errors = [
             cls._format_jsonschema_error(error, prefix="operation_parameters")
             for error in sorted(
-                validator.iter_errors(operation_parameters),
+                Draft202012Validator(validation_schema).iter_errors(operation_parameters),
                 key=lambda item: list(item.path),
             )
+            if not (missing_groups and error.validator in {"required", "anyOf", "oneOf", "allOf"})
         ]
+        for group in missing_groups:
+            errors.insert(
+                0,
+                "operation_parameters: не заполнен обязательный параметр: "
+                f"{format_required_parameter_group(group)}",
+            )
         if errors:
             raise ContractValidationError(
                 "tool_invocation",
@@ -578,6 +671,7 @@ class IntegrationDispatcher:
             "operation_id": invocation.get("operation_id"),
             "execution_mode": invocation.get("execution_mode"),
             "approved_by_operator": invocation.get("approved_by_operator"),
+            **trace_source_extensions(invocation),
         }
         return result
 
@@ -643,8 +737,10 @@ class IntegrationDispatcher:
             result["output"] = output
         if error is not None:
             result["error"] = error
-        if extensions is not None:
-            result["extensions"] = extensions
+        result_extensions = copy_invocation(extensions or {})
+        result_extensions.update(trace_source_extensions(invocation))
+        if result_extensions:
+            result["extensions"] = result_extensions
         result["policy_rule_id"] = invocation["policy_rule_id"]
         result["duration_ms"] = 0
         result["attempts"] = 0
@@ -719,38 +815,55 @@ class N8nWebhookAdapter:
         headers = {
             "Content-Type": "application/json",
         }
-        auth_error = self._apply_auth(headers, endpoint.get("auth"))
+        auth_error = self._apply_auth(
+            headers,
+            endpoint.get("auth"),
+            endpoint_id=endpoint.get("endpoint_id"),
+            operation_id=invocation.get("operation_id"),
+        )
         if auth_error:
             return IntegrationDispatcher._base_result(invocation, "error", error=auth_error)
 
-        payload = {
-            "schema_version": "1.0",
-            "invocation": invocation,
-            "parameters": invocation["operation_parameters"],
-            "react_parameters": invocation["parameters"],
-        }
+        payload = self._request_payload(invocation, operation)
         request = Request(
             url,
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers=headers,
             method=operation["method"],
         )
 
+        extensions = {
+            "mock": False,
+            "endpoint_url": url,
+        }
         try:
             raw_body = urlopen_with_retry(
                 request,
                 timeout=operation["timeout_seconds"],
-                operation_name=f"{endpoint['endpoint_id']}/{operation['operation_id']}",
+                operation_name=f"{endpoint['endpoint_id']}/{invocation['operation_id']}",
             ).decode("utf-8")
-            output = json.loads(raw_body) if raw_body else {}
+            async_callback = self._async_callback(invocation)
+            if raw_body:
+                try:
+                    webhook_output = json.loads(raw_body)
+                except json.JSONDecodeError as error:
+                    if not async_callback:
+                        raise error
+                    webhook_output = raw_body
+            else:
+                webhook_output = {}
+            if async_callback:
+                output = self._accepted_async_output(invocation)
+                ack_body = self._ack_body_diagnostic(webhook_output)
+                if ack_body is not None:
+                    extensions["n8n_ack_body"] = ack_body
+            else:
+                output = webhook_output
         except HTTPError as error:
             return IntegrationDispatcher._base_result(
                 invocation,
                 "error",
-                error={
-                    "code": f"http_{error.code}",
-                    "message": error.reason or "n8n webhook вернул HTTP-ошибку.",
-                },
+                error=self._http_error(error),
             )
         except (URLError, TimeoutError) as error:
             return IntegrationDispatcher._base_result(
@@ -775,34 +888,201 @@ class N8nWebhookAdapter:
             invocation,
             "success",
             output=output,
-            extensions={
-                "mock": False,
-                "endpoint_url": url,
-            },
+            extensions=extensions,
         )
+
+    @staticmethod
+    def _request_payload(invocation: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
+        operation_parameters = copy_invocation(invocation.get("operation_parameters") or {})
+        external_invocation = N8nWebhookAdapter._external_invocation(invocation)
+        payload = {
+            **operation_parameters,
+            "invocation": external_invocation,
+        }
+        request_schema = operation.get("request_schema") if isinstance(operation.get("request_schema"), dict) else {}
+        properties = request_schema.get("properties") if isinstance(request_schema.get("properties"), dict) else {}
+        if "parameters" in properties:
+            payload["parameters"] = operation_parameters
+        if "react_parameters" in properties:
+            payload["react_parameters"] = copy_invocation(invocation.get("parameters") or {})
+        if "schema_version" in properties:
+            payload["schema_version"] = "1.0"
+        return payload
+
+    @staticmethod
+    def _async_callback(invocation: dict[str, Any]) -> dict[str, Any]:
+        extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        async_callback = extensions.get("async_callback") if isinstance(extensions.get("async_callback"), dict) else {}
+        return async_callback
+
+    @classmethod
+    def _accepted_async_output(cls, invocation: dict[str, Any]) -> dict[str, Any]:
+        async_callback = cls._async_callback(invocation)
+        return {
+            "runbook_status": "accepted",
+            "message": "n8n webhook принял асинхронный вызов; результат ожидается external event.",
+            "invocation_id": invocation.get("invocation_id"),
+            "action_id": invocation.get("operation_id") or invocation.get("action_id"),
+            "accepted_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "async_delivery": True,
+            "correlation_id": async_callback.get("correlation_id"),
+            "wait_id": async_callback.get("wait_id"),
+            "result_transport": async_callback.get("result_transport"),
+            "result_topic": async_callback.get("result_topic"),
+            "has_callback_url": bool(async_callback.get("callback_url")),
+        }
+
+    @classmethod
+    def _ack_body_diagnostic(cls, value: Any) -> Any | None:
+        if value in (None, "", {}, []):
+            return None
+        if not isinstance(value, (dict, list)):
+            return {
+                "type": type(value).__name__,
+                "length": len(str(value)),
+                "content_redacted": True,
+            }
+
+        redacted = cls._redact_ack_body(value)
+        serialized = json.dumps(redacted, ensure_ascii=False, sort_keys=True)
+        if len(serialized) <= N8N_ACK_BODY_DIAGNOSTIC_MAX_LENGTH:
+            return redacted
+        return {
+            "truncated": True,
+            "length": len(serialized),
+            "preview": serialized[:N8N_ACK_BODY_DIAGNOSTIC_MAX_LENGTH],
+        }
+
+    @classmethod
+    def _redact_ack_body(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).lower()
+                if any(keyword in normalized_key for keyword in SENSITIVE_TRACE_KEYWORDS):
+                    result[str(key)] = "параметр скрыт"
+                elif normalized_key in N8N_ACK_BODY_ALLOWED_KEYS:
+                    result[str(key)] = cls._redact_ack_body(item)
+                else:
+                    result[str(key)] = cls._redacted_ack_value_summary(item)
+            return result
+        if isinstance(value, list):
+            return {
+                "type": "list",
+                "length": len(value),
+                "content_redacted": True,
+            }
+        if isinstance(value, str):
+            if len(value) <= 160:
+                return value
+            return {
+                "type": "str",
+                "length": len(value),
+                "content_redacted": True,
+            }
+        return value
+
+    @staticmethod
+    def _redacted_ack_value_summary(value: Any) -> Any:
+        if value in (None, "", {}, []):
+            return value
+        if isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, dict):
+            return {
+                "type": "object",
+                "keys": sorted(str(key) for key in value.keys())[:20],
+                "content_redacted": True,
+            }
+        if isinstance(value, list):
+            return {
+                "type": "list",
+                "length": len(value),
+                "content_redacted": True,
+            }
+        return {
+            "type": type(value).__name__,
+            "length": len(str(value)),
+            "content_redacted": True,
+        }
+
+    @staticmethod
+    def _external_invocation(invocation: dict[str, Any]) -> dict[str, Any]:
+        external = copy_invocation(invocation)
+        operation_id = external.get("operation_id")
+        action_id = external.get("action_id")
+        if operation_id and action_id != operation_id:
+            external["action_id"] = operation_id
+            external.setdefault("extensions", {})["platform_action_id"] = action_id
+        return external
+
+    @staticmethod
+    def _http_error(error: HTTPError) -> dict[str, Any]:
+        fallback = {
+            "code": f"http_{error.code}",
+            "message": error.reason or "n8n webhook вернул HTTP-ошибку.",
+        }
+        try:
+            raw_body = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            return fallback
+        if not raw_body.strip():
+            return fallback
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return fallback
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            payload = payload["error"]
+        if not isinstance(payload, dict):
+            return fallback
+        code = payload.get("code") if isinstance(payload.get("code"), str) else fallback["code"]
+        message = payload.get("message") if isinstance(payload.get("message"), str) else fallback["message"]
+        return {
+            "code": code,
+            "message": message,
+        }
 
     @staticmethod
     def _operation_url(endpoint: dict[str, Any], operation: dict[str, Any]) -> str:
         base_url = os.getenv(endpoint.get("base_url_env", "")) or endpoint["base_url"]
-        return f"{base_url.rstrip('/')}/{operation['path'].lstrip('/')}"
+        base = base_url.rstrip("/")
+        path = str(operation["path"])
+        if base.endswith("/webhook") and path.startswith("/webhook/"):
+            path = path.removeprefix("/webhook")
+        return f"{base}/{path.lstrip('/')}"
 
     @staticmethod
     def _apply_auth(
         headers: dict[str, str],
         auth: dict[str, Any] | None,
+        *,
+        endpoint_id: str | None = None,
+        operation_id: str | None = None,
     ) -> dict[str, str] | None:
         if not auth or auth["type"] == "none":
             return None
 
-        token = os.getenv(auth.get("token_env", ""))
+        token_env = str(auth.get("token_env") or "").strip()
+        header_name = str(auth.get("header_name") or "Authorization").strip()
+        token = os.getenv(token_env)
         if not token:
+            location = []
+            if endpoint_id:
+                location.append(f"endpoint {endpoint_id}")
+            if operation_id:
+                location.append(f"operation {operation_id}")
+            prefix = f"Для {' / '.join(location)} требуется " if location else "Требуется "
             return {
                 "code": "auth_token_missing",
-                "message": f"Не задана переменная окружения с auth token: {auth.get('token_env')}",
+                "message": (
+                    f"{prefix}{token_env or 'token_env'} для заголовка {header_name}; "
+                    "переменная не задана в runtime orchestrator/async worker."
+                ),
             }
 
         if auth["type"] == "header_token":
-            headers[auth["header_name"]] = token
+            headers[header_name] = token
             return None
 
         if auth["type"] == "bearer_token":

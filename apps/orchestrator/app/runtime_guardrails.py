@@ -5,7 +5,11 @@ import json
 import logging
 import logging.handlers
 import os
+import socket
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +139,12 @@ def validate_startup_environment() -> None:
         elif value in weak_values:
             errors.append(f"{env_name} содержит dev/default значение.")
 
+    kafka_protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").strip().upper() or "PLAINTEXT"
+    if kafka_protocol not in {"SSL", "SASL_SSL"}:
+        errors.append(
+            "Для Kafka external.events в shared/staging/production нужен KAFKA_SECURITY_PROTOCOL=SSL/SASL_SSL."
+        )
+
     if errors:
         raise RuntimeConfigurationError("Runtime guardrails failed: " + "; ".join(errors))
 
@@ -165,6 +175,7 @@ def require_local_secret_write_allowed() -> None:
 
 def readiness_report(*, config_store: Any, workflow: Any, processing_store: Any) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    model_config: dict[str, Any] = {}
     checks.append(_state_db_check())
     if is_production_environment():
         checks.append(
@@ -175,9 +186,28 @@ def readiness_report(*, config_store: Any, workflow: Any, processing_store: Any)
             }
         )
     checks.append(_check("config_registry", lambda: config_store.active_payload("service_scenarios")))
-    checks.append(_check("model_routing", lambda: workflow.model_config()))
+    def model_probe() -> dict[str, Any]:
+        nonlocal model_config
+        model_config = workflow.model_config()
+        return model_config
+
+    checks.append(_check("model_routing", model_probe))
+    if model_config:
+        checks.append(_model_gateway_check(model_config))
     checks.append(_check("knowledge_index", lambda: workflow.knowledge_status()))
-    checks.append(_check("processing_store", lambda: processing_store.overview()))
+    processing_overview: dict[str, Any] = {}
+
+    def processing_probe() -> dict[str, Any]:
+        nonlocal processing_overview
+        processing_overview = processing_store.overview()
+        return processing_overview
+
+    checks.append(_check("processing_store", processing_probe))
+    checks.append(_kafka_bootstrap_check())
+    checks.append(_n8n_health_check())
+    checks.append(_integration_auth_check(config_store))
+    if processing_overview:
+        checks.append(_async_runtime_check(processing_overview))
 
     status = "ok"
     if any(check["status"] == "error" for check in checks):
@@ -367,6 +397,204 @@ def security_headers(*, https_enabled: bool = False) -> dict[str, str]:
     if https_enabled:
         headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return headers
+
+
+def _readiness_network_timeout() -> float:
+    try:
+        return float(os.getenv("READYZ_NETWORK_TIMEOUT_SECONDS", "1.5"))
+    except ValueError:
+        return 1.5
+
+
+def _kafka_bootstrap_check() -> dict[str, Any]:
+    bootstrap = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092")
+    timeout = _readiness_network_timeout()
+    errors: list[str] = []
+    for server in [item.strip() for item in bootstrap.split(",") if item.strip()]:
+        host, _, port_text = server.rpartition(":")
+        if not host or not port_text.isdigit():
+            errors.append(f"{server}: некорректный формат host:port")
+            continue
+        try:
+            with socket.create_connection((host, int(port_text)), timeout=timeout):
+                return {
+                    "name": "kafka_bootstrap",
+                    "status": "ok",
+                    "message": server,
+                }
+        except OSError as error:
+            errors.append(f"{server}: {error}")
+    return {
+        "name": "kafka_bootstrap",
+        "status": "error",
+        "message": "; ".join(errors) or "KAFKA_BOOTSTRAP_SERVERS не задан.",
+    }
+
+
+def _n8n_health_check() -> dict[str, Any]:
+    base_url = os.getenv("N8N_HEALTH_URL", "").strip()
+    if not base_url:
+        webhook_base = os.getenv("N8N_WEBHOOK_BASE_URL", "http://127.0.0.1:5678/webhook")
+        parsed = urllib.parse.urlparse(webhook_base)
+        if not parsed.scheme or not parsed.netloc:
+            return {
+                "name": "n8n",
+                "status": "error",
+                "message": f"N8N_WEBHOOK_BASE_URL имеет некорректный формат: {webhook_base}",
+            }
+        base_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/healthz", "", "", ""))
+    request = urllib.request.Request(base_url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=_readiness_network_timeout()) as response:
+            status_code = int(getattr(response, "status", 0) or 0)
+    except (OSError, urllib.error.URLError) as error:
+        return {
+            "name": "n8n",
+            "status": "error",
+            "message": f"{base_url}: {error}",
+        }
+    if 200 <= status_code < 300:
+        return {
+            "name": "n8n",
+            "status": "ok",
+            "message": base_url,
+        }
+    return {
+        "name": "n8n",
+        "status": "error",
+        "message": f"{base_url}: HTTP {status_code}",
+    }
+
+
+def _model_gateway_check(model_config: dict[str, Any]) -> dict[str, Any]:
+    gateway = model_config.get("gateway") if isinstance(model_config, dict) else {}
+    providers = model_config.get("providers") if isinstance(model_config, dict) else {}
+    routing = model_config.get("routing") if isinstance(model_config, dict) else {}
+    if not isinstance(gateway, dict):
+        gateway = {}
+    if not isinstance(providers, dict):
+        providers = {}
+    if not isinstance(routing, dict):
+        routing = {}
+
+    alias = routing.get("slot_resolution") or model_config.get("default_model_alias")
+    provider = _model_provider_for_alias(providers, alias)
+    base_url = str(gateway.get("base_url") or provider.get("base_url") or "").strip()
+    if not base_url:
+        return {
+            "name": "model_gateway",
+            "status": "error",
+            "message": "Не задан URL model gateway.",
+        }
+
+    headers: dict[str, str] = {}
+    if gateway.get("type") == "litellm":
+        api_key = os.getenv("LITELLM_MASTER_KEY", "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        api_key_env = str(provider.get("api_key_env") or "").strip()
+        api_key = os.getenv(api_key_env, "").strip() if api_key_env else ""
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+    url = f"{base_url.rstrip('/')}/models"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=_readiness_network_timeout()) as response:
+            status_code = int(getattr(response, "status", 0) or 0)
+    except (OSError, urllib.error.URLError) as error:
+        return {
+            "name": "model_gateway",
+            "status": "error",
+            "message": f"{url}: {error}",
+        }
+    if 200 <= status_code < 300:
+        return {
+            "name": "model_gateway",
+            "status": "ok",
+            "message": url,
+        }
+    return {
+        "name": "model_gateway",
+        "status": "error",
+        "message": f"{url}: HTTP {status_code}",
+    }
+
+
+def _model_provider_for_alias(providers: dict[str, Any], alias: Any) -> dict[str, Any]:
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        if provider_id == alias or provider.get("model_alias") == alias:
+            return provider
+    return {}
+
+
+def _integration_auth_check(config_store: Any) -> dict[str, Any]:
+    try:
+        payload = config_store.active_payload("integration_endpoints")
+    except Exception as error:  # noqa: BLE001 - readiness must report dependency failures
+        return {
+            "name": "integration_auth",
+            "status": "error",
+            "message": f"Не удалось прочитать integration_endpoints: {error}",
+        }
+
+    missing: list[str] = []
+    checked = 0
+    for endpoint in payload.get("endpoints", []) if isinstance(payload, dict) else []:
+        if not isinstance(endpoint, dict) or not endpoint.get("enabled", True):
+            continue
+        auth = endpoint.get("auth")
+        if not isinstance(auth, dict) or auth.get("type") in {None, "", "none"}:
+            continue
+        token_env = str(auth.get("token_env") or "").strip()
+        header_name = str(auth.get("header_name") or "Authorization").strip()
+        checked += 1
+        if not token_env or not os.getenv(token_env):
+            missing.append(
+                f"{endpoint.get('endpoint_id') or 'unknown'} требует {token_env or 'token_env'} "
+                f"для заголовка {header_name}"
+            )
+
+    if missing:
+        return {
+            "name": "integration_auth",
+            "status": "error",
+            "message": "; ".join(missing),
+        }
+    return {
+        "name": "integration_auth",
+        "status": "ok",
+        "message": f"Проверено endpoint auth: {checked}",
+    }
+
+
+def _async_runtime_check(processing_overview: dict[str, Any]) -> dict[str, Any]:
+    runtime = processing_overview.get("runtime") if isinstance(processing_overview, dict) else None
+    if not isinstance(runtime, dict):
+        return {
+            "name": "async_runtime",
+            "status": "error",
+            "message": "ProcessingStore не вернул блок runtime.",
+        }
+    issues = [str(item) for item in runtime.get("issues") or []]
+    status = runtime.get("status")
+    if status == "ok" and not issues:
+        return {
+            "name": "async_runtime",
+            "status": "ok",
+            "message": "Async runtime компоненты работают.",
+            "components": runtime.get("required_components", []),
+        }
+    return {
+        "name": "async_runtime",
+        "status": "error",
+        "message": "; ".join(issues) or "Async runtime не готов.",
+        "components": runtime.get("required_components", []),
+        "stale_tool_outbox": runtime.get("stale_tool_outbox"),
+    }
 
 
 def _state_db_check() -> dict[str, Any]:
