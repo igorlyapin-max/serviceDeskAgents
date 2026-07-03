@@ -6,11 +6,15 @@ from typing import Any
 from .config_registry import (
     canonical_react_parameter_schema,
     constant_source_ref,
+    enrichment_step_result_schema,
+    format_required_parameter_group,
     react_visible_parameter_schema,
+    schema_declares_path,
     schema_properties,
     schema_parameter_default,
     schema_required,
     schema_required_parameter_groups,
+    select_tool_binding,
 )
 
 
@@ -135,57 +139,178 @@ def _constant_binding_from_raw(value: str | None) -> str | None:
     return f"constant:{constant}"
 
 
-def _template_source_for_parameter(parameter: str, instruction: str, react_call: str | None = None) -> str | None:
+def _template_ref_at(value: str, position: int) -> tuple[str, int] | None:
+    if not value.startswith("${", position):
+        return None
+    end = value.find("}", position + 2)
+    if end == -1:
+        return None
+    return value[position + 2:end].strip(), end + 1
+
+
+def _input_value_start(value: str, position: int) -> int | None:
+    match = re.match(r"\s*(?:<-|=|из|from)\s*", value[position:], flags=re.IGNORECASE)
+    return position + match.end() if match else None
+
+
+def _input_value_end(value: str, position: int) -> int:
+    boundaries = [len(value)]
+    for pattern in (
+        r"\s+\$\{paramReAct\.",
+        r"\s+\$\{(?:slot|output|step|case)\.",
+        r"\s+результат\b",
+        r"\s+если\b",
+        r"\n",
+    ):
+        match = re.search(pattern, value[position:], flags=re.IGNORECASE)
+        if match:
+            boundaries.append(position + match.start())
+    return min(boundaries)
+
+
+def _template_input_parameter_names(instruction: str, react_call: str | None = None) -> set[str]:
+    result: set[str] = set()
+    for ref in _template_refs(instruction):
+        parsed = _template_param_ref(ref)
+        if not parsed or parsed["kind"] != "input":
+            continue
+        if react_call and parsed["call"] != react_call:
+            continue
+        result.add(parsed["name"])
+    return result
+
+
+def _template_input_bindings(instruction: str, react_call: str | None = None) -> dict[str, str]:
+    text = instruction or ""
     param_pattern = _template_param_ref_pattern("input")
     source_pattern = r"\$\{(?P<source>(?:slot|output|step|case)\.[^{}]+)\}"
-    patterns = [
+    result: dict[str, str] = {}
+    source_patterns = [
         rf"{param_pattern}\s*(?:<-|=|из|from)\s*{source_pattern}",
         rf"{source_pattern}\s*(?:->|=>|в|to)\s*{param_pattern}",
     ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, instruction or "", flags=re.IGNORECASE):
-            if match.group("name") != parameter:
-                continue
+    for pattern in source_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
             if react_call and match.group("call") != react_call:
                 continue
             binding = _binding_from_template_ref(match.group("source"))
             if binding:
-                return binding
-    for match in re.finditer(
-        rf"{param_pattern}\s*(?:<-|=|из|from)\s*(?P<constant>[^\n]+)",
-        instruction or "",
-        flags=re.IGNORECASE,
-    ):
-        if match.group("name") != parameter:
-            continue
+                result[match.group("name")] = binding
+
+    for match in re.finditer(param_pattern, text, flags=re.IGNORECASE):
         if react_call and match.group("call") != react_call:
             continue
-        raw_value = re.split(r"\s+\$\{|\s+результат\b|\s+если\b", match.group("constant"), maxsplit=1, flags=re.IGNORECASE)[0]
-        binding = _constant_binding_from_raw(raw_value)
+        value_start = _input_value_start(text, match.end())
+        if value_start is None:
+            continue
+        template_ref = _template_ref_at(text, value_start)
+        if template_ref:
+            binding = _binding_from_template_ref(template_ref[0])
+        else:
+            value_end = _input_value_end(text, value_start)
+            binding = _constant_binding_from_raw(text[value_start:value_end])
         if binding:
-            return binding
-    return None
+            result[match.group("name")] = binding
+    return result
+
+
+def _template_source_for_parameter(parameter: str, instruction: str, react_call: str | None = None) -> str | None:
+    return _template_input_bindings(instruction, react_call).get(parameter)
 
 
 def _operation_schema_fields(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
     properties = schema_properties(schema or {})
     required = set(schema_required(schema or {}))
-    return [
-        {
+    result: list[dict[str, Any]] = []
+    for field_id, property_schema in properties.items():
+        result.append({
             "field_id": field_id,
             "display_name": property_schema.get("title") or _humanize(field_id),
             "field_type": _schema_type(property_schema),
             "description": property_schema.get("description", ""),
             "required": field_id in required,
-        }
-        for field_id, property_schema in properties.items()
-    ]
+        })
+        nested_properties = schema_properties(property_schema)
+        nested_required = set(schema_required(property_schema))
+        for nested_id, nested_schema in nested_properties.items():
+            nested_field_id = f"{field_id}.{nested_id}"
+            result.append({
+                "field_id": nested_field_id,
+                "display_name": nested_schema.get("title") or _humanize(nested_field_id),
+                "field_type": _schema_type(nested_schema),
+                "description": nested_schema.get("description", ""),
+                "required": field_id in required and nested_id in nested_required,
+            })
+    return result
+
+
+def _endpoint_by_id(integration_endpoints: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    return {
+        str(endpoint.get("endpoint_id") or ""): endpoint
+        for endpoint in integration_endpoints or []
+        if endpoint.get("endpoint_id")
+    }
+
+
+def _operation_for_tool(
+    tool: dict[str, Any] | None,
+    integration_endpoints: list[dict[str, Any]] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    binding = select_tool_binding(tool)
+    endpoint = _endpoint_by_id(integration_endpoints).get((binding or {}).get("endpoint_id") or "")
+    operation = (endpoint or {}).get("operations", {}).get((binding or {}).get("operation_id") or "")
+    return binding, operation if isinstance(operation, dict) else None
+
+
+def _external_event_completion_policy(
+    operation: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    contracts = (operation or {}).get("async_event_contracts") or {}
+    event_types = [event_type for event_type in contracts if event_type]
+    if len(event_types) != 1:
+        return None
+    result_delivery = ((operation or {}).get("extensions") or {}).get("result_delivery") or {}
+    policy = {
+        "mode": "external_event",
+        "max_wait_seconds": 86400,
+        "timeout_action": "escalate_operator",
+        "expected_event_type": event_types[0],
+        "result_transport": result_delivery.get("default_transport") or "kafka_event",
+    }
+    result_topic = result_delivery.get("default_result_topic")
+    if result_topic:
+        policy["result_topic"] = result_topic
+    return policy
+
+
+def _result_schema_for_tool(
+    tool: dict[str, Any] | None,
+    integration_endpoints: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    binding, operation = _operation_for_tool(tool, integration_endpoints)
+    completion_policy = _external_event_completion_policy(operation)
+    if not binding or not operation or not completion_policy:
+        return (tool or {}).get("result_schema")
+    step = {
+        "react_call": (tool or {}).get("tool_name"),
+        "endpoint_id": binding.get("endpoint_id"),
+        "operation_id": binding.get("operation_id"),
+        "completion_policy": completion_policy,
+    }
+    result_schema, _tool, _operation = enrichment_step_result_schema(
+        step,
+        tool_by_name={str((tool or {}).get("tool_name") or ""): tool or {}},
+        endpoint_by_id=_endpoint_by_id(integration_endpoints),
+    )
+    return result_schema or (tool or {}).get("result_schema")
 
 
 def _schema_type(schema: dict[str, Any] | None) -> str:
     value = (schema or {}).get("type")
     if isinstance(value, list):
         value = next((item for item in value if item != "null"), None)
+    if value == "integer":
+        return "number"
     return value if value in {"string", "number", "boolean", "object", "array"} else "unknown"
 
 
@@ -386,6 +511,7 @@ def _template_reference_errors(
     tools: list[dict[str, Any]],
     tool: dict[str, Any] | None = None,
     previous_steps: list[dict[str, Any]] | None = None,
+    integration_endpoints: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     slot_ids = {str(slot.get("slot_id") or "") for slot in slots}
@@ -442,8 +568,13 @@ def _template_reference_errors(
                 if input_names and name not in input_names:
                     errors.append(f"Ссылка ${{{ref}}} указывает на неизвестный входной параметр ReAct-вызова {ref_tool_name}: {name}.")
             elif kind == "output":
-                output_names = set(field["field_id"] for field in _operation_schema_fields(ref_tool.get("result_schema", {})))
-                if output_names and name not in output_names:
+                result_schema = _result_schema_for_tool(ref_tool, integration_endpoints)
+                output_names = set(field["field_id"] for field in _operation_schema_fields(result_schema or {}))
+                if output_names and not schema_declares_path(
+                    result_schema or {},
+                    name,
+                    allow_nested_additional=True,
+                ):
                     errors.append(f"Ссылка ${{{ref}}} указывает на неизвестное поле результата ReAct-вызова {ref_tool_name}: {name}.")
         elif parts[0] == "entity":
             errors.append(
@@ -484,9 +615,18 @@ def _template_reference_errors(
                         f"ReAct-вызова {parsed_step['call']}: {parsed_step['name']}."
                     )
             elif ref_tool and parsed_step["kind"] == "output":
-                output_names = set(field["field_id"] for field in _operation_schema_fields(ref_tool.get("result_schema", {})))
+                ref_result_schema, _, _ = enrichment_step_result_schema(
+                    ref_step,
+                    tool_by_name=tools_by_name,
+                    endpoint_by_id=_endpoint_by_id(integration_endpoints),
+                )
+                output_names = set(field["field_id"] for field in _operation_schema_fields(ref_result_schema or ref_tool.get("result_schema", {})))
                 output_name = parsed_step["name"].split(".")[-1]
-                if output_names and parsed_step["name"] not in output_names and output_name not in output_names:
+                if output_names and not schema_declares_path(
+                    ref_result_schema or ref_tool.get("result_schema", {}),
+                    parsed_step["name"],
+                    allow_nested_additional=True,
+                ) and output_name not in output_names:
                     errors.append(
                         f"Ссылка ${{{ref}}} указывает на неизвестное поле результата "
                         f"ReAct-вызова {parsed_step['call']}: {parsed_step['name']}."
@@ -504,6 +644,7 @@ def compile_attribute_resolution_step(
     react_call: str | None = None,
     step_name: str | None = None,
     previous_steps: list[dict[str, Any]] | None = None,
+    integration_endpoints: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     errors: list[str] = []
@@ -519,23 +660,28 @@ def compile_attribute_resolution_step(
     if not tool:
         errors.append("Не найден ReAct-вызов для шага разрешения атрибута.")
         tool = {}
-    errors.extend(_template_reference_errors(instruction=instruction, slots=slots, tools=tools, tool=tool, previous_steps=previous_steps))
+    errors.extend(_template_reference_errors(
+        instruction=instruction,
+        slots=slots,
+        tools=tools,
+        tool=tool,
+        previous_steps=previous_steps,
+        integration_endpoints=integration_endpoints,
+    ))
     parameter_schema = _react_parameter_schema(tool)
     parameters = list(schema_properties(parameter_schema).keys())
-    required_parameters = {
-        parameter
-        for group in schema_required_parameter_groups(parameter_schema)
-        for parameter in group
-    }
-    required_parameters.update(schema_required(parameter_schema))
+    required_groups = schema_required_parameter_groups(parameter_schema)
+    required_parameters = {parameter for group in required_groups for parameter in group}
     parameter_mapping: dict[str, str] = {}
     selected_react_call = tool.get("tool_name") or requested_react_call
+    explicit_input_bindings = _template_input_bindings(instruction, selected_react_call)
+    referenced_input_parameters = _template_input_parameter_names(instruction, selected_react_call)
     if re.search(r"\bentity:", instruction or "", flags=re.IGNORECASE):
         errors.append(
             "Ссылки entity:<name> устарели. Используйте step:<step_id>.react.<react_call>.output.<field>."
         )
     for parameter in parameters:
-        explicit_source = _template_source_for_parameter(parameter, instruction, selected_react_call)
+        explicit_source = explicit_input_bindings.get(parameter)
         if explicit_source:
             parameter_mapping[parameter] = explicit_source
             continue
@@ -562,15 +708,24 @@ def compile_attribute_resolution_step(
         if slot:
             parameter_mapping[parameter] = f"slot:{slot['slot_id']}"
             continue
-        if parameter in required_parameters:
-            has_default, default_value = schema_parameter_default(parameter_schema, parameter)
-            if has_default:
-                parameter_mapping[parameter] = constant_source_ref(default_value)
-                continue
-            errors.append(f"Не удалось подобрать источник для обязательного параметра шага: {parameter}.")
-        else:
+        has_default, default_value = schema_parameter_default(parameter_schema, parameter)
+        if has_default:
+            parameter_mapping[parameter] = constant_source_ref(default_value)
+            continue
+        if parameter not in required_parameters and parameter in referenced_input_parameters:
             warnings.append(f"Не удалось подобрать источник для необязательного параметра шага: {parameter}.")
 
+    for required_group in required_groups:
+        if any(parameter in parameter_mapping for parameter in required_group):
+            continue
+        errors.append(
+            "Не удалось подобрать источник для обязательного параметра шага: "
+            f"{format_required_parameter_group(required_group)}."
+        )
+
+    binding, operation = _operation_for_tool(tool, integration_endpoints)
+    completion_policy = _external_event_completion_policy(operation)
+    result_schema = _result_schema_for_tool(tool, integration_endpoints)
     result_fields = [
         {
             "field_id": field["field_id"],
@@ -578,7 +733,7 @@ def compile_attribute_resolution_step(
             "field_type": field["field_type"],
             "description": field.get("description", ""),
         }
-        for field in _operation_schema_fields(tool.get("result_schema", {}))
+        for field in _operation_schema_fields(result_schema or {})
     ]
     if not result_fields:
         result_fields = [{"field_id": "value", "display_name": "Значение", "field_type": "unknown", "description": ""}]
@@ -603,6 +758,11 @@ def compile_attribute_resolution_step(
             "result_fields": result_fields,
         },
     }
+    if binding and operation:
+        structure["endpoint_id"] = binding.get("endpoint_id") or ""
+        structure["operation_id"] = binding.get("operation_id") or ""
+    if completion_policy:
+        structure["completion_policy"] = completion_policy
     output_mapping_hints = _output_mapping_hints(instruction, selected_react_call)
     for hint in output_mapping_hints:
         hint["source_ref"] = (

@@ -941,7 +941,102 @@
                     "additionalProperties": true
                   },
                   "email_result": {
-                    "type": "object",
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "status": {
+                        "type": "string"
+                      },
+                      "ticket_number": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "body": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Plain text email body indexed by the collector. Very large bodies may be truncated."
+                      },
+                      "body_truncated": {
+                        "type": "boolean"
+                      },
+                      "from": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "received_at": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "format": "date-time"
+                      },
+                      "message_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "mailbox": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "mailbox_address": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "reply_mailbox_address": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "is_delivery_failure": {
+                        "type": "boolean"
+                      },
+                      "delivery_failure_reason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "match_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "delivery_failure_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "poll_interval_minutes": {
+                        "type": "integer"
+                      },
+                      "timeout_minutes": {
+                        "type": "integer"
+                      },
+                      "started_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "finished_at": {
+                        "type": "string",
+                        "format": "date-time"
+                      }
+                    },
                     "additionalProperties": true
                   },
                   "polling_diagnostic": {

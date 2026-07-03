@@ -176,16 +176,8 @@ class TicketWorkflow:
         proposed_actions = ai_decision.get("proposed_actions", [])
         execution_policy_results = self._execution_policy_results(proposed_actions, ticket)
         workflow_state = self._resolve_workflow_state(ai_decision, execution_policy_results)
-        approval_requests = self._create_action_gates(
-            case_id,
-            ticket_id,
-            proposed_actions,
-            execution_policy_results,
-        )
-        gate_by_action_id = {
-            request["action_id"]: request["gate_id"]
-            for request in approval_requests
-        }
+        approval_requests: list[dict[str, Any]] = []
+        gate_by_action_id: dict[str, str] = {}
         processing_context_created = self._ensure_processing_context_for_async_actions(
             ticket,
             case_id=case_id,
@@ -274,6 +266,54 @@ class TicketWorkflow:
                 return True
         return False
 
+    def _action_with_launch_source_metadata(self, action: dict[str, Any]) -> dict[str, Any]:
+        extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        needs_metadata = any(
+            extensions.get(key) in (None, "", {}, [])
+            for key in (
+                "source_slot_schema_id",
+                "source_target_slot_id",
+                "source_output_slots_order",
+            )
+        )
+        if not needs_metadata or not self.config_store:
+            return action
+        source_profile_id = extensions.get("source_profile_id")
+        source_step_id = extensions.get("source_step_id")
+        debug_launch_id = extensions.get("debug_launch_id")
+        if not (source_profile_id or debug_launch_id):
+            return action
+        try:
+            profiles = self.config_store.active_payload("attribute_resolution_profiles").get("profiles", [])
+        except Exception:
+            return action
+        for profile in profiles:
+            profile_id = profile.get("profile_id")
+            if source_profile_id and profile_id != source_profile_id:
+                continue
+            for step in profile.get("enrichment_steps", []) or []:
+                step_id = step.get("step_id")
+                launch_id = f"{profile_id}.{step_id}"
+                if debug_launch_id and launch_id != debug_launch_id:
+                    continue
+                if source_step_id and step_id != source_step_id:
+                    continue
+                enriched = copy.deepcopy(action)
+                enriched_extensions = enriched.setdefault("extensions", {})
+                launch_metadata = {
+                    "source_profile_id": profile_id,
+                    "source_step_id": step_id,
+                    "source_slot_schema_id": profile.get("slot_schema_id"),
+                    "source_target_slot_id": profile.get("target_slot_id"),
+                    "source_output_slots_order": profile.get("output_slots_order"),
+                    "debug_launch_id": launch_id,
+                }
+                for key, value in launch_metadata.items():
+                    if enriched_extensions.get(key) in (None, "", {}, []) and value not in (None, "", {}, []):
+                        enriched_extensions[key] = copy.deepcopy(value)
+                return enriched
+        return action
+
     def dispatch_tool(
         self,
         action: dict[str, Any],
@@ -284,6 +324,7 @@ class TicketWorkflow:
         approved_by_operator: bool = False,
         operator_id: str | None = None,
     ) -> dict[str, Any]:
+        action = self._action_with_launch_source_metadata(action)
         preferred_launch = self._preferred_launch_for_action(action)
         invocation = self.tool_registry.build_invocation(
             action,
@@ -849,8 +890,6 @@ class TicketWorkflow:
     ) -> dict[str, Any]:
         decision_type = ai_decision["decision"]["type"]
         facts = {"decision_type": decision_type}
-        if policy_results:
-            facts["execution_mode"] = self._dominant_execution_mode(policy_results)
         return self.state_resolver.resolve(facts)
 
     def _execution_policy_results(
@@ -1075,7 +1114,14 @@ class TicketWorkflow:
         operation_id = action_extensions.get("operation_id") or "unknown"
         source_extensions = {
             key: copy.deepcopy(value)
-            for key in ("source_profile_id", "source_step_id", "debug_launch_id")
+            for key in (
+                "source_profile_id",
+                "source_step_id",
+                "source_slot_schema_id",
+                "source_target_slot_id",
+                "source_output_slots_order",
+                "debug_launch_id",
+            )
             if (value := action_extensions.get(key)) not in (None, "", {}, [])
         }
         result = {
@@ -1368,6 +1414,7 @@ class TicketWorkflow:
                     "operation_id": result["operation_id"],
                     "status": result["status"],
                     "policy_rule_id": result["policy_rule_id"],
+                    "execution_mode": extensions.get("trace", {}).get("execution_mode"),
                     "duration_ms": result["duration_ms"],
                     "attempts": result["attempts"],
                     "error_code": result.get("error", {}).get("code"),

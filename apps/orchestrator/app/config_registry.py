@@ -22,6 +22,7 @@ from .contracts import CONTRACTS_ROOT, ContractRegistry, ContractValidationError
 from .execution_context import (
     build_execution_reference_context,
     build_simulation_variable_context,
+    template_refs,
     validate_template_refs,
 )
 from .http_client import urlopen_with_retry
@@ -1490,6 +1491,14 @@ def slot_schema_resolution_profile_ids(slot_schema: dict[str, Any] | None) -> li
     return list(dict.fromkeys(profile_ids))
 
 
+def active_config_status(value: dict[str, Any] | None) -> str:
+    return str((value or {}).get("status") or "active")
+
+
+def config_item_is_active(value: dict[str, Any] | None) -> bool:
+    return active_config_status(value) not in {"disabled", "archived", "deleted"}
+
+
 def operator_manual_slot_hint(slot: dict[str, Any]) -> str:
     return (
         slot.get("operator_hint")
@@ -1925,6 +1934,108 @@ def compact_trace_value(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else f"{text[:limit - 3]}..."
 
 
+def slot_value_is_filled(slot_values: dict[str, Any], provided: dict[str, Any], slot_id: str) -> bool:
+    if provided.get(slot_id) not in (None, ""):
+        return True
+    value = slot_values.get(slot_id)
+    if not isinstance(value, dict):
+        return value not in (None, "")
+    if value.get("status") in {
+        "candidate_below_threshold",
+        "model_unavailable",
+        "waiting_for_dependencies",
+        "blocked_by_dependency_cycle",
+        "extraction_pending",
+        "resolution_pending",
+    }:
+        return False
+    return value.get("value") not in (None, "")
+
+
+def filled_slot_values_for_context(slot_values: dict[str, Any], provided: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        slot_id: value
+        for slot_id, value in provided.items()
+        if value not in (None, "")
+    }
+    for slot_id, slot_value in slot_values.items():
+        if not slot_value_is_filled(slot_values, provided, slot_id):
+            continue
+        if isinstance(slot_value, dict):
+            context[slot_id] = slot_value.get("value")
+        else:
+            context[slot_id] = slot_value
+    return context
+
+
+def slot_template_dependencies(*values: Any) -> list[str]:
+    dependencies: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            nested = value.values()
+        elif isinstance(value, list):
+            nested = value
+        else:
+            nested = [value]
+        for item in nested:
+            if isinstance(item, (dict, list)):
+                for dependency in slot_template_dependencies(item):
+                    if dependency not in dependencies:
+                        dependencies.append(dependency)
+                continue
+            for ref in template_refs(str(item or "")):
+                if not ref.startswith("slot."):
+                    continue
+                slot_id = ref.split(".", 1)[1].split(".", 1)[0].strip()
+                if slot_id and slot_id not in dependencies:
+                    dependencies.append(slot_id)
+    return dependencies
+
+
+def slot_mapping_dependencies(mapping: dict[str, Any] | None) -> list[str]:
+    dependencies = source_ref_slot_ids(mapping)
+    for dependency in slot_template_dependencies(mapping or {}):
+        if dependency not in dependencies:
+            dependencies.append(dependency)
+    return dependencies
+
+
+def llm_slot_dependencies(slot: dict[str, Any]) -> list[str]:
+    dependencies = slot_template_dependencies(
+        slot.get("extraction_instruction"),
+        slot.get("examples", []),
+    )
+    return [slot_id for slot_id in dependencies if slot_id != slot.get("slot_id")]
+
+
+def resolution_profile_input_dependencies(profile: dict[str, Any]) -> list[str]:
+    dependencies: list[str] = []
+    for step in profile.get("enrichment_steps", []) or []:
+        for dependency in slot_mapping_dependencies(step.get("parameter_mapping") or {}):
+            if dependency not in dependencies:
+                dependencies.append(dependency)
+        for dependency in slot_template_dependencies(
+            step.get("configuration_instruction"),
+            step.get("step_name"),
+        ):
+            if dependency not in dependencies:
+                dependencies.append(dependency)
+    return dependencies
+
+
+def missing_slot_dependencies(
+    dependencies: list[str],
+    *,
+    slot_values: dict[str, Any],
+    provided: dict[str, Any],
+) -> list[str]:
+    return [
+        slot_id
+        for slot_id in dependencies
+        if not slot_value_is_filled(slot_values, provided, slot_id)
+    ]
+
+
 def resolved_dry_run_parameters(
     mapping: dict[str, Any],
     *,
@@ -2083,6 +2194,7 @@ def build_slot_extraction_prompt(
     scenario: dict[str, Any],
     slots: list[dict[str, Any]],
     text: str,
+    slot_values: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     slot_specs = [
         {
@@ -2109,6 +2221,7 @@ def build_slot_extraction_prompt(
                 {
                     "scenario": scenario.get("display_name", scenario.get("scenario_id")),
                     "ticket_text": text,
+                    "known_slot_values": slot_values or {},
                     "slots": slot_specs,
                     "response_schema": {
                         "slots": {
@@ -2132,6 +2245,7 @@ def invoke_slot_extraction_model(
     scenario: dict[str, Any],
     slots: list[dict[str, Any]],
     text: str,
+    slot_values: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     alias = model_config.get("routing", {}).get("slot_resolution") or model_config.get("default_model_alias")
     provider = select_model_provider(model_config, alias)
@@ -2178,7 +2292,12 @@ def invoke_slot_extraction_model(
     redaction = redact_for_llm(text)
     payload = {
         "model": model_name,
-        "messages": build_slot_extraction_prompt(scenario=scenario, slots=slots, text=redaction.text),
+        "messages": build_slot_extraction_prompt(
+            scenario=scenario,
+            slots=slots,
+            text=redaction.text,
+            slot_values=slot_values,
+        ),
         "temperature": provider.get("temperature", 0),
         "max_tokens": min(int(provider.get("max_tokens", 1024)), 2048),
         "response_format": {"type": "json_object"},
@@ -4309,6 +4428,9 @@ class ConfigStore:
             "launch_id": f"{profile.get('profile_id')}.{step.get('step_id')}",
             "profile_id": profile.get("profile_id"),
             "profile_name": profile.get("display_name"),
+            "slot_schema_id": profile.get("slot_schema_id"),
+            "target_slot_id": profile.get("target_slot_id"),
+            "output_slots_order": copy.deepcopy(profile.get("output_slots_order", [])),
             "step_id": step.get("step_id"),
             "step_name": step.get("step_name"),
             "tool_name": tool_name,
@@ -4368,6 +4490,7 @@ class ConfigStore:
         launches: list[dict[str, Any]],
         *,
         slot_values: dict[str, Any],
+        provided: dict[str, Any] | None = None,
         missing_slots: list[str],
         simulation_options: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -4388,6 +4511,12 @@ class ConfigStore:
                 "unknown_required_slots": [],
                 "planned_wait": self._planned_wait_for_launch(launch),
             }
+            parameters = resolved_dry_run_parameters(
+                launch.get("parameter_bindings") or {},
+                provided=provided or {},
+                slot_values=slot_values,
+            )
+            item["parameters"] = copy.deepcopy(parameters)
             if not launch.get("endpoint_exists") or not launch.get("operation_exists"):
                 item["status"] = "blocked_by_configuration"
                 blocked_launches.append(item)
@@ -4409,6 +4538,9 @@ class ConfigStore:
                 "completion_policy": launch.get("completion_policy"),
                 "source_profile_id": launch.get("profile_id"),
                 "source_step_id": launch.get("step_id"),
+                "source_slot_schema_id": launch.get("slot_schema_id"),
+                "source_target_slot_id": launch.get("target_slot_id"),
+                "source_output_slots_order": launch.get("output_slots_order"),
             }
             action_extensions = {
                 key: value
@@ -4420,7 +4552,17 @@ class ConfigStore:
                     "tool_name": launch.get("tool_name"),
                     "action_id": f"{launch.get('launch_id')}.action",
                     "action_type": launch.get("action_type"),
-                    "parameters": {},
+                    "parameters": copy.deepcopy(parameters),
+                    "reason": (
+                        "Автоматический запуск шага профиля разрешения "
+                        f"{launch.get('profile_name') or launch.get('profile_id')}."
+                    ),
+                    "risk_level": "medium" if launch.get("action_type") == "action" else "low",
+                    "expected_effect": (
+                        "Endpoint-операция будет вызвана с параметрами, рассчитанными "
+                        "из заполненных слотов сценария."
+                    ),
+                    "requires_state_change": launch.get("action_type") == "action",
                     "extensions": action_extensions,
                     "status": item["status"],
                 }
@@ -4449,6 +4591,162 @@ class ConfigStore:
             "schema_version": "1.0",
             "scenario_count": len(scenarios),
             "scenarios": scenarios,
+        }
+
+    def _profile_validation_for_usage(self, profile: dict[str, Any]) -> dict[str, Any]:
+        try:
+            validation = self.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [copy.deepcopy(profile)]},
+            )
+        except Exception as error:  # noqa: BLE001 - usage must remain diagnostic, not break admin UI.
+            return {
+                "status": "invalid",
+                "errors": [str(error)],
+            }
+        return {
+            "status": validation.get("status", "invalid"),
+            "errors": copy.deepcopy(validation.get("errors") or []),
+        }
+
+    def resolution_profile_usage(self) -> dict[str, Any]:
+        profiles = self.active_payload("attribute_resolution_profiles").get("profiles", [])
+        slot_schemas = self.active_payload("slot_schemas").get("slot_schemas", [])
+        scenarios = [
+            scenario
+            for scenario in self.active_payload("service_scenarios").get("scenarios", [])
+            if config_item_is_active(scenario)
+        ]
+        scenarios_by_schema: dict[str, list[dict[str, Any]]] = {}
+        for scenario in scenarios:
+            scenarios_by_schema.setdefault(str(scenario.get("slot_schema_id") or ""), []).append(scenario)
+
+        used_by: dict[str, list[dict[str, Any]]] = {
+            profile.get("profile_id", ""): []
+            for profile in profiles
+            if profile.get("profile_id")
+        }
+        config_refs: dict[str, list[dict[str, Any]]] = {
+            profile.get("profile_id", ""): []
+            for profile in profiles
+            if profile.get("profile_id")
+        }
+        seen_usage: set[tuple[Any, ...]] = set()
+        seen_refs: set[tuple[Any, ...]] = set()
+
+        def add_ref(
+            profile_id: str | None,
+            *,
+            slot_schema: dict[str, Any],
+            ref_type: str,
+            stage: dict[str, Any] | None = None,
+            slot: dict[str, Any] | None = None,
+        ) -> None:
+            if not profile_id:
+                return
+            schema_id = slot_schema.get("slot_schema_id")
+            stage_id = (stage or {}).get("stage_id")
+            slot_id = (slot or {}).get("slot_id")
+            ref_key = (profile_id, schema_id, ref_type, stage_id, slot_id)
+            ref = {
+                "slot_schema_id": schema_id,
+                "slot_schema_name": slot_schema.get("display_name") or schema_id,
+                "ref_type": ref_type,
+                "stage_id": stage_id,
+                "stage_name": (stage or {}).get("display_name") or stage_id,
+                "slot_id": slot_id,
+                "slot_name": (slot or {}).get("display_name") or slot_id,
+            }
+            ref = {key: value for key, value in ref.items() if value not in (None, "", [], {})}
+            if ref_key not in seen_refs:
+                seen_refs.add(ref_key)
+                config_refs.setdefault(profile_id, []).append(ref)
+            for scenario in scenarios_by_schema.get(str(schema_id or ""), []):
+                usage_key = (profile_id, scenario.get("scenario_id"), schema_id, ref_type, stage_id, slot_id)
+                if usage_key in seen_usage:
+                    continue
+                seen_usage.add(usage_key)
+                used_by.setdefault(profile_id, []).append(
+                    {
+                        **copy.deepcopy(ref),
+                        "scenario_id": scenario.get("scenario_id"),
+                        "scenario_name": scenario.get("display_name") or scenario.get("scenario_id"),
+                    }
+                )
+
+        for slot_schema in slot_schemas:
+            for stage in slot_schema_stages(slot_schema):
+                add_ref(
+                    stage.get("resolution_profile_id"),
+                    slot_schema=slot_schema,
+                    ref_type="stage",
+                    stage=stage,
+                )
+                for slot in stage.get("slots") or []:
+                    if slot_fill_method(slot) == "resolution_profile":
+                        add_ref(
+                            slot.get("resolution_profile_id"),
+                            slot_schema=slot_schema,
+                            ref_type="slot",
+                            stage=stage,
+                            slot=slot,
+                        )
+            staged_slot_ids = {
+                slot.get("slot_id")
+                for stage in slot_schema_stages(slot_schema)
+                for slot in stage.get("slots") or []
+            }
+            for slot in slot_schema.get("slots") or []:
+                if slot.get("slot_id") in staged_slot_ids:
+                    continue
+                if slot_fill_method(slot) == "resolution_profile":
+                    add_ref(
+                        slot.get("resolution_profile_id"),
+                        slot_schema=slot_schema,
+                        ref_type="slot",
+                        slot=slot,
+                    )
+
+        result_profiles: list[dict[str, Any]] = []
+        for profile in profiles:
+            profile_id = profile.get("profile_id", "")
+            validation = self._profile_validation_for_usage(profile)
+            profile_used_by = copy.deepcopy(used_by.get(profile_id, []))
+            profile_refs = copy.deepcopy(config_refs.get(profile_id, []))
+            delete_blockers = [
+                (
+                    f"{ref.get('slot_schema_name') or ref.get('slot_schema_id')} / "
+                    f"{'этап' if ref.get('ref_type') == 'stage' else 'слот'} "
+                    f"\"{ref.get('stage_name') or ref.get('slot_name') or ref.get('stage_id') or ref.get('slot_id')}\""
+                )
+                for ref in profile_refs
+            ]
+            result_profiles.append(
+                {
+                    "profile_id": profile_id,
+                    "display_name": profile.get("display_name") or profile_id,
+                    "status": active_config_status(profile),
+                    "validation_status": validation["status"],
+                    "validation_errors": validation["errors"],
+                    "participates": (
+                        bool(profile_used_by)
+                        and config_item_is_active(profile)
+                        and validation["status"] == "valid"
+                    ),
+                    "used_by": profile_used_by,
+                    "config_refs": profile_refs,
+                    "unused": not profile_used_by and not profile_refs,
+                    "delete_allowed": not profile_refs,
+                    "delete_blockers": list(dict.fromkeys(delete_blockers)),
+                }
+            )
+
+        return {
+            "schema_version": "1.0",
+            "profile_count": len(result_profiles),
+            "used_count": sum(1 for profile in result_profiles if profile["used_by"]),
+            "unused_count": sum(1 for profile in result_profiles if profile["unused"]),
+            "profiles": result_profiles,
         }
 
     def scenario_detail(self, scenario_id: str) -> dict[str, Any]:
@@ -4495,7 +4793,7 @@ class ConfigStore:
         scenario_profiles = [
             profile_by_id[profile_id]
             for profile_id in dict.fromkeys(resolution_profile_ids)
-            if profile_id in profile_by_id
+            if profile_id in profile_by_id and config_item_is_active(profile_by_id[profile_id])
         ]
         tool_launches = self._profile_tool_launches(scenario_profiles)
         missing = []
@@ -4517,10 +4815,14 @@ class ConfigStore:
                     profile = profile_by_id.get(profile_id or "")
                     if not profile:
                         missing.append(f"attribute_resolution_profile:{slot['slot_id']}")
+                    elif not config_item_is_active(profile):
+                        missing.append(f"attribute_resolution_profile:{slot['slot_id']}:inactive")
             for stage in slot_schema_stages(slot_schema):
                 profile_id = stage.get("resolution_profile_id")
                 if profile_id and profile_id not in profile_by_id:
                     missing.append(f"attribute_resolution_profile:{stage['stage_id']}")
+                elif profile_id and not config_item_is_active(profile_by_id.get(profile_id)):
+                    missing.append(f"attribute_resolution_profile:{stage['stage_id']}:inactive")
         system_confidence_defaults = self.system_confidence_defaults()
         slot_confidence_thresholds = {}
         if slot_schema:
@@ -4538,6 +4840,11 @@ class ConfigStore:
             "scenario": scenario,
             "slot_schema": slot_schema,
             "attribute_resolution_profiles": scenario_profiles,
+            "resolution_profile_usage": [
+                item
+                for item in self.resolution_profile_usage()["profiles"]
+                if item["profile_id"] in {profile.get("profile_id") for profile in scenario_profiles}
+            ],
             "route": route,
             "orchestrator_policy": policy,
             "tool_launches": tool_launches,
@@ -5509,6 +5816,509 @@ class ConfigStore:
             raise ConfigRegistryError(f"Канал не найден: {requested_channel_id}")
         return copy.deepcopy(channel)
 
+    def _record_llm_slot_result(
+        self,
+        *,
+        slot: dict[str, Any],
+        slot_values: dict[str, Any],
+        missing_slots: list[str],
+        extracted: dict[str, Any],
+        effective_thresholds: dict[str, float],
+        execution_trace: list[dict[str, Any]],
+        iteration: int,
+        dependencies: list[str],
+    ) -> bool:
+        slot_id = slot["slot_id"]
+        confidence = extracted["confidence"]
+        value = extracted["value"]
+        accepted = value is not None and confidence >= effective_thresholds["min_extraction_confidence"]
+        status = "filled_by_model" if accepted else "candidate_below_threshold"
+        decision = "accepted" if accepted else "rejected"
+        if accepted and confidence < effective_thresholds["auto_accept_confidence"]:
+            decision = "accepted_for_test_below_auto_accept"
+        slot_values[slot_id] = {
+            "status": status,
+            "value": value,
+            "candidate_value": value,
+            "fill_method": "llm_extraction",
+            "source": "llm",
+            "confidence": confidence,
+            "threshold_decision": decision,
+            "reason": extracted["reason"],
+            "dependencies": dependencies,
+            "effective_confidence_thresholds": effective_thresholds,
+            **slot_source_summary(slot),
+        }
+        append_trace(
+            execution_trace,
+            step="1",
+            status="completed" if accepted else "blocked",
+            title=f"LLM extraction: {slot_id}",
+            message=(
+                f"Значение принято: {value}"
+                if accepted
+                else "Кандидат ниже минимального порога извлечения."
+            ),
+            details={
+                "iteration": iteration,
+                "dependencies": dependencies,
+                "candidate_value": value,
+                "confidence": confidence,
+                "min_extraction_confidence": effective_thresholds["min_extraction_confidence"],
+                "auto_accept_confidence": effective_thresholds["auto_accept_confidence"],
+                "decision": decision,
+                "reason": extracted["reason"],
+            },
+        )
+        if slot.get("required") and not accepted and slot_id not in missing_slots:
+            missing_slots.append(slot_id)
+        if accepted and slot_id in missing_slots:
+            missing_slots.remove(slot_id)
+        return accepted
+
+    def _simulate_slot_filling(
+        self,
+        *,
+        detail: dict[str, Any],
+        slot_schema: dict[str, Any],
+        stages: list[dict[str, Any]],
+        known_slot_ids: set[str],
+        provided: dict[str, Any],
+        text: str,
+        simulation_options: dict[str, Any],
+        execution_trace: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[str], list[dict[str, Any]], dict[str, Any]]:
+        profile_by_id = self._by_id(
+            detail.get("attribute_resolution_profiles", []),
+            "profile_id",
+        )
+        slot_values: dict[str, Any] = {}
+        missing_slots: list[str] = []
+        resolution_steps: list[dict[str, Any]] = []
+        resolution_state: dict[str, Any] = {}
+        seen_resolution_profile_ids: set[str] = set()
+        profile_results: dict[str, dict[str, Any]] = {}
+        attempted_llm_slots: set[str] = set()
+        waiting_dependencies: dict[str, list[str]] = {}
+        max_iterations = int((detail.get("orchestrator_policy") or {}).get("max_iterations") or 6)
+        max_iterations = max(1, min(max_iterations, 50))
+
+        for stage in stages:
+            append_trace(
+                execution_trace,
+                step="0",
+                status="started",
+                title=f"Этап планирования: {stage.get('display_name') or stage.get('stage_id')}",
+                message=(
+                    "Этап содержит профиль разрешения."
+                    if stage.get("resolution_profile_id")
+                    else f"Этап содержит слотов: {len(stage.get('slots') or [])}."
+                ),
+                details={
+                    "stage_id": stage.get("stage_id"),
+                    "order": stage.get("order"),
+                    "slot_ids": [slot.get("slot_id") for slot in stage.get("slots") or []],
+                    "resolution_profile_id": stage.get("resolution_profile_id"),
+                },
+            )
+
+        for slot in slot_schema["slots"]:
+            slot_id = slot["slot_id"]
+            if slot_id not in provided:
+                continue
+            effective_thresholds = self.effective_confidence_thresholds(
+                scenario=detail["scenario"],
+                slot=slot,
+                profile=profile_by_id.get(slot.get("resolution_profile_id", "")),
+                include_profile=slot_fill_method(slot) == "resolution_profile",
+            )
+            slot_values[slot_id] = {
+                "status": "provided",
+                "value": provided[slot_id],
+                "fill_method": "operator_input",
+                "source": "operator_input",
+                "reason": "Значение введено оператором в тестовом прогоне.",
+                "effective_confidence_thresholds": effective_thresholds,
+            }
+            append_trace(
+                execution_trace,
+                step="1",
+                status="completed",
+                title=f"Слот {slot_id}",
+                message="Значение предоставлено оператором.",
+            )
+
+        for iteration in range(1, max_iterations + 1):
+            progress = False
+            waiting_dependencies.clear()
+
+            for slot in slot_schema["slots"]:
+                slot_id = slot["slot_id"]
+                if slot_value_is_filled(slot_values, provided, slot_id):
+                    continue
+                if slot_fill_method(slot) != "resolution_profile":
+                    continue
+                profile = profile_by_id.get(slot.get("resolution_profile_id", ""))
+                profile_id = profile["profile_id"] if profile else slot.get("resolution_profile_id")
+                dependencies = resolution_profile_input_dependencies(profile or {})
+                missing_dependencies = missing_slot_dependencies(
+                    dependencies,
+                    slot_values=slot_values,
+                    provided=provided,
+                )
+                if missing_dependencies:
+                    waiting_dependencies[slot_id] = missing_dependencies
+                    continue
+                profile_result = None
+                if profile:
+                    if profile["profile_id"] not in profile_results:
+                        profile_results[profile["profile_id"]] = self.simulate_attribute_resolution_profile(
+                            profile=profile,
+                            slot_schema=slot_schema,
+                            provided=provided,
+                            simulation_options=simulation_options,
+                            effective_thresholds=self.effective_confidence_thresholds(
+                                scenario=detail["scenario"],
+                                slot=slot,
+                                profile=profile,
+                                include_profile=True,
+                            ),
+                            execution_trace=execution_trace,
+                            slot_values=slot_values,
+                        )
+                    profile_result = profile_results[profile["profile_id"]]
+
+                output_value = (profile_result or {}).get("output_values", {}).get(slot_id)
+                effective_thresholds = self.effective_confidence_thresholds(
+                    scenario=detail["scenario"],
+                    slot=slot,
+                    profile=profile,
+                    include_profile=True,
+                )
+                if output_value is not None:
+                    slot_values[slot_id] = {
+                        "status": "filled_by_profile",
+                        "value": output_value,
+                        "fill_method": "resolution_profile",
+                        "source": "resolution_profile",
+                        "resolution_profile_id": profile_id,
+                        "confidence": (profile_result or {}).get("candidate_confidence"),
+                        "reason": (profile_result or {}).get("reason"),
+                        "dependencies": dependencies,
+                        "effective_confidence_thresholds": effective_thresholds,
+                        **slot_source_summary(slot),
+                    }
+                    if slot_id in missing_slots:
+                        missing_slots.remove(slot_id)
+                    progress = True
+                else:
+                    slot_values[slot_id] = {
+                        "status": (profile_result or {}).get("status", "resolution_pending"),
+                        "value": None,
+                        "fill_method": "resolution_profile",
+                        "source": "resolution_profile",
+                        "resolution_profile_id": profile_id,
+                        "dependencies": dependencies,
+                        "effective_confidence_thresholds": effective_thresholds,
+                        "reason": (profile_result or {}).get(
+                            "reason",
+                            "Профиль разрешения атрибута ожидает результат операции или уточнение.",
+                        ),
+                        **slot_source_summary(slot),
+                    }
+                    if slot.get("required") and slot_id not in missing_slots:
+                        missing_slots.append(slot_id)
+
+                if profile and profile["profile_id"] not in seen_resolution_profile_ids:
+                    seen_resolution_profile_ids.add(profile["profile_id"])
+                    state_summary = {
+                        "slot_id": slot_id,
+                        "iteration": iteration,
+                        **(profile_result or {}),
+                    }
+                    resolution_state[slot_id] = state_summary
+                    resolution_steps.append(state_summary)
+
+            for stage in stages:
+                profile_id = stage.get("resolution_profile_id")
+                if not profile_id or profile_id in profile_results:
+                    continue
+                profile = profile_by_id.get(profile_id)
+                if not profile:
+                    continue
+                dependencies = resolution_profile_input_dependencies(profile)
+                missing_dependencies = missing_slot_dependencies(
+                    dependencies,
+                    slot_values=slot_values,
+                    provided=provided,
+                )
+                if missing_dependencies:
+                    waiting_dependencies[stage.get("stage_id") or profile_id] = missing_dependencies
+                    continue
+                profile_results[profile_id] = self.simulate_attribute_resolution_profile(
+                    profile=profile,
+                    slot_schema=slot_schema,
+                    provided=provided,
+                    simulation_options=simulation_options,
+                    effective_thresholds=self.system_confidence_defaults(),
+                    execution_trace=execution_trace,
+                    slot_values=slot_values,
+                )
+                profile_result = profile_results[profile_id]
+                for output_slot_id, output_value in profile_result.get("output_values", {}).items():
+                    if output_slot_id in known_slot_ids and output_value not in (None, ""):
+                        slot_values[output_slot_id] = {
+                            "status": "filled_by_stage_profile",
+                            "value": output_value,
+                            "fill_method": "resolution_profile",
+                            "source": "stage_resolution_profile",
+                            "resolution_profile_id": profile_id,
+                            "confidence": profile_result.get("candidate_confidence"),
+                            "reason": profile_result.get("reason"),
+                            "dependencies": dependencies,
+                            "effective_confidence_thresholds": self.system_confidence_defaults(),
+                        }
+                        if output_slot_id in missing_slots:
+                            missing_slots.remove(output_slot_id)
+                        progress = True
+                if profile_id not in seen_resolution_profile_ids:
+                    seen_resolution_profile_ids.add(profile_id)
+                    state_summary = {
+                        "stage_id": stage.get("stage_id"),
+                        "profile_id": profile_id,
+                        "iteration": iteration,
+                        **profile_result,
+                    }
+                    resolution_state[stage.get("stage_id") or profile_id] = state_summary
+                    resolution_steps.append(state_summary)
+
+            ready_llm_slots: list[dict[str, Any]] = []
+            ready_llm_dependencies: dict[str, list[str]] = {}
+            for slot in slot_schema["slots"]:
+                slot_id = slot["slot_id"]
+                if slot_fill_method(slot) != "llm_extraction":
+                    continue
+                if slot_id in attempted_llm_slots or slot_value_is_filled(slot_values, provided, slot_id):
+                    continue
+                dependencies = llm_slot_dependencies(slot)
+                missing_dependencies = missing_slot_dependencies(
+                    dependencies,
+                    slot_values=slot_values,
+                    provided=provided,
+                )
+                if missing_dependencies:
+                    waiting_dependencies[slot_id] = missing_dependencies
+                    continue
+                ready_llm_slots.append(slot)
+                ready_llm_dependencies[slot_id] = dependencies
+
+            if ready_llm_slots and simulation_options["allow_llm"]:
+                attempted_llm_slots.update(slot["slot_id"] for slot in ready_llm_slots)
+                model_result = invoke_slot_extraction_model(
+                    model_config=runtime_model_routing(self.active_payload("model_routing")),
+                    scenario=detail["scenario"],
+                    slots=ready_llm_slots,
+                    text=text,
+                    slot_values=filled_slot_values_for_context(slot_values, provided),
+                )
+                if model_result.get("status") == "success":
+                    llm_result_by_slot = {
+                        slot_id: normalized_llm_slot_result(slot_result)
+                        for slot_id, slot_result in (model_result.get("slots") or {}).items()
+                    }
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="completed",
+                        title="Извлечение слотов моделью",
+                        message=f"Модель вернула результаты для {len(llm_result_by_slot)} слотов.",
+                        details={
+                            "iteration": iteration,
+                            "provider": model_result.get("provider"),
+                            "model": model_result.get("model"),
+                            "gateway_base_url": model_result.get("gateway_base_url"),
+                            "runtime_override_applied": model_result.get("runtime_override_applied"),
+                            "duration_ms": model_result.get("duration_ms"),
+                            "usage": model_result.get("usage", {}),
+                            "redaction": model_result.get("redaction", {}),
+                            "known_slot_ids": sorted(filled_slot_values_for_context(slot_values, provided)),
+                            "parameters": {"slot_ids": [slot["slot_id"] for slot in ready_llm_slots]},
+                            "result": llm_result_by_slot,
+                        },
+                    )
+                    for slot in ready_llm_slots:
+                        slot_id = slot["slot_id"]
+                        extracted = llm_result_by_slot.get(slot_id)
+                        if not extracted:
+                            continue
+                        accepted = self._record_llm_slot_result(
+                            slot=slot,
+                            slot_values=slot_values,
+                            missing_slots=missing_slots,
+                            extracted=extracted,
+                            effective_thresholds=self.effective_confidence_thresholds(
+                                scenario=detail["scenario"],
+                                slot=slot,
+                                profile=None,
+                                include_profile=False,
+                            ),
+                            execution_trace=execution_trace,
+                            iteration=iteration,
+                            dependencies=ready_llm_dependencies.get(slot_id, []),
+                        )
+                        progress = progress or accepted
+                else:
+                    llm_error = model_result.get("error", {})
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="error",
+                        title="Извлечение слотов моделью",
+                        message=llm_error.get("message", "Модель недоступна."),
+                        details={
+                            "iteration": iteration,
+                            "provider": model_result.get("provider"),
+                            "model": model_result.get("model"),
+                            "gateway_base_url": model_result.get("gateway_base_url"),
+                            "runtime_override_applied": model_result.get("runtime_override_applied"),
+                            "code": llm_error.get("code"),
+                            "redaction": model_result.get("redaction", {}),
+                        },
+                    )
+                    for slot in ready_llm_slots:
+                        slot_id = slot["slot_id"]
+                        slot_values[slot_id] = {
+                            "status": "model_unavailable",
+                            "value": None,
+                            "fill_method": "llm_extraction",
+                            "source": "llm",
+                            "error": llm_error,
+                            "reason": "Модель не вернула результат для слота.",
+                            "dependencies": ready_llm_dependencies.get(slot_id, []),
+                            "effective_confidence_thresholds": self.effective_confidence_thresholds(
+                                scenario=detail["scenario"],
+                                slot=slot,
+                                profile=None,
+                                include_profile=False,
+                            ),
+                            **slot_source_summary(slot),
+                        }
+                        if slot.get("required") and slot_id not in missing_slots:
+                            missing_slots.append(slot_id)
+            elif ready_llm_slots:
+                attempted_llm_slots.update(slot["slot_id"] for slot in ready_llm_slots)
+                append_trace(
+                    execution_trace,
+                    step="1",
+                    status="skipped",
+                    title="Извлечение слотов моделью",
+                    message="Режим тестового прогона не разрешает вызов LLM.",
+                    details={
+                        "iteration": iteration,
+                        "slot_ids": [slot["slot_id"] for slot in ready_llm_slots],
+                    },
+                )
+                for slot in ready_llm_slots:
+                    slot_id = slot["slot_id"]
+                    slot_values[slot_id] = {
+                        "status": "extraction_pending",
+                        "value": None,
+                        "fill_method": "llm_extraction",
+                        "source": "llm",
+                        "reason": "Вызов модели не выполнялся в выбранном режиме тестового прогона.",
+                        "dependencies": ready_llm_dependencies.get(slot_id, []),
+                        "effective_confidence_thresholds": self.effective_confidence_thresholds(
+                            scenario=detail["scenario"],
+                            slot=slot,
+                            profile=None,
+                            include_profile=False,
+                        ),
+                        **slot_source_summary(slot),
+                    }
+                    if slot.get("required") and slot_id not in missing_slots:
+                        missing_slots.append(slot_id)
+
+            if not progress:
+                break
+
+        unresolved_dependency_slots = {
+            slot_id: deps
+            for slot_id, deps in waiting_dependencies.items()
+            if deps
+        }
+        unresolved_ids = set(unresolved_dependency_slots)
+        cycle_like = bool(unresolved_ids) and all(
+            any(dependency in unresolved_ids for dependency in deps)
+            for deps in unresolved_dependency_slots.values()
+        )
+        for slot in slot_schema["slots"]:
+            slot_id = slot["slot_id"]
+            fill_method = slot_fill_method(slot)
+            if slot_value_is_filled(slot_values, provided, slot_id):
+                if slot_id in missing_slots:
+                    missing_slots.remove(slot_id)
+                continue
+            if slot_id in slot_values and (slot_values[slot_id] or {}).get("status") == "candidate_below_threshold":
+                if slot.get("required") and slot_id not in missing_slots:
+                    missing_slots.append(slot_id)
+                continue
+            effective_thresholds = self.effective_confidence_thresholds(
+                scenario=detail["scenario"],
+                slot=slot,
+                profile=profile_by_id.get(slot.get("resolution_profile_id", "")),
+                include_profile=fill_method == "resolution_profile",
+            )
+            dependencies = (
+                llm_slot_dependencies(slot)
+                if fill_method == "llm_extraction"
+                else resolution_profile_input_dependencies(profile_by_id.get(slot.get("resolution_profile_id", ""), {}))
+                if fill_method == "resolution_profile"
+                else []
+            )
+            missing_dependencies = missing_slot_dependencies(
+                dependencies,
+                slot_values=slot_values,
+                provided=provided,
+            )
+            if missing_dependencies:
+                status = "blocked_by_dependency_cycle" if cycle_like and slot_id in unresolved_ids else "waiting_for_dependencies"
+                slot_values[slot_id] = {
+                    "status": status,
+                    "value": None,
+                    "fill_method": fill_method,
+                    "reason": "Ожидаются зависимые слоты: " + ", ".join(missing_dependencies) + ".",
+                    "dependencies": dependencies,
+                    "missing_dependencies": missing_dependencies,
+                    "effective_confidence_thresholds": effective_thresholds,
+                    **slot_source_summary(slot),
+                }
+                append_trace(
+                    execution_trace,
+                    step="1",
+                    status="blocked" if status == "blocked_by_dependency_cycle" else "waiting",
+                    title=f"Зависимости слота: {slot_id}",
+                    message=slot_values[slot_id]["reason"],
+                    details={
+                        "slot_id": slot_id,
+                        "dependencies": dependencies,
+                        "missing_dependencies": missing_dependencies,
+                        "status": status,
+                    },
+                )
+            elif slot_id not in slot_values:
+                slot_values[slot_id] = {
+                    "status": "missing" if slot.get("required") else "optional",
+                    "value": None,
+                    "fill_method": fill_method,
+                    "reason": "Для обязательного слота нет заполненного значения." if slot.get("required") else "Необязательный слот не заполнен.",
+                    "effective_confidence_thresholds": effective_thresholds,
+                    **slot_source_summary(slot),
+                }
+            if slot.get("required") and not slot_value_is_filled(slot_values, provided, slot_id) and slot_id not in missing_slots:
+                missing_slots.append(slot_id)
+
+        return slot_values, missing_slots, resolution_steps, resolution_state
+
     def simulate_scenario(
         self,
         scenario_id: str,
@@ -5563,70 +6373,6 @@ class ConfigStore:
             "profile_id",
         )
         provided = provided_slots or {}
-        llm_slots = [
-            slot
-            for slot in slot_schema["slots"]
-            if slot_fill_method(slot) == "llm_extraction"
-            and slot["slot_id"] not in provided
-        ]
-        llm_result_by_slot: dict[str, dict[str, Any]] = {}
-        llm_error: dict[str, Any] | None = None
-        if llm_slots and simulation_options["allow_llm"]:
-            model_result = invoke_slot_extraction_model(
-                model_config=runtime_model_routing(self.active_payload("model_routing")),
-                scenario=detail["scenario"],
-                slots=llm_slots,
-                text=text,
-            )
-            if model_result.get("status") == "success":
-                llm_result_by_slot = {
-                    slot_id: normalized_llm_slot_result(slot_result)
-                    for slot_id, slot_result in (model_result.get("slots") or {}).items()
-                }
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="completed",
-                    title="Извлечение слотов моделью",
-                    message=f"Модель вернула результаты для {len(llm_result_by_slot)} слотов.",
-                    details={
-                        "provider": model_result.get("provider"),
-                        "model": model_result.get("model"),
-                        "gateway_base_url": model_result.get("gateway_base_url"),
-                        "runtime_override_applied": model_result.get("runtime_override_applied"),
-                        "duration_ms": model_result.get("duration_ms"),
-                        "usage": model_result.get("usage", {}),
-                        "redaction": model_result.get("redaction", {}),
-                        "parameters": {"slot_ids": [slot["slot_id"] for slot in llm_slots]},
-                        "result": llm_result_by_slot,
-                    },
-                )
-            else:
-                llm_error = model_result.get("error", {})
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="error",
-                    title="Извлечение слотов моделью",
-                    message=llm_error.get("message", "Модель недоступна."),
-                    details={
-                        "provider": model_result.get("provider"),
-                        "model": model_result.get("model"),
-                        "gateway_base_url": model_result.get("gateway_base_url"),
-                        "runtime_override_applied": model_result.get("runtime_override_applied"),
-                        "code": llm_error.get("code"),
-                        "redaction": model_result.get("redaction", {}),
-                    },
-                )
-        elif llm_slots:
-            append_trace(
-                execution_trace,
-                step="1",
-                status="skipped",
-                title="Извлечение слотов моделью",
-                message="Режим тестового прогона не разрешает вызов LLM.",
-                details={"slot_ids": [slot["slot_id"] for slot in llm_slots]},
-            )
         thresholds_by_slot = {}
         for slot in slot_schema["slots"]:
             fill_method = slot_fill_method(slot)
@@ -5637,240 +6383,16 @@ class ConfigStore:
                 profile=profile,
                 include_profile=fill_method == "resolution_profile",
             )
-        slot_values = {}
-        missing_slots = []
-        resolution_steps = []
-        resolution_state = {}
-        seen_resolution_profile_ids = set()
-        profile_results: dict[str, dict[str, Any]] = {}
-        for stage in stages:
-            append_trace(
-                execution_trace,
-                step="0",
-                status="started",
-                title=f"Этап планирования: {stage.get('display_name') or stage.get('stage_id')}",
-                message=(
-                    "Этап содержит профиль разрешения."
-                    if stage.get("resolution_profile_id")
-                    else f"Этап содержит слотов: {len(stage.get('slots') or [])}."
-                ),
-                details={
-                    "stage_id": stage.get("stage_id"),
-                    "order": stage.get("order"),
-                    "slot_ids": [slot.get("slot_id") for slot in stage.get("slots") or []],
-                    "resolution_profile_id": stage.get("resolution_profile_id"),
-                },
-            )
-        for slot in slot_schema["slots"]:
-            slot_id = slot["slot_id"]
-            fill_method = slot_fill_method(slot)
-            profile = profile_by_id.get(slot.get("resolution_profile_id", ""))
-            effective_thresholds = self.effective_confidence_thresholds(
-                scenario=detail["scenario"],
-                slot=slot,
-                profile=profile,
-                include_profile=fill_method == "resolution_profile",
-            )
-            if slot_id in provided:
-                slot_values[slot_id] = {
-                    "status": "provided",
-                    "value": provided[slot_id],
-                    "fill_method": "operator_input",
-                    "source": "operator_input",
-                    "reason": "Значение введено оператором в тестовом прогоне.",
-                    "effective_confidence_thresholds": effective_thresholds,
-                }
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="completed",
-                    title=f"Слот {slot_id}",
-                    message="Значение предоставлено оператором.",
-                )
-            elif fill_method == "resolution_profile":
-                profile_id = profile["profile_id"] if profile else slot.get("resolution_profile_id")
-                profile_result = None
-                if profile:
-                    if profile["profile_id"] not in profile_results:
-                        profile_results[profile["profile_id"]] = self.simulate_attribute_resolution_profile(
-                            profile=profile,
-                            slot_schema=slot_schema,
-                            provided=provided,
-                            simulation_options=simulation_options,
-                            effective_thresholds=effective_thresholds,
-                            execution_trace=execution_trace,
-                            slot_values=slot_values,
-                        )
-                    profile_result = profile_results[profile["profile_id"]]
-
-                output_value = (profile_result or {}).get("output_values", {}).get(slot_id)
-                if output_value is not None:
-                    slot_values[slot_id] = {
-                        "status": "filled_by_profile",
-                        "value": output_value,
-                        "fill_method": fill_method,
-                        "source": "resolution_profile",
-                        "resolution_profile_id": profile_id,
-                        "confidence": (profile_result or {}).get("candidate_confidence"),
-                        "reason": (profile_result or {}).get("reason"),
-                        "effective_confidence_thresholds": effective_thresholds,
-                        **slot_source_summary(slot),
-                    }
-                else:
-                    slot_values[slot_id] = {
-                        "status": (profile_result or {}).get("status", "resolution_pending"),
-                        "value": None,
-                        "fill_method": fill_method,
-                        "source": "resolution_profile",
-                        "resolution_profile_id": profile_id,
-                        "effective_confidence_thresholds": effective_thresholds,
-                        "reason": (profile_result or {}).get(
-                            "reason",
-                            "Профиль разрешения атрибута ожидает результат операции или уточнение.",
-                        ),
-                        **slot_source_summary(slot),
-                    }
-                    if slot["required"]:
-                        missing_slots.append(slot_id)
-
-                if profile and profile["profile_id"] not in seen_resolution_profile_ids:
-                    seen_resolution_profile_ids.add(profile["profile_id"])
-                    state_summary = {
-                        "slot_id": slot_id,
-                        **profile_result,
-                    }
-                    resolution_state[slot_id] = state_summary
-                    resolution_steps.append(state_summary)
-            elif fill_method in {"case", "llm_extraction"}:
-                if fill_method == "llm_extraction":
-                    extracted = llm_result_by_slot.get(slot_id)
-                    if extracted:
-                        confidence = extracted["confidence"]
-                        value = extracted["value"]
-                        accepted = value is not None and confidence >= effective_thresholds["min_extraction_confidence"]
-                        status = "filled_by_model" if accepted else "candidate_below_threshold"
-                        decision = "accepted" if accepted else "rejected"
-                        if accepted and confidence < effective_thresholds["auto_accept_confidence"]:
-                            decision = "accepted_for_test_below_auto_accept"
-                        slot_values[slot_id] = {
-                            "status": status,
-                            "value": value,
-                            "fill_method": fill_method,
-                            "source": "llm",
-                            "confidence": confidence,
-                            "threshold_decision": decision,
-                            "reason": extracted["reason"],
-                            "effective_confidence_thresholds": effective_thresholds,
-                            **slot_source_summary(slot),
-                        }
-                        append_trace(
-                            execution_trace,
-                            step="1",
-                            status="completed" if accepted else "blocked",
-                            title=f"LLM extraction: {slot_id}",
-                            message=(
-                                f"Значение принято: {value}"
-                                if accepted
-                                else "Кандидат ниже минимального порога извлечения."
-                            ),
-                            details={
-                                "confidence": confidence,
-                                "min_extraction_confidence": effective_thresholds["min_extraction_confidence"],
-                                "auto_accept_confidence": effective_thresholds["auto_accept_confidence"],
-                                "decision": decision,
-                            },
-                        )
-                        if slot["required"] and not accepted:
-                            missing_slots.append(slot_id)
-                    elif llm_error:
-                        slot_values[slot_id] = {
-                            "status": "model_unavailable",
-                            "value": None,
-                            "fill_method": fill_method,
-                            "source": "llm",
-                            "error": llm_error,
-                            "reason": "Модель не вернула результат для слота.",
-                            "effective_confidence_thresholds": effective_thresholds,
-                            **slot_source_summary(slot),
-                        }
-                        if slot["required"]:
-                            missing_slots.append(slot_id)
-                    else:
-                        slot_values[slot_id] = {
-                            "status": "extraction_pending",
-                            "value": None,
-                            "fill_method": fill_method,
-                            "source": "llm",
-                            "reason": "Вызов модели не выполнялся в выбранном режиме тестового прогона.",
-                            "effective_confidence_thresholds": effective_thresholds,
-                            **slot_source_summary(slot),
-                        }
-                        if slot["required"]:
-                            missing_slots.append(slot_id)
-                else:
-                    slot_values[slot_id] = {
-                        "status": "auto_fill_candidate",
-                        "value": None,
-                        "fill_method": fill_method,
-                        "source": "case",
-                        "reason": "Чтение из данных обращения пока не выполняется в dry-run.",
-                        "effective_confidence_thresholds": effective_thresholds,
-                        **slot_source_summary(slot),
-                    }
-                    if slot["required"]:
-                        missing_slots.append(slot_id)
-            elif slot["required"]:
-                slot_values[slot_id] = {
-                    "status": "missing",
-                    "value": None,
-                    "fill_method": fill_method,
-                    "reason": "Для обязательного слота нет заполненного значения.",
-                    "effective_confidence_thresholds": effective_thresholds,
-                    **slot_source_summary(slot),
-                }
-                missing_slots.append(slot_id)
-        for stage in stages:
-            profile_id = stage.get("resolution_profile_id")
-            if not profile_id:
-                continue
-            profile = profile_by_id.get(profile_id)
-            if not profile:
-                continue
-            if profile_id not in profile_results:
-                profile_results[profile_id] = self.simulate_attribute_resolution_profile(
-                    profile=profile,
-                    slot_schema=slot_schema,
-                    provided=provided,
-                    simulation_options=simulation_options,
-                    effective_thresholds=self.system_confidence_defaults(),
-                    execution_trace=execution_trace,
-                    slot_values=slot_values,
-                )
-            profile_result = profile_results[profile_id]
-            output_values = profile_result.get("output_values", {})
-            for slot_id, output_value in output_values.items():
-                if slot_id in known_slot_ids and output_value not in (None, ""):
-                    slot_values[slot_id] = {
-                        "status": "filled_by_stage_profile",
-                        "value": output_value,
-                        "fill_method": "resolution_profile",
-                        "source": "stage_resolution_profile",
-                        "resolution_profile_id": profile_id,
-                        "confidence": profile_result.get("candidate_confidence"),
-                        "reason": profile_result.get("reason"),
-                        "effective_confidence_thresholds": self.system_confidence_defaults(),
-                    }
-                    if slot_id in missing_slots:
-                        missing_slots.remove(slot_id)
-            if profile_id not in seen_resolution_profile_ids:
-                seen_resolution_profile_ids.add(profile_id)
-                state_summary = {
-                    "stage_id": stage.get("stage_id"),
-                    "profile_id": profile_id,
-                    **profile_result,
-                }
-                resolution_state[stage.get("stage_id") or profile_id] = state_summary
-                resolution_steps.append(state_summary)
+        slot_values, missing_slots, resolution_steps, resolution_state = self._simulate_slot_filling(
+            detail=detail,
+            slot_schema=slot_schema,
+            stages=stages,
+            known_slot_ids=known_slot_ids,
+            provided=provided,
+            text=text,
+            simulation_options=simulation_options,
+            execution_trace=execution_trace,
+        )
         route = detail["route"]
         classification = self.classify_text(text, route)
         confidence = classification["confidence"]
@@ -5917,6 +6439,7 @@ class ConfigStore:
         ready_launches, blocked_launches, next_allowed_actions = self._simulate_profile_launches(
             profile_launches,
             slot_values=slot_values,
+            provided=provided,
             missing_slots=missing_slots,
             simulation_options=simulation_options,
         )
@@ -8565,7 +9088,11 @@ class ConfigStore:
                                         tool_by_name=tool_by_name,
                                         endpoint_by_id=endpoint_by_id,
                                     )
-                                    if not schema_declares_path(ref_result_schema or {}, field_path):
+                                    if not schema_declares_path(
+                                        ref_result_schema or {},
+                                        field_path,
+                                        allow_nested_additional=True,
+                                    ):
                                         errors.append(
                                             f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестное "
                                             f"поле результата {ref_react_call}: {field_path}"
@@ -8617,6 +9144,7 @@ class ConfigStore:
                         if local_hint and selected_schema and not schema_declares_path(
                             selected_schema,
                             local_hint,
+                            allow_nested_additional=True,
                         ):
                             errors.append(
                                 output_slot_error_context(

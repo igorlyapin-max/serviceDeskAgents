@@ -4,6 +4,7 @@ import unittest
 
 from apps.orchestrator.app.debug_runtime import DebugRuntime
 from apps.orchestrator.app.integrations import IntegrationDispatcher
+from apps.orchestrator.app.processing import ProcessingStore
 
 
 def detail_for_state(
@@ -106,6 +107,94 @@ class CaseTraceStepsTest(unittest.TestCase):
         self.assertEqual(len(steps), 5)
         self.assertEqual(steps[4]["status"], "success")
         self.assertEqual(outcome["label"], "Завершено автоматически")
+
+    def test_case_trace_exposes_runtime_slots_and_continuation_trace(self) -> None:
+        detail = detail_for_state()
+        detail["timeline"] = {"events": []}
+        detail["case"]["updated_at"] = "2026-06-01T00:00:02Z"
+        detail["runs"][0]["slot_values"] = {
+            "provider_mail_body": {
+                "status": "filled_by_external_event",
+                "value": "Заявка зарегистрирована за номером МТС000001",
+            },
+            "incident_number": {
+                "status": "filled_by_model",
+                "value": "МТС000001",
+            },
+        }
+        detail["runs"][0]["extensions"] = {
+            "slot_continuation": [
+                {
+                    "status": "completed",
+                    "filled_slot_ids": ["incident_number"],
+                    "execution_trace": [
+                        {
+                            "step": "1",
+                            "status": "completed",
+                            "title": "LLM extraction: incident_number",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        class ProcessingStoreStub:
+            def case_detail(self, case_id: str) -> dict:
+                self.requested_case_id = case_id
+                return detail
+
+            def _runtime_summary_status(self, run, wait, task) -> str:
+                return ProcessingStore._runtime_summary_status(run, wait, task)
+
+            def _runtime_run_summary(self, run):
+                return ProcessingStore._runtime_run_summary(run)
+
+            def _runtime_wait_summary(self, wait):
+                return ProcessingStore._runtime_wait_summary(wait)
+
+            def _runtime_task_summary(self, task):
+                return ProcessingStore._runtime_task_summary(task)
+
+        debug_runtime = DebugRuntime.__new__(DebugRuntime)
+        debug_runtime.processing_store = ProcessingStoreStub()
+        debug_runtime.config_store = type(
+            "ConfigStoreStub",
+            (),
+            {"scenario_detail": lambda self, scenario_id: {"scenario": {"scenario_id": scenario_id}, "slot_schema": {"slots": []}}},
+        )()
+        debug_runtime._simulation_item_by_case_id = lambda case_id: {
+            "scenario_id": "custom_scenario_copy",
+            "simulation_snapshot": {
+                "execution_trace": [
+                    {
+                        "step": "1",
+                        "status": "waiting",
+                        "title": "Зависимости слота: incident_number",
+                        "details": {"missing_dependencies": ["provider_mail_body"]},
+                    }
+                ],
+                "slot_values": {},
+            },
+        }
+
+        trace = debug_runtime.case_trace("case-test")
+
+        self.assertEqual(
+            trace["processing_runtime"]["latest_run"]["slot_values"]["provider_mail_body"]["status"],
+            "filled_by_external_event",
+        )
+        self.assertEqual(
+            trace["simulation_snapshot"]["runtime_slot_values"]["incident_number"]["value"],
+            "МТС000001",
+        )
+        self.assertEqual(
+            trace["runtime_execution_trace"][0]["title"],
+            "LLM extraction: incident_number",
+        )
+        self.assertEqual(
+            trace["simulation_snapshot"]["runtime_execution_trace"][0]["status"],
+            "completed",
+        )
 
     def test_client_wait_maps_to_question_to_customer(self) -> None:
         detail = detail_for_state(

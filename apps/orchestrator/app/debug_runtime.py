@@ -495,6 +495,8 @@ class DebugRuntime:
         debug_item = self._simulation_item_by_case_id(case_id)
         scenario_detail = None
         simulation_snapshot = None
+        processing_runtime = self._processing_runtime_summary_from_detail(detail)
+        runtime_execution_trace = self._runtime_execution_trace_from_runtime(processing_runtime)
         if debug_item:
             scenario_id = debug_item.get("scenario_id")
             if scenario_id and scenario_id != "auto":
@@ -503,6 +505,18 @@ class DebugRuntime:
                 except ConfigRegistryError:
                     scenario_detail = None
             simulation_snapshot = self._simulation_snapshot_for_item(debug_item)
+        runtime_slot_values: dict[str, Any] = {}
+        for run in detail.get("runs", []) or []:
+            if isinstance(run.get("slot_values"), dict):
+                runtime_slot_values.update(copy.deepcopy(run["slot_values"]))
+        if simulation_snapshot and runtime_slot_values:
+            simulation_snapshot = copy.deepcopy(simulation_snapshot)
+            simulation_snapshot.setdefault("slot_values", {})
+            simulation_snapshot["slot_values"].update(runtime_slot_values)
+            simulation_snapshot["runtime_slot_values"] = runtime_slot_values
+        if simulation_snapshot:
+            simulation_snapshot["runtime_execution_trace"] = copy.deepcopy(runtime_execution_trace)
+            simulation_snapshot["runtime_waits"] = copy.deepcopy(processing_runtime.get("waits") or [])
         events = []
         for event in detail.get("timeline", {}).get("events", []):
             events.append(self._trace_event(
@@ -572,11 +586,49 @@ class DebugRuntime:
             "debug_item": debug_item,
             "scenario_detail": scenario_detail,
             "simulation_snapshot": simulation_snapshot,
+            "processing_runtime": processing_runtime,
+            "runtime_execution_trace": runtime_execution_trace,
             "waits": detail.get("waits") or [],
             "agent_outcome": agent_outcome,
             "summary": self._case_trace_summary(detail, events, agent_outcome),
             "steps": steps,
             "events": events,
+        }
+
+    @staticmethod
+    def _runtime_execution_trace_from_runtime(runtime: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not runtime:
+            return []
+        latest_run = runtime.get("latest_run") if isinstance(runtime.get("latest_run"), dict) else {}
+        continuations = latest_run.get("slot_continuation") if isinstance(latest_run, dict) else []
+        if not isinstance(continuations, list):
+            return []
+        for continuation in reversed(continuations):
+            if not isinstance(continuation, dict):
+                continue
+            trace = continuation.get("execution_trace")
+            if isinstance(trace, list) and trace:
+                return copy.deepcopy(trace)
+        return []
+
+    def _processing_runtime_summary_from_detail(self, detail: dict[str, Any]) -> dict[str, Any]:
+        runs = detail.get("runs") or []
+        tasks = detail.get("tasks") or []
+        waits = detail.get("waits") or []
+        latest_run = runs[0] if runs else None
+        latest_wait = waits[0] if waits else None
+        latest_task = tasks[0] if tasks else None
+        case = detail.get("case") or {}
+        return {
+            "schema_version": "1.0",
+            "case_id": case.get("case_id"),
+            "status": self.processing_store._runtime_summary_status(latest_run, latest_wait, latest_task),
+            "latest_run": self.processing_store._runtime_run_summary(latest_run),
+            "latest_wait": self.processing_store._runtime_wait_summary(latest_wait),
+            "latest_task": self.processing_store._runtime_task_summary(latest_task),
+            "runs": [self.processing_store._runtime_run_summary(run) for run in runs],
+            "waits": [self.processing_store._runtime_wait_summary(wait) for wait in waits],
+            "tasks": [self.processing_store._runtime_task_summary(task) for task in tasks],
         }
 
     def _simulation_item_by_case_id(self, case_id: str) -> dict[str, Any] | None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from apps.orchestrator.app.action_gates import utc_now
 from apps.orchestrator.app.cases import CaseStore
@@ -23,6 +24,261 @@ class AckSpy:
 
     def __call__(self) -> None:
         self.count += 1
+
+
+class SlotContinuationConfigStore:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def active_payload(self, domain: str) -> dict[str, Any]:
+        if domain == "service_scenarios":
+            return {
+                "schema_version": "1.0",
+                "scenarios": [
+                    {
+                        "scenario_id": "provider_channel_repair",
+                        "slot_schema_id": "slot.provider",
+                        "status": "active",
+                    }
+                ],
+            }
+        if domain == "attribute_resolution_profiles":
+            return {
+                "schema_version": "1.0",
+                "profiles": [
+                    {
+                        "profile_id": "profile.provider.mail",
+                        "slot_schema_id": "slot.provider",
+                        "target_slot_id": "provider_mail_body",
+                    }
+                ],
+            }
+        return {"schema_version": "1.0"}
+
+    def simulate_scenario(self, scenario_id: str, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append({"scenario_id": scenario_id, **kwargs})
+        provider_mail_body = kwargs["provided_slots"]["provider_mail_body"]
+        monitor_launch = {
+            "launch_id": "profile.provider.mail.step1",
+            "profile_id": "profile.provider.mail",
+            "profile_name": "Письмо провайдера",
+            "slot_schema_id": "slot.provider",
+            "target_slot_id": "provider_mail_body",
+            "output_slots_order": [
+                {
+                    "slot_id": "provider_mail_body",
+                    "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                    "required_for_success": True,
+                }
+            ],
+            "step_id": "step1",
+            "tool_name": "n8n_monitor_provider_channel_repair",
+            "action_type": "action",
+            "endpoint_id": "n8n",
+            "operation_id": "monitor_provider_channel_repair",
+            "status": "ready",
+            "parameters": {
+                "problem_host": "c2m-ntbook-routerg-047",
+                "problemUrl": "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
+                "service_request": "ticket-external-1",
+            },
+            "completion_policy": {
+                "mode": "external_event",
+                "expected_event_type": "monitor_provider_channel_repair_completed",
+                "result_transport": "http_callback",
+            },
+        }
+        zabbix_launch = {
+            "launch_id": "profile.provider.mail.step2",
+            "profile_id": "profile.provider.mail",
+            "profile_name": "Письмо провайдера",
+            "slot_schema_id": "slot.provider",
+            "target_slot_id": "provider_mail_body",
+            "output_slots_order": [],
+            "step_id": "step2",
+            "tool_name": "n8n_update_zabbix_problem",
+            "action_type": "action",
+            "endpoint_id": "n8n",
+            "operation_id": "update_zabbix_problem",
+            "status": "ready",
+            "parameters": {
+                "problemUrl": "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
+                "message": "Провайдер зарегистрировал заявку МТС000000000000001.",
+            },
+            "completion_policy": {"mode": "sync"},
+        }
+        zabbix_wait_launch = {
+            "launch_id": "profile.provider.mail.step3",
+            "profile_id": "profile.provider.mail",
+            "profile_name": "Письмо провайдера",
+            "slot_schema_id": "slot.provider",
+            "target_slot_id": None,
+            "output_slots_order": [],
+            "step_id": "step3",
+            "tool_name": "n8n_wait_zabbix_problem_status",
+            "action_type": "action",
+            "endpoint_id": "n8n",
+            "operation_id": "wait_zabbix_problem_status",
+            "status": "ready",
+            "parameters": {
+                "problem_url": "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
+                "poll_interval_minutes": "1",
+                "timeout_minutes": "20",
+                "request_id": "ticket-external-1",
+            },
+            "completion_policy": {
+                "mode": "external_event",
+                "expected_event_type": "wait_zabbix_problem_status_completed",
+                "result_transport": "kafka_event",
+                "result_topic": "external.events",
+                "timeout_action": "escalate_operator",
+            },
+        }
+        actions = []
+        for launch in (monitor_launch, zabbix_launch, zabbix_wait_launch):
+            actions.append(
+                {
+                    "tool_name": launch["tool_name"],
+                    "action_id": f"{launch['launch_id']}.action",
+                    "action_type": launch["action_type"],
+                    "parameters": launch["parameters"],
+                    "reason": "Проверочный запуск шага профиля.",
+                    "risk_level": "medium",
+                    "expected_effect": "Будет вызвана интеграция.",
+                    "requires_state_change": True,
+                    "extensions": {
+                        "endpoint_id": launch["endpoint_id"],
+                        "operation_id": launch["operation_id"],
+                        "completion_policy": launch["completion_policy"],
+                        "source_profile_id": launch["profile_id"],
+                        "source_step_id": launch["step_id"],
+                        "source_slot_schema_id": launch["slot_schema_id"],
+                        "source_target_slot_id": launch["target_slot_id"],
+                        "source_output_slots_order": launch["output_slots_order"],
+                    },
+                    "status": "ready",
+                }
+            )
+        return {
+            "schema_version": "1.0",
+            "scenario_id": scenario_id,
+            "slot_values": {
+                "provider_mail_body": {
+                    "status": "provided",
+                    "value": provider_mail_body,
+                    "fill_method": "operator_input",
+                    "source": "operator_input",
+                },
+                "incident_number": {
+                    "status": "filled_by_model",
+                    "value": "МТС000000000000001",
+                    "candidate_value": "МТС000000000000001",
+                    "fill_method": "llm_extraction",
+                    "source": "llm",
+                    "confidence": 0.93,
+                    "reason": "Номер найден в provider_mail_body.",
+                },
+            },
+            "missing_slots": [],
+            "final_decision": "ready_for_react",
+            "ready_tool_launches": [monitor_launch, zabbix_launch, zabbix_wait_launch],
+            "blocked_tool_launches": [],
+            "next_allowed_actions": actions,
+            "execution_trace": [
+                {
+                    "step": "1",
+                    "status": "completed",
+                    "title": "LLM extraction: incident_number",
+                    "message": "Значение принято: МТС000000000000001",
+                }
+            ],
+        }
+
+
+class FollowupWorkflow:
+    def __init__(self, processing_store: ProcessingStore | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.processing_store = processing_store
+
+    def dispatch_tool(
+        self,
+        action: dict[str, Any],
+        policy_result: dict[str, Any],
+        *,
+        case_id: str | None = None,
+        ticket_id: str | None = None,
+        approved_by_operator: bool = False,
+        operator_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "action": action,
+                "policy_result": policy_result,
+                "case_id": case_id,
+                "ticket_id": ticket_id,
+                "approved_by_operator": approved_by_operator,
+                "operator_id": operator_id,
+            }
+        )
+        extensions: dict[str, Any] = {
+            "trace": {
+                "react_parameters": action["parameters"],
+            }
+        }
+        if (
+            self.processing_store is not None
+            and action["extensions"]["operation_id"] == "wait_zabbix_problem_status"
+        ):
+            policy = action["extensions"].get("completion_policy") or {}
+            wait = self.processing_store.open_external_wait(
+                case_id or action.get("case_id"),
+                source="n8n",
+                event_type=policy.get("expected_event_type") or "wait_zabbix_problem_status_completed",
+                reason="Ожидание восстановления Zabbix после обновления события.",
+                deadline_seconds=policy.get("max_wait_seconds"),
+                payload={
+                    "result_transport": policy.get("result_transport"),
+                    "result_topic": policy.get("result_topic"),
+                    "resume_policy": policy.get("timeout_action"),
+                },
+                origin={
+                    "kind": "react_call",
+                    "react_call": action["tool_name"],
+                    "endpoint_id": action["extensions"]["endpoint_id"],
+                    "operation_id": action["extensions"]["operation_id"],
+                    "source_profile_id": action["extensions"]["source_profile_id"],
+                    "source_step_id": action["extensions"]["source_step_id"],
+                    "source_slot_schema_id": action["extensions"]["source_slot_schema_id"],
+                    "result_transport": policy.get("result_transport"),
+                    "result_topic": policy.get("result_topic"),
+                },
+            )
+            extensions["async_wait"] = {
+                "wait_id": wait["wait_id"],
+                "correlation_id": wait["correlation_id"],
+                "event_type": wait["expected_event_type"],
+            }
+        return {
+            "invocation": {
+                "invocation_id": "inv-followup-zabbix",
+                "tool_name": action["tool_name"],
+            },
+            "tool_result": {
+                "schema_version": "1.0",
+                "invocation_id": "inv-followup-zabbix",
+                "action_id": action["action_id"],
+                "tool_name": action["tool_name"],
+                "endpoint_id": action["extensions"]["endpoint_id"],
+                "adapter_type": "n8n_webhook",
+                "operation_id": action["extensions"]["operation_id"],
+                "status": "success",
+                "policy_rule_id": policy_result["policy_rule_id"],
+                "duration_ms": 10,
+                "attempts": 1,
+                "output": {"status": "updated"},
+                "extensions": extensions,
+            },
+        }
 
 
 def waiting_analysis() -> dict:
@@ -311,6 +567,175 @@ class ExternalEventsTest(unittest.TestCase):
             any(item["event_type"] == "processing_external_event_resume_processed" for item in detail["timeline"]["events"])
         )
 
+    def test_resume_task_materializes_external_event_output_slots(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="monitor_provider_channel_repair_completed",
+            reason="Ожидание результата мониторинга провайдера.",
+            origin={
+                "kind": "react_call",
+                "react_call": "n8n_monitor_provider_channel_repair",
+                "endpoint_id": "n8n",
+                "operation_id": "monitor_provider_channel_repair",
+                "source_profile_id": "profile.provider.mail",
+                "source_step_id": "step1",
+                "source_slot_schema_id": "slot.provider",
+                "source_output_slots_order": [
+                    {
+                        "slot_id": "provider_mail_body",
+                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                        "required_for_success": True,
+                    }
+                ],
+            },
+        )
+        body = "Ваша заявка зарегистрирована за номером МТС000000000000001"
+        event = self.external_event(
+            wait,
+            event_type="monitor_provider_channel_repair_completed",
+            result={
+                "runbook_status": "OK",
+                "message": "Получено письмо провайдера.",
+                "email_result": {"body": body, "subject": "Re: test"},
+            },
+        )
+
+        result = self.processing_store.record_external_event(event)
+        resume_result = self.processing_store.process_external_event_resume_task(
+            result["resume_task"],
+            worker_id="test-agent-worker",
+        )
+
+        run = self.processing_store.require_run(wait["run_id"])
+        self.assertEqual(run["slot_values"]["provider_mail_body"]["value"], body)
+        self.assertEqual(run["slot_values"]["provider_mail_body"]["status"], "filled_by_external_event")
+        self.assertEqual(
+            resume_result["filled_slot_values"]["provider_mail_body"]["value"],
+            body,
+        )
+
+    def test_resume_task_continues_dependent_slots_after_external_event(self) -> None:
+        config_store = SlotContinuationConfigStore()
+        followup_workflow = FollowupWorkflow(self.processing_store)
+        self.processing_store.config_store = config_store
+        self.processing_store.attach_workflow(followup_workflow)
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="monitor_provider_channel_repair_completed",
+            reason="Ожидание результата мониторинга провайдера.",
+            origin={
+                "kind": "react_call",
+                "react_call": "n8n_monitor_provider_channel_repair",
+                "endpoint_id": "n8n",
+                "operation_id": "monitor_provider_channel_repair",
+                "source_profile_id": "profile.provider.mail",
+                "source_step_id": "step1",
+                "source_slot_schema_id": "slot.provider",
+                "source_output_slots_order": [
+                    {
+                        "slot_id": "provider_mail_body",
+                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                        "required_for_success": True,
+                    }
+                ],
+            },
+        )
+        body = "Ваша заявка зарегистрирована за номером МТС000000000000001"
+        event = self.external_event(
+            wait,
+            event_type="monitor_provider_channel_repair_completed",
+            result={
+                "runbook_status": "OK",
+                "message": "Получено письмо провайдера.",
+                "email_result": {"body": body, "subject": "Re: test"},
+            },
+        )
+
+        result = self.processing_store.record_external_event(event)
+        resume_result = self.processing_store.process_external_event_resume_task(
+            result["resume_task"],
+            worker_id="test-agent-worker",
+        )
+
+        run = self.processing_store.require_run(wait["run_id"])
+        self.assertEqual(config_store.calls[0]["scenario_id"], "provider_channel_repair")
+        self.assertEqual(config_store.calls[0]["provided_slots"]["provider_mail_body"], body)
+        self.assertEqual(config_store.calls[0]["run_mode"], "llm")
+        self.assertIs(config_store.calls[0]["allow_readonly_integrations"], False)
+        self.assertIs(config_store.calls[0]["allow_action_with_approval"], True)
+        self.assertEqual(run["slot_values"]["incident_number"]["value"], "МТС000000000000001")
+        self.assertEqual(run["slot_values"]["incident_number"]["status"], "filled_by_model")
+        self.assertEqual(len(followup_workflow.calls), 2)
+        self.assertEqual(
+            followup_workflow.calls[0]["action"]["tool_name"],
+            "n8n_update_zabbix_problem",
+        )
+        self.assertEqual(
+            followup_workflow.calls[0]["action"]["parameters"]["message"],
+            "Провайдер зарегистрировал заявку МТС000000000000001.",
+        )
+        self.assertTrue(followup_workflow.calls[0]["approved_by_operator"])
+        self.assertEqual(
+            followup_workflow.calls[1]["action"]["tool_name"],
+            "n8n_wait_zabbix_problem_status",
+        )
+        self.assertEqual(
+            followup_workflow.calls[1]["action"]["parameters"]["problem_url"],
+            "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
+        )
+        self.assertTrue(followup_workflow.calls[1]["approved_by_operator"])
+        continuation = resume_result["slot_continuation"]
+        self.assertEqual(continuation["status"], "completed")
+        self.assertEqual(continuation["filled_slot_ids"], ["incident_number"])
+        self.assertEqual(continuation["tool_dispatch"]["status"], "dispatched")
+        self.assertEqual(len(continuation["tool_dispatch"]["dispatched"]), 2)
+        self.assertEqual(len(continuation["tool_dispatch"]["skipped"]), 1)
+        self.assertEqual(
+            continuation["tool_dispatch"]["dispatched"][0]["tool_name"],
+            "n8n_update_zabbix_problem",
+        )
+        self.assertEqual(
+            continuation["tool_dispatch"]["dispatched"][1]["tool_name"],
+            "n8n_wait_zabbix_problem_status",
+        )
+        self.assertTrue(continuation["tool_dispatch"]["dispatched"][1]["wait_id"])
+        self.assertEqual(
+            continuation["filled_slot_values"]["incident_number"]["value"],
+            "МТС000000000000001",
+        )
+        self.assertEqual(run["status"], "waiting")
+        self.assertEqual(run["current_step"], "external_event_wait")
+        self.assertIsNone(run["completed_at"])
+        self.assertEqual(
+            run["extensions"]["slot_continuation"][0]["slot_statuses"]["incident_number"]["status"],
+            "filled_by_model",
+        )
+        summary = self.processing_store.case_runtime_summary(self.case["case_id"])
+        self.assertEqual(summary["schema_version"], "1.0")
+        self.assertEqual(summary["status"], "open")
+        self.assertEqual(summary["latest_run"]["run_id"], run["run_id"])
+        self.assertEqual(
+            summary["latest_run"]["slot_values"]["provider_mail_body"]["value"],
+            body,
+        )
+        self.assertEqual(
+            summary["latest_run"]["slot_values"]["incident_number"]["status"],
+            "filled_by_model",
+        )
+        self.assertEqual(
+            summary["latest_run"]["slot_materialization"][0]["slot_ids"],
+            ["provider_mail_body"],
+        )
+        self.assertEqual(
+            summary["latest_run"]["slot_continuation"][0]["filled_slot_ids"],
+            ["incident_number"],
+        )
+        self.assertEqual(summary["latest_wait"]["status"], "open")
+        self.assertEqual(summary["latest_wait"]["expected_event_type"], "wait_zabbix_problem_status_completed")
+        self.assertEqual(summary["latest_task"]["status"], "completed")
+
     def test_progress_external_event_keeps_wait_open(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
@@ -390,6 +815,33 @@ class ExternalEventsTest(unittest.TestCase):
         stored_result = result["external_event"]["result"]
         self.assertIn("[REDACTED_TOKEN]", stored_result["message"])
         self.assertIn("token=[REDACTED_SECRET]", stored_result["url"])
+
+    def test_external_event_preserves_contact_and_ticket_text_before_persistence(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="n8n",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        body = (
+            "Автоответ тестового стенда получен. "
+            "Ваша заявка зарегистрирована за номером МТС000000000000001. "
+            "Контакт user@example.com, телефон +7 999 123-45-67."
+        )
+        event = self.external_event(
+            wait,
+            status="progress",
+            event_id="evt-provider-ticket-body",
+            result={"email_result": {"body": body}},
+        )
+
+        result = self.processing_store.record_external_event(event)
+
+        stored_body = result["external_event"]["result"]["email_result"]["body"]
+        self.assertEqual(stored_body, body)
+        receipt = self.processing_store.external_event_receipt(event["idempotency_key"])
+        receipt_body = receipt["result"]["external_event"]["result"]["email_result"]["body"]
+        self.assertEqual(receipt_body, body)
 
     def test_external_event_source_must_match_wait_source(self) -> None:
         wait = self.processing_store.open_external_wait(

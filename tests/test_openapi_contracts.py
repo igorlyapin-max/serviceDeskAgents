@@ -703,6 +703,20 @@ class OpenApiContractsTest(unittest.TestCase):
         self.assertEqual(transport["kafka"]["supported_auth"], ["sasl", "mtls"])
         self.assertEqual(endpoint["contract_source"]["lang"], "ru")
 
+    def test_n8n_provider_monitor_catalog_declares_nested_email_result_fields(self) -> None:
+        catalog = json.loads(Path("contracts/integrations/integration-endpoint-catalog.json").read_text())
+        endpoint = next(item for item in catalog["endpoints"] if item["endpoint_id"] == "n8n")
+        operation = endpoint["operations"]["monitor_provider_channel_repair"]
+        result_schema = operation["async_event_contracts"]["monitor_provider_channel_repair_completed"]["result_schema"]
+        email_result = result_schema["properties"]["email_result"]
+
+        self.assertIn("object", email_result["type"])
+        self.assertIn("null", email_result["type"])
+        self.assertIn("body", email_result["properties"])
+        self.assertIn("subject", email_result["properties"])
+        self.assertIn("match_count", email_result["properties"])
+        self.assertIn("reply_mailbox_address", email_result["properties"])
+
     def test_imports_openapi_transport_security_without_delivery_choice(self) -> None:
         document = {
             "openapi": "3.1.0",

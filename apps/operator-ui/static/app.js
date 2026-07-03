@@ -5,6 +5,8 @@ const state = {
   ticketInput: null,
   caseRecord: null,
   caseTimeline: null,
+  processingRuntime: null,
+  processingRuntimeError: '',
   casePoll: null,
   knowledge: null,
   activeTab: 'rag',
@@ -100,6 +102,7 @@ const elements = {
 };
 
 const scenarioApiBase = '/debug';
+const processingTerminalStatuses = new Set(['completed', 'failed', 'cancelled', 'timed_out']);
 
 const visibleLabels = {
   active: 'активно',
@@ -122,6 +125,7 @@ const visibleLabels = {
   missing: 'требуется ответ',
   model_unavailable: 'модель недоступна',
   operator_approval: 'согласование оператора',
+  manual_only: 'policy: manual_only',
   approval_required: 'нужно подтверждение',
   ask_client: 'уточнить у клиента',
   operator_manual: 'ручное заполнение оператором',
@@ -172,10 +176,17 @@ const visibleLabels = {
   external_event_received: 'результат n8n получен',
   external_event_failed: 'n8n вернул ошибку',
   external_event_timeout: 'n8n timeout',
+  runtime_completed: 'runtime выполнен',
+  runtime_failed: 'runtime ошибка',
+  runtime_cancelled: 'runtime отменен',
+  runtime_timed_out: 'runtime timeout',
+  runtime_pending: 'runtime ожидание',
   missing_async_command: 'нет async-команды',
   async_event_contract_missing: 'нет async-контракта',
   question_required: 'нужно уточнение у клиента',
-  waiting: 'вопрос клиенту',
+  waiting: 'ожидание',
+  waiting_for_dependencies: 'ожидание зависимых слотов',
+  blocked_by_dependency_cycle: 'цикл зависимостей',
   resolution_profile: 'профиль разрешения',
   dry_run_simulated: 'смоделировано',
   success: 'завершено автоматически',
@@ -700,26 +711,73 @@ function traceStatusHint(status) {
     approval_required: 'Требуется подтверждение оператора перед выполнением.',
     question_required: 'Нужно уточнение у клиента.',
     waiting: 'Открыто ожидание результата или ответа.',
+    waiting_for_dependencies: 'Ожидаются зависимые слоты или результат внешнего вызова.',
+    blocked_by_dependency_cycle: 'Обнаружен цикл зависимостей слотов.',
     waiting_external_event: 'Открыто ожидание terminal ExternalEvent от n8n.',
+    superseded_by_runtime: 'Плановое ожидание закрыто фактическим runtime.',
     started: 'Шаг начат.',
   };
   return hints[String(status || '').toLowerCase()] || '';
 }
 
-function renderDryRunTraceItem(item, index) {
-  const callLabel = traceCallLabel(item);
-  const parameters = traceParameters(item);
-  const result = traceResult(item);
-  const filledSlotValues = item.details?.filled_slot_values || [];
-  const statusHint = traceStatusHint(item.status);
+function runtimeExecutionTrace(runtime = state.processingRuntime) {
+  const continuations = runtime?.latest_run?.slot_continuation || [];
+  for (let index = continuations.length - 1; index >= 0; index -= 1) {
+    const trace = continuations[index]?.execution_trace;
+    if (Array.isArray(trace) && trace.length) return trace;
+  }
+  return [];
+}
+
+function traceDependencySlotIds(item = {}) {
+  const details = item.details || {};
+  const direct = [
+    ...(Array.isArray(details.missing_dependencies) ? details.missing_dependencies : []),
+    ...(Array.isArray(details.missing_dependency_slots) ? details.missing_dependency_slots : []),
+  ];
+  if (direct.length) return [...new Set(direct.filter(Boolean).map(String))];
+  const match = String(item.message || '').match(/Ожидаются зависимые слоты:\s*([^.;]+)/i);
+  if (!match) return [];
+  return [...new Set(match[1].split(',').map((value) => value.trim()).filter(Boolean))];
+}
+
+function traceItemWithRuntimeOverlay(item = {}, runtime = state.processingRuntime) {
+  const dependencyIds = traceDependencySlotIds(item);
+  const status = String(item.status || '').toLowerCase();
+  if (!dependencyIds.length || !['waiting', 'waiting_for_dependencies'].includes(status)) {
+    return item;
+  }
+  const runtimeSlots = latestRuntimeSlotValues(runtime);
+  const resolved = dependencyIds.filter((slotId) => slotValueHasResult(runtimeSlots[slotId]));
+  if (resolved.length !== dependencyIds.length) return item;
+  return {
+    ...item,
+    status: 'superseded_by_runtime',
+    message: `${item.message || 'Ожидание зависимостей.'} Закрыто фактическим runtime: ${resolved.join(', ')}.`,
+    details: {
+      ...(item.details || {}),
+      runtime_dependency_values: Object.fromEntries(
+        resolved.map((slotId) => [slotId, runtimeSlots[slotId]]),
+      ),
+    },
+  };
+}
+
+function renderDryRunTraceItem(item, index, runtime = state.processingRuntime) {
+  const effectiveItem = traceItemWithRuntimeOverlay(item, runtime);
+  const callLabel = traceCallLabel(effectiveItem);
+  const parameters = traceParameters(effectiveItem);
+  const result = traceResult(effectiveItem);
+  const filledSlotValues = effectiveItem.details?.filled_slot_values || [];
+  const statusHint = traceStatusHint(effectiveItem.status);
   return `
     <div class="dry-run-trace-item">
       <div class="dry-run-trace-head">
-        <span class="trace-step">#${index + 1} / шаг ${escapeHtml(item.step || 'н/д')}</span>
-        <strong>${escapeHtml(item.title || 'Событие')}</strong>
-        ${badge(item.status || 'info')}
+        <span class="trace-step">#${index + 1} / шаг ${escapeHtml(effectiveItem.step || 'н/д')}</span>
+        <strong>${escapeHtml(effectiveItem.title || 'Событие')}</strong>
+        ${badge(effectiveItem.status || 'info')}
       </div>
-      <div class="trace-meta">${escapeHtml(item.message || '')}</div>
+      <div class="trace-meta">${escapeHtml(effectiveItem.message || '')}</div>
       ${statusHint ? `<div class="trace-hint">${escapeHtml(statusHint)}</div>` : ''}
       ${renderFilledSlotValues(filledSlotValues)}
       <div class="dry-run-trace-grid">
@@ -821,28 +879,120 @@ function renderVariableContextSnapshot(simulation) {
   `;
 }
 
-function renderDryRunTracePanel(simulation) {
+function renderRuntimeContinuationTrace(runtime = state.processingRuntime) {
+  const trace = runtimeExecutionTrace(runtime);
+  if (!trace.length) return '';
+  return `
+    <details class="trace-run-block">
+      <summary>
+        <span class="trace-run-title">Фактическое продолжение после ExternalEvent</span>
+        <span class="summary-line">${trace.length} событий</span>
+      </summary>
+      <div class="trace-run-body">
+        ${trace.map((item, index) => renderDryRunTraceItem(item, index, null)).join('')}
+      </div>
+    </details>
+  `;
+}
+
+function renderDryRunTracePanel(simulation, runtime = state.processingRuntime) {
   const trace = simulation?.execution_trace || [];
   if (!trace.length) {
     return `
       <details class="trace-run-block" open>
         <summary>
-          <span class="trace-run-title">Трасса отладочного прогона</span>
+          <span class="trace-run-title">Плановый dry-run сценария</span>
           ${badge('pending')}
         </summary>
         <div class="trace-run-body"><div class="empty">Отладочный прогон еще не выполнялся</div></div>
       </details>
+      ${renderRuntimeContinuationTrace(runtime)}
     `;
   }
   return `
     <details class="trace-run-block" open>
       <summary>
-        <span class="trace-run-title">Трасса отладочного прогона</span>
+        <span class="trace-run-title">Плановый dry-run сценария</span>
         <span class="summary-line">${trace.length} событий</span>
       </summary>
       <div class="trace-run-body">
         ${renderVariableContextSnapshot(simulation)}
-        ${trace.map((item, index) => renderDryRunTraceItem(item, index)).join('')}
+        ${trace.map((item, index) => renderDryRunTraceItem(item, index, runtime)).join('')}
+      </div>
+    </details>
+    ${renderRuntimeContinuationTrace(runtime)}
+  `;
+}
+
+function renderProcessingRuntimePanel(runtime = state.processingRuntime, options = {}) {
+  if (!runtime && !state.processingRuntimeError) return '';
+  if (!runtime) {
+    return `
+      <details class="trace-run-block" open>
+        <summary>
+          <span class="trace-run-title">Фактический runtime</span>
+          ${badge('error')}
+        </summary>
+        <div class="trace-run-body"><div class="empty">${escapeHtml(state.processingRuntimeError)}</div></div>
+      </details>
+    `;
+  }
+  const run = runtime.latest_run || {};
+  const wait = runtime.latest_wait || {};
+  const task = runtime.latest_task || {};
+  const slotRows = Object.entries(run.slot_values || {}).map(([slotId, value]) => [
+    escapeHtml(slotLabel(state.scenarioDetail?.slot_schema, slotId)),
+    badge(value?.status || 'filled'),
+    escapeHtml(readableSlotValue(value?.value) || 'н/д'),
+    escapeHtml(value?.confidence ?? 'н/д'),
+    escapeHtml(value?.reason || value?.source || value?.fill_method || 'н/д'),
+  ]);
+  const materializationRows = (run.slot_materialization || []).map((item) => [
+    escapeHtml(item.processed_at || 'н/д'),
+    escapeHtml(formatList(item.slot_ids || [])),
+    escapeHtml(item.wait_id || 'н/д'),
+    escapeHtml(item.event_id || 'н/д'),
+  ]);
+  const continuationRows = (run.slot_continuation || []).map((item) => [
+    badge(item.status || 'н/д'),
+    escapeHtml(formatList(item.filled_slot_ids || [])),
+    escapeHtml(formatList(item.missing_slots || [])),
+    escapeHtml(item.processed_at || item.completed_at || item.started_at || 'н/д'),
+  ]);
+  const waitRows = (runtime.waits || []).map((item) => [
+    badge(item.status),
+    escapeHtml(item.wait_id || 'н/д'),
+    escapeHtml(item.expected_event_type || 'н/д'),
+    escapeHtml(item.correlation_id || 'н/д'),
+    escapeHtml(formatResolutionOutputSlots(item.source_output_slots_order || [])),
+  ]);
+  const taskRows = (runtime.tasks || []).map((item) => [
+    badge(item.status),
+    escapeHtml(item.task_id || 'н/д'),
+    escapeHtml(item.task_type || 'н/д'),
+    escapeHtml(item.worker_id || 'н/д'),
+    escapeHtml(item.updated_at || item.created_at || 'н/д'),
+  ]);
+  return `
+    <details class="trace-run-block" ${options.open === false ? '' : 'open'}>
+      <summary>
+        <span class="trace-run-title">Фактический runtime</span>
+        ${badge(runtime.status || run.status || 'pending')}
+      </summary>
+      <div class="trace-run-body">
+        <div class="grid">
+          ${metric('Case', escapeHtml(runtime.case_id || 'н/д'))}
+          ${metric('Run', escapeHtml(run.run_id || 'н/д'))}
+          ${metric('Run status', badge(run.status || runtime.status || 'н/д'))}
+          ${metric('Текущий шаг', escapeHtml(run.current_step || 'н/д'))}
+          ${metric('Wait', wait.wait_id ? `${badge(wait.status)} ${escapeHtml(wait.wait_id)}` : 'н/д')}
+          ${metric('Task', task.task_id ? `${badge(task.status)} ${escapeHtml(task.task_id)}` : 'н/д')}
+        </div>
+        ${slotRows.length ? table(['Слот', 'Статус', 'Значение', 'Confidence', 'Источник'], slotRows) : '<div class="empty">Runtime slot values еще не получены</div>'}
+        ${materializationRows.length ? table(['Materialized at', 'Слоты', 'Wait', 'Event'], materializationRows) : ''}
+        ${continuationRows.length ? table(['Continuation', 'Заполнено', 'Не хватает', 'Время'], continuationRows) : ''}
+        ${waitRows.length ? table(['Wait status', 'Wait ID', 'Event type', 'Correlation', 'Output slots'], waitRows) : ''}
+        ${taskRows.length ? table(['Task status', 'Task ID', 'Тип', 'Worker', 'Обновлен'], taskRows) : ''}
       </div>
     </details>
   `;
@@ -1018,6 +1168,43 @@ function scenarioName() {
   return state.scenarioDetail?.scenario?.display_name || state.scenarioId || 'н/д';
 }
 
+function latestRuntimeRun(runtime = state.processingRuntime) {
+  return runtime?.latest_run || null;
+}
+
+function latestRuntimeSlotValues(runtime = state.processingRuntime) {
+  return latestRuntimeRun(runtime)?.slot_values || {};
+}
+
+function runtimeSlotValue(slotId, runtime = state.processingRuntime) {
+  const value = latestRuntimeSlotValues(runtime)?.[slotId];
+  return value && typeof value === 'object' ? value : null;
+}
+
+function slotValueHasResult(value) {
+  return value?.value !== undefined && value?.value !== null && value?.value !== '';
+}
+
+function effectiveSlotValue(slotId, simulation = state.scenarioSimulation, runtime = state.processingRuntime) {
+  const runtimeValue = runtimeSlotValue(slotId, runtime);
+  if (slotValueHasResult(runtimeValue) || runtimeValue?.status) return runtimeValue;
+  return simulation?.slot_values?.[slotId] || null;
+}
+
+function isProcessingRuntimeTerminal(runtime = state.processingRuntime) {
+  return processingTerminalStatuses.has(runtime?.status || runtime?.latest_run?.status);
+}
+
+function displayMissingSlotIds(simulation = state.scenarioSimulation, detail = state.scenarioDetail, runtime = state.processingRuntime) {
+  const runtimeSlots = latestRuntimeSlotValues(runtime);
+  return (simulation?.missing_slots || []).filter((slotId) => {
+    const slot = slotById(detail, slotId);
+    const runtimeValue = runtimeSlots[slotId];
+    if (!slot) return true;
+    return !slotValueHasResult(runtimeValue);
+  });
+}
+
 function orderedSlots(slotSchema) {
   const slots = slotSchema?.slots || [];
   const byId = Object.fromEntries(slots.map((slot) => [slot.slot_id, slot]));
@@ -1030,19 +1217,19 @@ function slotLabel(slotSchema, slotId) {
   return (slotSchema?.slots || []).find((slot) => slot.slot_id === slotId)?.display_name || slotId;
 }
 
-function slotStatus(slot, simulation = state.scenarioSimulation) {
+function slotStatus(slot, simulation = state.scenarioSimulation, runtime = state.processingRuntime) {
+  const value = effectiveSlotValue(slot.slot_id, simulation, runtime);
+  if (value?.status) return value.status;
   const resolution = slotResolutionState(slot, simulation);
   if (resolution?.status) return resolution.status;
-  const simulationValue = simulation?.slot_values?.[slot.slot_id];
-  if (simulationValue?.status) return simulationValue.status;
   if (!slot.required) return 'optional';
   return 'missing';
 }
 
-function slotDisplayValue(slot, simulation = state.scenarioSimulation, detail = state.scenarioDetail) {
-  const simulationValue = simulation?.slot_values?.[slot.slot_id];
-  if (simulationValue?.value !== undefined && simulationValue?.value !== null && simulationValue?.value !== '') {
-    return simulationValue.value;
+function slotDisplayValue(slot, simulation = state.scenarioSimulation, detail = state.scenarioDetail, runtime = state.processingRuntime) {
+  const value = effectiveSlotValue(slot.slot_id, simulation, runtime);
+  if (slotValueHasResult(value)) {
+    return value.value;
   }
   const profile = slotResolutionProfile(slot, detail);
   if (profile) return profile.display_name;
@@ -1064,11 +1251,32 @@ function readableSlotValue(value) {
   return String(value);
 }
 
-function slotResultValue(slot, simulation = state.scenarioSimulation, providedSlots = state.providedSlots) {
-  const simulationValue = simulation?.slot_values?.[slot.slot_id];
-  const result = readableSlotValue(simulationValue?.value);
+function slotResultValue(slot, simulation = state.scenarioSimulation, providedSlots = state.providedSlots, runtime = state.processingRuntime) {
+  const value = effectiveSlotValue(slot.slot_id, simulation, runtime);
+  const result = readableSlotValue(value?.value);
   const provided = readableSlotValue(providedSlots[slot.slot_id]);
   return result || provided || 'не заполнен';
+}
+
+function slotDiagnosticText(slot, simulation = state.scenarioSimulation, runtime = state.processingRuntime) {
+  const value = effectiveSlotValue(slot.slot_id, simulation, runtime) || {};
+  const parts = [];
+  if (value.reason) parts.push(value.reason);
+  if (value.status === 'candidate_below_threshold') {
+    const candidate = readableSlotValue(value.candidate_value ?? value.value);
+    if (candidate) parts.push(`кандидат: ${candidate}`);
+    const thresholds = value.effective_confidence_thresholds || {};
+    if (thresholds.min_extraction_confidence !== undefined) {
+      parts.push(`min=${thresholds.min_extraction_confidence}`);
+    }
+    if (thresholds.auto_accept_confidence !== undefined) {
+      parts.push(`auto=${thresholds.auto_accept_confidence}`);
+    }
+  }
+  if ((value.missing_dependencies || []).length) {
+    parts.push(`ожидает: ${(value.missing_dependencies || []).join(', ')}`);
+  }
+  return parts.join('; ') || 'н/д';
 }
 
 function slotFillMethod(slot) {
@@ -1785,8 +1993,12 @@ function renderScenarioSummary() {
     elements.scenarioSummary.textContent = 'Сценарий не загружен';
     return;
   }
-  const missingCount = simulation?.missing_slots?.length ?? 0;
-  const answerableCount = answerableMissingSlotIds(simulation, detail).length;
+  const displayMissing = displayMissingSlotIds(simulation, detail);
+  const missingCount = displayMissing.length;
+  const answerableCount = displayMissing.filter((slotId) => {
+    const slot = slotById(detail, slotId);
+    return slot && Boolean(resolutionQuestion(slot, simulation));
+  }).length;
   const route = detail.route || {};
   const channel = simulation?.interaction_channel || detail.interaction_channel || {};
   elements.scenarioSummary.innerHTML = [
@@ -1795,9 +2007,10 @@ function renderScenarioSummary() {
     badge(route.priority),
     `<span>${escapeHtml(channel.display_name || 'канал не задан')}</span>`,
     badge(simulation?.final_decision || 'pending'),
+    state.processingRuntime ? badge(`runtime_${state.processingRuntime.status || 'pending'}`) : '',
     `<span>Недостающих слотов: ${escapeHtml(missingCount)}</span>`,
     `<span>Вопросов для уточнения: ${escapeHtml(answerableCount)}</span>`,
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 }
 
 function renderQuestion() {
@@ -1811,8 +2024,20 @@ function renderQuestion() {
     elements.questionView.innerHTML = '<div class="empty">Вопрос появится после проверки слотов</div>';
     return;
   }
-  const missingSlotIds = simulation.missing_slots || [];
-  const answerableSlotIds = answerableMissingSlotIds(simulation, detail);
+  if (isProcessingRuntimeTerminal()) {
+    const run = latestRuntimeRun();
+    elements.questionView.innerHTML = `
+      <div class="question-ready">
+        <div class="question-title">Фактический запуск завершен: ${badge(state.processingRuntime.status || run?.status || 'completed')}</div>
+        <div class="question-meta">Run: ${escapeHtml(run?.run_id || 'н/д')} / шаг: ${escapeHtml(run?.current_step || 'н/д')}</div>
+      </div>
+    `;
+    return;
+  }
+  const missingSlotIds = displayMissingSlotIds(simulation, detail);
+  const displayMissingSet = new Set(missingSlotIds);
+  const answerableSlotIds = answerableMissingSlotIds(simulation, detail)
+    .filter((slotId) => displayMissingSet.has(slotId));
   const slotId = answerableSlotIds[0];
   if (!missingSlotIds.length) {
     elements.questionView.innerHTML = `
@@ -1824,7 +2049,9 @@ function renderQuestion() {
     return;
   }
   if (!slotId) {
-    const pendingRows = automaticMissingSlotIds(simulation, detail)
+    const answerableSet = new Set(answerableSlotIds);
+    const pendingRows = missingSlotIds
+      .filter((pendingSlotId) => !answerableSet.has(pendingSlotId))
       .map((pendingSlotId) => {
         const slot = slotById(detail, pendingSlotId);
         const fillMethod = slot ? slotFillMethod(slot) : 'unknown';
@@ -1891,6 +2118,9 @@ function renderFiveStepView(detail, simulation, options = {}) {
     return '<div class="empty">Сценарий не загружен</div>';
   }
   const providedSlots = options.providedSlots || state.providedSlots || {};
+  const processingRuntime = options.processingRuntime === undefined
+    ? state.processingRuntime
+    : options.processingRuntime;
   const runtimeWaits = options.runtimeWaits || simulation?.runtime_waits || [];
   const scenarioTitle = options.scenarioName
     || detail.scenario?.display_name
@@ -1903,16 +2133,19 @@ function renderFiveStepView(detail, simulation, options = {}) {
   const channel = simulation?.interaction_channel || detail.interaction_channel || {};
   const waitingPolicy = normalizeWaitingPolicy(simulation?.waiting_policy || channel.waiting_policy || {});
   const escalationAction = simulation?.escalation_action || {};
-  const slotRows = orderedSlots(slotSchema).map((slot) => [
-    escapeHtml(slot.display_name),
-    escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group),
-    badge(slot.required ? 'required' : 'optional'),
-    escapeHtml(fillMethodLabels[slotFillMethod(slot)] || slotFillMethod(slot)),
-    badge(slotStatus(slot, simulation)),
-    escapeHtml(slotResultValue(slot, simulation, providedSlots)),
-    escapeHtml(simulation?.slot_values?.[slot.slot_id]?.confidence ?? 'н/д'),
-    escapeHtml(simulation?.slot_values?.[slot.slot_id]?.reason || 'н/д'),
-  ]);
+  const slotRows = orderedSlots(slotSchema).map((slot) => {
+    const value = effectiveSlotValue(slot.slot_id, simulation, processingRuntime);
+    return [
+      escapeHtml(slot.display_name),
+      escapeHtml(priorityGroupLabels[slot.priority_group] || slot.priority_group),
+      badge(slot.required ? 'required' : 'optional'),
+      escapeHtml(fillMethodLabels[slotFillMethod(slot)] || slotFillMethod(slot)),
+      badge(slotStatus(slot, simulation, processingRuntime)),
+      escapeHtml(slotResultValue(slot, simulation, providedSlots, processingRuntime)),
+      escapeHtml(value?.confidence ?? 'н/д'),
+      escapeHtml(slotDiagnosticText(slot, simulation, processingRuntime)),
+    ];
+  });
   const resolutionRows = (simulation?.attribute_resolution || []).map((item) => [
     escapeHtml(item.profile_name),
     badge(item.status),
@@ -2000,7 +2233,8 @@ function renderFiveStepView(detail, simulation, options = {}) {
   };
   return [
     renderAgentOutcomePanel(simulation),
-    renderDryRunTracePanel(simulation),
+    renderProcessingRuntimePanel(processingRuntime),
+    renderDryRunTracePanel(simulation, processingRuntime),
     stepBlock(
       1,
       'Приём и нормализация',
@@ -2083,6 +2317,7 @@ function renderSteps() {
   elements.stepsView.innerHTML = renderFiveStepView(detail, state.scenarioSimulation, {
     scenarioName: scenarioName(),
     providedSlots: state.providedSlots,
+    processingRuntime: state.processingRuntime,
   });
 }
 
@@ -2132,6 +2367,8 @@ async function loadScenarioDetail(scenarioId = state.scenarioId, options = {}) {
   if (options.resetSlots) state.providedSlots = {};
   state.scenarioDetail = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(scenarioId)}`);
   state.scenarioSimulation = null;
+  state.processingRuntime = null;
+  state.processingRuntimeError = '';
   renderScenario();
   if (options.simulate === true) {
     await simulateScenario();
@@ -2145,6 +2382,8 @@ async function simulateScenario() {
   }
   elements.enrichButton.disabled = true;
   try {
+    state.processingRuntime = null;
+    state.processingRuntimeError = '';
     const runOptions = currentTestRunOptions();
     const channelId = effectiveDebugChannelId();
     state.scenarioSimulation = await api(`${scenarioApiBase}/scenarios/${encodeURIComponent(state.scenarioId)}/simulate`, {
@@ -2224,6 +2463,12 @@ async function refreshScenarioPreservingInput() {
 
 function resetSlots() {
   state.providedSlots = {};
+  state.analysis = null;
+  state.caseRecord = null;
+  state.caseTimeline = null;
+  state.processingRuntime = null;
+  state.processingRuntimeError = '';
+  stopCasePolling();
   if (state.workflowStarted) {
     simulateScenario();
   } else {
@@ -2348,6 +2593,9 @@ function buildScenarioDebugActions(payload) {
       completion_policy: launch.completion_policy,
       source_profile_id: launch.profile_id,
       source_step_id: launch.step_id,
+      source_slot_schema_id: launch.slot_schema_id,
+      source_target_slot_id: launch.target_slot_id,
+      source_output_slots_order: launch.output_slots_order,
       debug_launch_id: launch.launch_id,
     });
     return {
@@ -2647,23 +2895,32 @@ function renderRagTrace() {
 
 function renderToolTrace() {
   const trace = state.analysis.tool_trace || [];
+  const panels = [
+    renderProcessingRuntimePanel(state.processingRuntime),
+  ].filter(Boolean);
+  if (state.scenarioSimulation) {
+    panels.push(renderDryRunTracePanel(state.scenarioSimulation));
+  }
   if (!trace.length) {
-    elements.traceView.innerHTML = '<div class="empty">Нет вызовов инструментов</div>';
+    elements.traceView.innerHTML = panels.length
+      ? panels.join('')
+      : '<div class="empty">Нет вызовов инструментов</div>';
     return;
   }
-  elements.traceView.innerHTML = trace
-    .map(
-      (item) => `
-        <div class="trace-item">
-          <div class="trace-title">${escapeHtml(item.tool_name)} ${badge(item.status)}</div>
-          <div class="trace-meta">${escapeHtml(item.endpoint_id)} / ${escapeHtml(item.operation_id)}</div>
-          <div class="trace-meta">Политика: ${escapeHtml(item.policy_rule_id)} / попыток: ${escapeHtml(
-            item.attempts,
-          )} / длительность: ${escapeHtml(item.duration_ms)} мс</div>
-        </div>
-      `,
-    )
-    .join('');
+  panels.splice(1, 0, ...trace.map(
+    (item) => `
+      <div class="trace-item">
+        <div class="trace-title">${escapeHtml(item.tool_name)} ${badge(item.status)}</div>
+        <div class="trace-meta">${escapeHtml(item.endpoint_id)} / ${escapeHtml(item.operation_id)}</div>
+        <div class="trace-meta">Политика: ${escapeHtml(item.policy_rule_id)} / режим: ${escapeHtml(
+          visibleLabels[item.execution_mode] || item.execution_mode || 'н/д',
+        )} / попыток: ${escapeHtml(
+          item.attempts,
+        )} / длительность: ${escapeHtml(item.duration_ms)} мс</div>
+      </div>
+    `,
+  ));
+  elements.traceView.innerHTML = panels.join('');
 }
 
 function buildCopyText() {
@@ -2715,6 +2972,8 @@ async function analyzeTicket() {
   state.feedback = null;
   state.caseRecord = null;
   state.caseTimeline = null;
+  state.processingRuntime = null;
+  state.processingRuntimeError = '';
   stopCasePolling();
   renderAnalysis();
   if (!state.scenarioDetail || state.scenarioDetail.scenario?.scenario_id !== state.scenarioId) {
@@ -2749,6 +3008,8 @@ async function analyzeTicket() {
     state.feedback = null;
     state.caseRecord = null;
     state.caseTimeline = null;
+    state.processingRuntime = null;
+    state.processingRuntimeError = '';
     stopCasePolling();
     state.ticketInput = payload;
     state.analysis = {
@@ -2805,25 +3066,45 @@ async function refreshCase() {
   if (!caseId) {
     state.caseRecord = null;
     state.caseTimeline = null;
+    state.processingRuntime = null;
+    state.processingRuntimeError = '';
     renderCase();
     return;
   }
   try {
-    const [caseRecord, caseTimeline] = await Promise.all([
+    const [caseRecord, caseTimeline, processingRuntime] = await Promise.all([
       api(`/cases/${encodeURIComponent(caseId)}`),
       api(`/cases/${encodeURIComponent(caseId)}/timeline`),
+      api(`${scenarioApiBase}/processing/cases/${encodeURIComponent(caseId)}`)
+        .catch((error) => ({ error: error.message })),
     ]);
     state.caseRecord = caseRecord;
     state.caseTimeline = caseTimeline;
+    if (processingRuntime?.error) {
+      state.processingRuntime = null;
+      state.processingRuntimeError = processingRuntime.error;
+    } else {
+      state.processingRuntime = processingRuntime;
+      state.processingRuntimeError = '';
+    }
   } catch (error) {
     state.caseRecord = null;
     state.caseTimeline = null;
+    state.processingRuntime = null;
+    state.processingRuntimeError = '';
     elements.caseStatus.textContent = `Ошибка кейса: ${error.message}`;
     return;
   }
+  renderScenarioSummary();
+  renderQuestion();
+  renderSlotAnswers();
+  renderSteps();
   renderCase();
   renderResolutionProfiles();
   renderTrace();
+  if (isProcessingRuntimeTerminal()) {
+    stopCasePolling();
+  }
 }
 
 function startCasePolling() {
@@ -3293,6 +3574,7 @@ function renderCaseCentricTrace(trace) {
   const events = trace.events || [];
   const steps = trace.steps || [];
   const hasFiveStepTrace = trace.scenario_detail && trace.simulation_snapshot;
+  const processingRuntimePanel = renderProcessingRuntimePanel(trace.processing_runtime || null);
   if (!events.length && !steps.length && !hasFiveStepTrace) {
     elements.debugCaseTraceView.innerHTML = '<div class="empty">Нет данных трассы</div>';
     return;
@@ -3307,9 +3589,11 @@ function renderCaseCentricTrace(trace) {
           || 'н/д',
         providedSlots: trace.debug_item?.text_slots || {},
         runtimeWaits: trace.waits || [],
+        processingRuntime: trace.processing_runtime || null,
       })
     : `
       <div class="hint">Для этого обращения нет сохраненного снимка сценария, показана fallback-трасса.</div>
+      ${processingRuntimePanel}
       <div class="case-trace-steps">
         ${steps.map(renderCaseTraceStep).join('')}
       </div>
@@ -3577,6 +3861,8 @@ elements.scenarioSelect.addEventListener('change', (event) => {
   state.feedback = null;
   state.caseRecord = null;
   state.caseTimeline = null;
+  state.processingRuntime = null;
+  state.processingRuntimeError = '';
   stopCasePolling();
   renderScenario();
   renderAnalysis();
@@ -3587,6 +3873,12 @@ elements.ticketText.addEventListener('input', () => {
   state.scenarioSimulation = null;
   state.analysis = null;
   state.approvalResults = {};
+  state.caseRecord = null;
+  state.caseTimeline = null;
+  state.processingRuntime = null;
+  state.processingRuntimeError = '';
+  stopCasePolling();
+  renderAnalysis();
   syncAnalyzeButton();
 });
 elements.debugChannelSelect?.addEventListener('change', async (event) => {

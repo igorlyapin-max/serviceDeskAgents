@@ -327,8 +327,9 @@ app = FastAPI(title="ServiceDesk AI Orchestrator", version="0.1.0")
 workflow = TicketWorkflow()
 config_store = ConfigStore(workflow.contracts)
 workflow.attach_config_store(config_store)
-processing_store = ProcessingStore(workflow.case_store)
+processing_store = ProcessingStore(workflow.case_store, config_store=config_store)
 workflow.attach_processing_store(processing_store)
+processing_store.attach_workflow(workflow)
 debug_runtime = DebugRuntime(workflow, config_store, processing_store)
 workflow.capture_recorder = debug_runtime
 workflow.integration_dispatcher.capture_recorder = debug_runtime
@@ -1188,6 +1189,24 @@ def debug_simulate_scenario(
         return result
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
+
+
+@app.get("/debug/processing/cases/{case_id}")
+def debug_processing_case_summary(
+    case_id: str,
+    context: SecurityContext = Depends(
+        permission_dependency(
+            "cases.operate",
+            action="debug.processing.case.read",
+            resource_type="processing_case",
+        )
+    ),
+) -> dict[str, Any]:
+    _ = context
+    try:
+        return processing_store.case_runtime_summary(case_id)
+    except (ProcessingConflict, ProcessingNotFound, CaseNotFound, ValueError) as error:
+        raise processing_error_response(error) from error
 
 
 @app.get("/debug/simulations/profiles")
@@ -3248,6 +3267,7 @@ def admin_config_assistant_attribute_resolution_step_compile(
             react_call=request.react_call,
             step_name=request.step_name,
             previous_steps=request.previous_steps,
+            integration_endpoints=config_store.active_payload("integration_endpoints").get("endpoints", []),
         )
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
@@ -3291,6 +3311,24 @@ def admin_config_active(
     )
     try:
         return config_store.active_config(domain)
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+
+
+@app.get("/admin/config/resolution-profiles/usage")
+def admin_config_resolution_profile_usage(
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    require_config_permission(
+        context,
+        http_request,
+        domain="attribute_resolution_profiles",
+        mode="read",
+        action="admin.config.resolution_profiles.usage",
+    )
+    try:
+        return config_store.resolution_profile_usage()
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
 

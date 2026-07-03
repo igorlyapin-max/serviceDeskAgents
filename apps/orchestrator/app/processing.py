@@ -200,13 +200,19 @@ class ProcessingStore:
         self,
         case_store: CaseStore,
         db_path: str | Path | None = None,
+        config_store: Any | None = None,
     ):
         self.case_store = case_store
+        self.config_store = config_store
         configured_path = db_path or os.getenv("ORCHESTRATOR_STATE_DB")
         self.db_path = Path(configured_path) if configured_path else DEFAULT_STATE_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092")
+        self.workflow: Any | None = None
         self._ensure_schema()
+
+    def attach_workflow(self, workflow: Any) -> None:
+        self.workflow = workflow
 
     def record_analysis(
         self,
@@ -518,6 +524,17 @@ class ProcessingStore:
             "result_transport": result_transport,
             "result_topic": event_topic,
         }
+        invocation_extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        for key in (
+            "source_profile_id",
+            "source_step_id",
+            "source_slot_schema_id",
+            "source_target_slot_id",
+            "source_output_slots_order",
+        ):
+            value = invocation_extensions.get(key)
+            if value not in (None, "", {}, []):
+                wait_origin[key] = copy.deepcopy(value)
         if contract_snapshot:
             wait_origin["contract_snapshot"] = copy.deepcopy(contract_snapshot)
         wait = self.open_external_wait(
@@ -1049,6 +1066,100 @@ class ProcessingStore:
             "tasks": self.list_tasks(case_id=case_id, limit=100)["tasks"],
             "waits": self.list_waits(case_id=case_id, limit=100)["waits"],
             "outbox": self.list_outbox(case_id=case_id, limit=50)["messages"],
+        }
+
+    def case_runtime_summary(self, case_id: str) -> dict[str, Any]:
+        self.case_store.require(case_id)
+        runs = self.list_runs(case_id=case_id, limit=10)["runs"]
+        tasks = self.list_tasks(case_id=case_id, limit=20)["tasks"]
+        waits = self.list_waits(case_id=case_id, limit=20)["waits"]
+        latest_run = runs[0] if runs else None
+        latest_wait = waits[0] if waits else None
+        latest_task = tasks[0] if tasks else None
+        return {
+            "schema_version": "1.0",
+            "case_id": case_id,
+            "status": self._runtime_summary_status(latest_run, latest_wait, latest_task),
+            "latest_run": self._runtime_run_summary(latest_run),
+            "latest_wait": self._runtime_wait_summary(latest_wait),
+            "latest_task": self._runtime_task_summary(latest_task),
+            "runs": [self._runtime_run_summary(run) for run in runs],
+            "waits": [self._runtime_wait_summary(wait) for wait in waits],
+            "tasks": [self._runtime_task_summary(task) for task in tasks],
+        }
+
+    @classmethod
+    def _runtime_summary_status(
+        cls,
+        run: dict[str, Any] | None,
+        wait: dict[str, Any] | None,
+        task: dict[str, Any] | None,
+    ) -> str:
+        if run and run.get("status") in {"completed", "failed", "cancelled", "timed_out"}:
+            return str(run.get("status"))
+        if wait and wait.get("status") in ACTIVE_WAIT_STATUSES:
+            return str(wait.get("status") or "waiting")
+        if task and task.get("status"):
+            return str(task["status"])
+        return str(run.get("status") if run else "missing")
+
+    @classmethod
+    def _runtime_run_summary(cls, run: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not run:
+            return None
+        extensions = run.get("extensions") if isinstance(run.get("extensions"), dict) else {}
+        return {
+            "run_id": run.get("run_id"),
+            "case_id": run.get("case_id"),
+            "ticket_id": run.get("ticket_id"),
+            "status": run.get("status"),
+            "current_step": run.get("current_step"),
+            "started_at": run.get("started_at"),
+            "updated_at": run.get("updated_at"),
+            "slot_values": copy.deepcopy(run.get("slot_values") or {}),
+            "slot_materialization": copy.deepcopy(extensions.get("slot_materialization") or []),
+            "slot_continuation": copy.deepcopy(extensions.get("slot_continuation") or []),
+        }
+
+    @classmethod
+    def _runtime_wait_summary(cls, wait: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not wait:
+            return None
+        origin = wait.get("origin") if isinstance(wait.get("origin"), dict) else {}
+        return {
+            "wait_id": wait.get("wait_id"),
+            "run_id": wait.get("run_id"),
+            "case_id": wait.get("case_id"),
+            "status": wait.get("status"),
+            "wait_type": wait.get("wait_type"),
+            "expected_event_type": wait.get("expected_event_type"),
+            "correlation_id": wait.get("correlation_id"),
+            "source": wait.get("source"),
+            "created_at": wait.get("created_at"),
+            "updated_at": wait.get("updated_at"),
+            "completed_at": wait.get("completed_at"),
+            "source_profile_id": origin.get("source_profile_id"),
+            "source_step_id": origin.get("source_step_id"),
+            "source_slot_schema_id": origin.get("source_slot_schema_id"),
+            "source_output_slots_order": copy.deepcopy(origin.get("source_output_slots_order") or []),
+        }
+
+    @classmethod
+    def _runtime_task_summary(cls, task: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not task:
+            return None
+        return {
+            "task_id": task.get("task_id"),
+            "run_id": task.get("run_id"),
+            "case_id": task.get("case_id"),
+            "task_type": task.get("task_type"),
+            "status": task.get("status"),
+            "worker_id": task.get("worker_id"),
+            "created_at": task.get("created_at"),
+            "updated_at": task.get("updated_at"),
+            "completed_at": task.get("completed_at"),
+            "attempt": task.get("attempt"),
+            "stale": task.get("stale", False),
         }
 
     def async_delivery_for_case(self, case_id: str) -> dict[str, Any]:
@@ -2240,6 +2351,501 @@ class ProcessingStore:
         )
         return task
 
+    @staticmethod
+    def _value_at_path(value: Any, path: str | None) -> Any:
+        if not path:
+            return value
+        current = value
+        for part in str(path).split("."):
+            if current is None:
+                return None
+            if isinstance(current, list):
+                if not part.isdigit():
+                    return None
+                index = int(part)
+                current = current[index] if index < len(current) else None
+            elif isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
+
+    @staticmethod
+    def _external_event_source_hint_path(source_hint: Any) -> str:
+        hint = str(source_hint or "").strip()
+        if hint.startswith("${") and hint.endswith("}"):
+            hint = hint[2:-1]
+        if ".output." in hint:
+            hint = hint.split(".output.", 1)[1]
+        return hint.strip(".")
+
+    @classmethod
+    def _materialized_slot_values_from_external_event(
+        cls,
+        wait: dict[str, Any],
+        external_event: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        origin = wait.get("origin") if isinstance(wait.get("origin"), dict) else {}
+        output_slots_order = origin.get("source_output_slots_order") or origin.get("output_slots_order") or []
+        if not isinstance(output_slots_order, list):
+            return {}
+        result_payload = external_event.get("result") if isinstance(external_event.get("result"), dict) else {}
+        materialized: dict[str, dict[str, Any]] = {}
+        for rule in output_slots_order:
+            if not isinstance(rule, dict):
+                continue
+            slot_id = str(rule.get("slot_id") or "").strip()
+            if not slot_id:
+                continue
+            field_path = cls._external_event_source_hint_path(rule.get("source_hint") or slot_id)
+            value = cls._value_at_path(result_payload, field_path)
+            if value in (None, ""):
+                continue
+            materialized[slot_id] = {
+                "status": "filled_by_external_event",
+                "value": value,
+                "fill_method": "resolution_profile",
+                "source": "external_event",
+                "resolution_profile_id": origin.get("source_profile_id"),
+                "source_step_id": origin.get("source_step_id"),
+                "source_hint": rule.get("source_hint"),
+                "event_id": external_event.get("event_id"),
+                "event_type": external_event.get("event_type"),
+                "reason": "Слот заполнен из terminal ExternalEvent результата ReAct-вызова.",
+            }
+        return materialized
+
+    @staticmethod
+    def _slot_raw_value(slot_value: Any) -> Any:
+        if isinstance(slot_value, dict):
+            return slot_value.get("value")
+        return slot_value
+
+    @staticmethod
+    def _slot_value_is_filled(slot_value: Any) -> bool:
+        raw_value = ProcessingStore._slot_raw_value(slot_value)
+        if raw_value in (None, ""):
+            return False
+        if not isinstance(slot_value, dict):
+            return True
+        return slot_value.get("status") not in {
+            "candidate_below_threshold",
+            "model_unavailable",
+            "waiting_for_dependencies",
+            "blocked_by_dependency_cycle",
+            "extraction_pending",
+            "resolution_pending",
+            "missing",
+            "optional",
+        }
+
+    @staticmethod
+    def _case_input_text(case: dict[str, Any]) -> str:
+        ticket_input = case.get("ticket_input") if isinstance(case.get("ticket_input"), dict) else {}
+        values: list[str] = []
+        for key in ("subject", "description", "body", "text"):
+            value = ticket_input.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        return "\n".join(dict.fromkeys(values))
+
+    def _provided_slots_from_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        provided: dict[str, Any] = {}
+        slot_values = run.get("slot_values") if isinstance(run.get("slot_values"), dict) else {}
+        for slot_id, slot_value in slot_values.items():
+            if not self._slot_value_is_filled(slot_value):
+                continue
+            raw_value = self._slot_raw_value(slot_value)
+            if raw_value not in (None, ""):
+                provided[str(slot_id)] = raw_value
+        return provided
+
+    def _slot_schema_id_for_external_wait(
+        self,
+        wait: dict[str, Any],
+        materialized_slot_values: dict[str, dict[str, Any]],
+    ) -> str | None:
+        origin = wait.get("origin") if isinstance(wait.get("origin"), dict) else {}
+        slot_schema_id = origin.get("source_slot_schema_id") or origin.get("slot_schema_id")
+        if slot_schema_id:
+            return str(slot_schema_id)
+        if not self.config_store:
+            return None
+        profile_ids = {
+            str(value)
+            for value in (
+                origin.get("source_profile_id"),
+                *(
+                    slot_value.get("resolution_profile_id")
+                    for slot_value in materialized_slot_values.values()
+                    if isinstance(slot_value, dict)
+                ),
+            )
+            if value
+        }
+        if not profile_ids:
+            return None
+        try:
+            profiles = self.config_store.active_payload("attribute_resolution_profiles").get("profiles", [])
+        except Exception:
+            return None
+        for profile in profiles:
+            if profile.get("profile_id") in profile_ids and profile.get("slot_schema_id"):
+                return str(profile["slot_schema_id"])
+        return None
+
+    def _scenario_id_for_slot_schema(self, slot_schema_id: str) -> str | None:
+        if not self.config_store:
+            return None
+        try:
+            scenarios = self.config_store.active_payload("service_scenarios").get("scenarios", [])
+        except Exception:
+            return None
+        for scenario in scenarios:
+            if scenario.get("slot_schema_id") == slot_schema_id and scenario.get("status", "active") != "disabled":
+                return str(scenario["scenario_id"])
+        return None
+
+    def _continue_slot_filling_after_external_event(
+        self,
+        *,
+        run: dict[str, Any],
+        wait: dict[str, Any],
+        materialized_slot_values: dict[str, dict[str, Any]],
+        processed_at: str,
+        task_id: str,
+        event_id: str | None,
+    ) -> dict[str, Any]:
+        if not materialized_slot_values:
+            return {"status": "skipped", "reason": "ExternalEvent не заполнил новые слоты."}
+        if not self.config_store:
+            return {"status": "skipped", "reason": "ConfigStore не подключен к ProcessingStore."}
+        slot_schema_id = self._slot_schema_id_for_external_wait(wait, materialized_slot_values)
+        if not slot_schema_id:
+            return {"status": "skipped", "reason": "Не удалось определить slot_schema_id для ExternalEvent."}
+        scenario_id = self._scenario_id_for_slot_schema(slot_schema_id)
+        if not scenario_id:
+            return {
+                "status": "skipped",
+                "slot_schema_id": slot_schema_id,
+                "reason": "Не удалось найти активный сценарий для slot_schema_id.",
+            }
+
+        case = self.case_store.require(run["case_id"])
+        provided_slots = self._provided_slots_from_run(run)
+        provided_context = {
+            **provided_slots,
+            "case": copy.deepcopy(case),
+            "case_id": case.get("case_id"),
+            "ticket_id": case.get("ticket_id"),
+        }
+        simulation = self.config_store.simulate_scenario(
+            scenario_id,
+            text=self._case_input_text(case),
+            provided_slots=provided_context,
+            run_mode="llm",
+            allow_llm=True,
+            allow_readonly_integrations=False,
+            allow_mock_integrations=False,
+            allow_action_with_approval=True,
+            bypass_policy_gates=False,
+        )
+        run_slot_values = run.setdefault("slot_values", {})
+        filled_slot_values: dict[str, Any] = {}
+        for slot_id, slot_value in (simulation.get("slot_values") or {}).items():
+            if not self._slot_value_is_filled(slot_value):
+                continue
+            if self._slot_value_is_filled(run_slot_values.get(slot_id)):
+                continue
+            run_slot_values[slot_id] = copy.deepcopy(slot_value)
+            filled_slot_values[slot_id] = copy.deepcopy(slot_value)
+
+        slot_statuses = {
+            slot_id: {
+                "status": slot_value.get("status") if isinstance(slot_value, dict) else "filled",
+                "filled": self._slot_value_is_filled(slot_value),
+            }
+            for slot_id, slot_value in (simulation.get("slot_values") or {}).items()
+        }
+        tool_dispatch = self._dispatch_ready_tool_launches_after_external_event(
+            run=run,
+            simulation=simulation,
+            processed_at=processed_at,
+            task_id=task_id,
+            event_id=event_id,
+        )
+        return {
+            "status": "completed",
+            "processed_at": processed_at,
+            "task_id": task_id,
+            "event_id": event_id,
+            "scenario_id": scenario_id,
+            "slot_schema_id": slot_schema_id,
+            "provided_slot_ids": sorted(provided_slots),
+            "filled_slot_ids": sorted(filled_slot_values),
+            "filled_slot_values": filled_slot_values,
+            "missing_slots": copy.deepcopy(simulation.get("missing_slots") or []),
+            "final_decision": simulation.get("final_decision"),
+            "slot_statuses": slot_statuses,
+            "ready_tool_launches": copy.deepcopy(simulation.get("ready_tool_launches") or []),
+            "blocked_tool_launches": copy.deepcopy(simulation.get("blocked_tool_launches") or []),
+            "tool_dispatch": tool_dispatch,
+            "execution_trace": copy.deepcopy(simulation.get("execution_trace") or []),
+        }
+
+    @staticmethod
+    def _tool_launch_key_from_parts(
+        *,
+        profile_id: Any = None,
+        step_id: Any = None,
+        tool_name: Any = None,
+        endpoint_id: Any = None,
+        operation_id: Any = None,
+    ) -> str:
+        return "|".join(
+            str(value or "")
+            for value in (profile_id, step_id, tool_name, endpoint_id, operation_id)
+        )
+
+    @classmethod
+    def _tool_launch_key_from_launch(cls, launch: dict[str, Any]) -> str:
+        return cls._tool_launch_key_from_parts(
+            profile_id=launch.get("profile_id"),
+            step_id=launch.get("step_id"),
+            tool_name=launch.get("tool_name"),
+            endpoint_id=launch.get("endpoint_id"),
+            operation_id=launch.get("operation_id"),
+        )
+
+    @classmethod
+    def _tool_launch_key_from_wait(cls, wait: dict[str, Any]) -> str | None:
+        origin = wait.get("origin") if isinstance(wait.get("origin"), dict) else {}
+        tool_name = origin.get("react_call")
+        endpoint_id = origin.get("endpoint_id")
+        operation_id = origin.get("operation_id")
+        if not (tool_name or endpoint_id or operation_id):
+            return None
+        return cls._tool_launch_key_from_parts(
+            profile_id=origin.get("source_profile_id"),
+            step_id=origin.get("source_step_id"),
+            tool_name=tool_name,
+            endpoint_id=endpoint_id,
+            operation_id=operation_id,
+        )
+
+    @staticmethod
+    def _action_for_tool_launch(launch: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in action.items()
+            if key
+            in {
+                "tool_name",
+                "action_id",
+                "action_type",
+                "parameters",
+                "reason",
+                "risk_level",
+                "expected_effect",
+                "requires_state_change",
+                "risk_notes",
+                "extensions",
+            }
+        }
+        result.setdefault("tool_name", launch.get("tool_name"))
+        result.setdefault("action_id", f"{launch.get('launch_id')}.action")
+        result.setdefault("action_type", launch.get("action_type") or "read_only")
+        result.setdefault("parameters", copy.deepcopy(launch.get("parameters") or {}))
+        result.setdefault("reason", f"Продолжение сценария после ExternalEvent: {launch.get('launch_id')}.")
+        result.setdefault("risk_level", "medium" if result["action_type"] == "action" else "low")
+        result.setdefault("expected_effect", "Будет выполнен следующий готовый шаг профиля разрешения.")
+        result.setdefault("requires_state_change", result["action_type"] == "action")
+        extensions = result.setdefault("extensions", {})
+        extensions.setdefault("endpoint_id", launch.get("endpoint_id"))
+        extensions.setdefault("operation_id", launch.get("operation_id"))
+        extensions.setdefault("completion_policy", copy.deepcopy(launch.get("completion_policy") or {"mode": "sync"}))
+        extensions.setdefault("source_profile_id", launch.get("profile_id"))
+        extensions.setdefault("source_step_id", launch.get("step_id"))
+        extensions.setdefault("source_slot_schema_id", launch.get("slot_schema_id"))
+        if launch.get("target_slot_id"):
+            extensions.setdefault("source_target_slot_id", launch.get("target_slot_id"))
+        if launch.get("output_slots_order"):
+            extensions.setdefault("source_output_slots_order", copy.deepcopy(launch.get("output_slots_order")))
+        return {
+            key: value
+            for key, value in result.items()
+            if value not in (None, "", [], {})
+        }
+
+    @staticmethod
+    def _continuation_policy_for_action(action: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "action_id": action["action_id"],
+            "tool_name": action["tool_name"],
+            "execution_mode": "auto_execute",
+            "allowed": True,
+            "approval_required": False,
+            "policy_rule_id": "external_event_resume.configured_profile",
+            "reason": "Продолжение сценария запускает интеграцию, явно настроенную администратором в профиле разрешения.",
+            "risk_level": action.get("risk_level", "medium"),
+            "extensions": {
+                "external_event_resume": True,
+            },
+        }
+
+    @staticmethod
+    def _unresolved_action_parameters(action: dict[str, Any]) -> list[str]:
+        unresolved_prefixes = ("slot:", "case:", "step:", "react:", "output:")
+        unresolved: list[str] = []
+        for parameter, value in (action.get("parameters") or {}).items():
+            if isinstance(value, str) and value.startswith(unresolved_prefixes):
+                unresolved.append(str(parameter))
+        return unresolved
+
+    def _existing_tool_launch_keys(self, run: dict[str, Any]) -> set[str]:
+        keys: set[str] = set()
+        for wait in self.list_waits(case_id=run["case_id"], limit=500)["waits"]:
+            key = self._tool_launch_key_from_wait(wait)
+            if key:
+                keys.add(key)
+        for dispatch in (run.get("extensions") or {}).get("continuation_tool_dispatches") or []:
+            if isinstance(dispatch, dict) and dispatch.get("dispatch_key"):
+                keys.add(str(dispatch["dispatch_key"]))
+        return keys
+
+    def _mark_continuation_dispatch_started(
+        self,
+        run: dict[str, Any],
+        *,
+        launch: dict[str, Any],
+        dispatch_key: str,
+        processed_at: str,
+        task_id: str,
+        event_id: str | None,
+    ) -> dict[str, Any]:
+        marker = {
+            "dispatch_key": dispatch_key,
+            "status": "started",
+            "started_at": processed_at,
+            "task_id": task_id,
+            "event_id": event_id,
+            "launch_id": launch.get("launch_id"),
+            "profile_id": launch.get("profile_id"),
+            "step_id": launch.get("step_id"),
+            "tool_name": launch.get("tool_name"),
+            "endpoint_id": launch.get("endpoint_id"),
+            "operation_id": launch.get("operation_id"),
+        }
+        run.setdefault("extensions", {}).setdefault("continuation_tool_dispatches", []).append(marker)
+        self._save_run(run)
+        return marker
+
+    def _dispatch_ready_tool_launches_after_external_event(
+        self,
+        *,
+        run: dict[str, Any],
+        simulation: dict[str, Any],
+        processed_at: str,
+        task_id: str,
+        event_id: str | None,
+    ) -> dict[str, Any]:
+        workflow = getattr(self, "workflow", None)
+        ready_launches = [
+            launch
+            for launch in simulation.get("ready_tool_launches") or []
+            if launch.get("status") == "ready"
+        ]
+        if not ready_launches:
+            return {"status": "skipped", "reason": "Нет готовых ReAct-шагов после ExternalEvent."}
+        if workflow is None:
+            return {"status": "skipped", "reason": "TicketWorkflow не подключен к ProcessingStore."}
+
+        actions_by_id = {
+            action.get("action_id"): action
+            for action in simulation.get("next_allowed_actions") or []
+            if isinstance(action, dict)
+        }
+        existing_keys = self._existing_tool_launch_keys(run)
+        dispatched: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+
+        for launch in ready_launches:
+            dispatch_key = self._tool_launch_key_from_launch(launch)
+            if dispatch_key in existing_keys:
+                skipped.append(
+                    {
+                        "launch_id": launch.get("launch_id"),
+                        "dispatch_key": dispatch_key,
+                        "reason": "Этот шаг уже имеет wait/dispatch marker в текущем case.",
+                    }
+                )
+                continue
+            action_id = f"{launch.get('launch_id')}.action"
+            action = self._action_for_tool_launch(launch, actions_by_id.get(action_id) or {})
+            unresolved = self._unresolved_action_parameters(action)
+            if unresolved:
+                failed.append(
+                    {
+                        "launch_id": launch.get("launch_id"),
+                        "dispatch_key": dispatch_key,
+                        "status": "blocked_by_configuration",
+                        "unresolved_parameters": unresolved,
+                    }
+                )
+                continue
+            marker = self._mark_continuation_dispatch_started(
+                run,
+                launch=launch,
+                dispatch_key=dispatch_key,
+                processed_at=processed_at,
+                task_id=task_id,
+                event_id=event_id,
+            )
+            try:
+                dispatch_result = workflow.dispatch_tool(
+                    action,
+                    self._continuation_policy_for_action(action),
+                    case_id=run["case_id"],
+                    ticket_id=run.get("ticket_id"),
+                    approved_by_operator=True,
+                    operator_id="external_event_resume",
+                )
+                tool_result = dispatch_result.get("tool_result") or {}
+                async_wait = (tool_result.get("extensions") or {}).get("async_wait")
+                marker["status"] = "queued" if async_wait else tool_result.get("status", "completed")
+                marker["completed_at"] = utc_now()
+                marker["invocation_id"] = tool_result.get("invocation_id")
+                marker["tool_result"] = copy.deepcopy(tool_result)
+                if async_wait:
+                    marker["wait_id"] = async_wait.get("wait_id")
+                    marker["correlation_id"] = async_wait.get("correlation_id")
+                dispatched.append(copy.deepcopy(marker))
+                existing_keys.add(dispatch_key)
+            except Exception as exc:  # noqa: BLE001 - resume must record failed continuation precisely.
+                marker["status"] = "failed"
+                marker["completed_at"] = utc_now()
+                marker["error"] = {
+                    "type": exc.__class__.__name__,
+                    "message": str(exc),
+                }
+                failed.append(copy.deepcopy(marker))
+
+        status = "completed"
+        if failed and not dispatched:
+            status = "failed"
+        elif failed:
+            status = "partial"
+        elif dispatched:
+            status = "dispatched"
+        return {
+            "status": status,
+            "dispatched": dispatched,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
     def process_external_event_resume_task(
         self,
         task: dict[str, Any],
@@ -2294,10 +2900,72 @@ class ProcessingStore:
 
         now = utc_now()
         run = self.require_run(task["run_id"])
-        run["status"] = EXTERNAL_EVENT_WAIT_STATUS.get(str(event_status), "failed")
-        run["current_step"] = "external_event_processed"
+        materialized_slot_values = (
+            self._materialized_slot_values_from_external_event(wait, external_event)
+            if event_status == "success"
+            else {}
+        )
+        if materialized_slot_values:
+            run_slot_values = run.setdefault("slot_values", {})
+            run_slot_values.update(materialized_slot_values)
+            run.setdefault("extensions", {}).setdefault("slot_materialization", []).append(
+                {
+                    "processed_at": now,
+                    "task_id": task["task_id"],
+                    "wait_id": wait_id,
+                    "event_id": external_event.get("event_id") or event_id,
+                    "slot_ids": sorted(materialized_slot_values),
+                }
+            )
+        slot_continuation: dict[str, Any] | None = None
+        if event_status == "success":
+            try:
+                slot_continuation = self._continue_slot_filling_after_external_event(
+                    run=run,
+                    wait=wait,
+                    materialized_slot_values=materialized_slot_values,
+                    processed_at=now,
+                    task_id=task["task_id"],
+                    event_id=external_event.get("event_id") or event_id,
+                )
+            except Exception as exc:
+                slot_continuation = {
+                    "status": "error",
+                    "processed_at": now,
+                    "task_id": task["task_id"],
+                    "event_id": external_event.get("event_id") or event_id,
+                    "error": {
+                        "type": exc.__class__.__name__,
+                        "message": str(exc),
+                    },
+                }
+            if slot_continuation:
+                run.setdefault("extensions", {}).setdefault("slot_continuation", []).append(
+                    copy.deepcopy(slot_continuation)
+                )
+        tool_dispatch = (slot_continuation or {}).get("tool_dispatch") if isinstance(slot_continuation, dict) else {}
+        dispatched_items = tool_dispatch.get("dispatched") if isinstance(tool_dispatch, dict) else []
+        opened_followup_wait = any(
+            isinstance(item, dict) and item.get("wait_id")
+            for item in dispatched_items or []
+        )
+        dispatch_failed = (
+            isinstance(tool_dispatch, dict)
+            and tool_dispatch.get("status") == "failed"
+        )
+        if opened_followup_wait:
+            run["status"] = "waiting"
+            run["current_step"] = "external_event_wait"
+            run["completed_at"] = None
+        elif dispatch_failed:
+            run["status"] = "failed"
+            run["current_step"] = "external_event_resume_failed"
+            run["completed_at"] = now
+        else:
+            run["status"] = EXTERNAL_EVENT_WAIT_STATUS.get(str(event_status), "failed")
+            run["current_step"] = "external_event_processed"
+            run["completed_at"] = now
         run["updated_at"] = now
-        run["completed_at"] = now
         run.setdefault("resume_results", []).append(
             {
                 "processed_at": now,
@@ -2308,6 +2976,9 @@ class ProcessingStore:
                 "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
                 "event_status": event_status,
                 "result": self._compact_external_event_value(external_event.get("result")),
+                "filled_slot_values": copy.deepcopy(materialized_slot_values),
+                "slot_continuation": copy.deepcopy(slot_continuation),
+                "followup_wait_opened": opened_followup_wait,
                 "error": external_event.get("error"),
             }
         )
@@ -2326,6 +2997,8 @@ class ProcessingStore:
                 "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
                 "event_status": event_status,
                 "result": self._compact_external_event_value(external_event.get("result")),
+                "filled_slot_values": copy.deepcopy(materialized_slot_values),
+                "slot_continuation": copy.deepcopy(slot_continuation),
                 "error": external_event.get("error"),
             },
         )
@@ -2338,6 +3011,8 @@ class ProcessingStore:
             "event_id": external_event.get("event_id") or event_id,
             "event_type": external_event.get("event_type") or selected_receipt.get("event_type"),
             "event_status": event_status,
+            "filled_slot_values": copy.deepcopy(materialized_slot_values),
+            "slot_continuation": copy.deepcopy(slot_continuation),
         }
         self.complete_task(task["task_id"], worker_id=worker_id, result=result)
         return result

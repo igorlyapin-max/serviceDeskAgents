@@ -207,7 +207,7 @@ The result contract is defined on the endpoint operation through `async_event_co
 
 All sensitive administrative actions require a permission check and write an audit event. Secrets must be stored in environment variables or an external secret store; configuration stores only secret references.
 
-Before ticket text is sent to an LLM, minimal redaction is applied: email addresses, phone numbers, bearer/API tokens and assignments such as `password=...`, `token=...`, `секрет=...`, `ключ=...` are replaced with technical markers. Dry-run traces show only the redaction fact and marker types, not the original values.
+Before ticket text is sent to an LLM, minimal redaction is applied only to secrets: bearer/API tokens and assignments such as `password=...`, `token=...`, `секрет=...`, `ключ=...` are replaced with technical markers. Email addresses, phone numbers and business ticket identifiers are not masked by this layer. Dry-run traces show only the redaction fact and marker types, not the original values.
 
 ## Language Rules
 

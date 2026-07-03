@@ -34,6 +34,14 @@
       "description": "Предложенное действие ожидает согласования оператора."
     },
     {
+      "id": "action_execution_requested",
+      "category": "action",
+      "terminal": false,
+      "can_advance": true,
+      "requires_operator_action": false,
+      "description": "Предложенное действие принято workflow и будет отправлено в настроенную интеграцию; execution policy сохраняется как диагностический trace."
+    },
+    {
       "id": "approval_rejected",
       "category": "handoff",
       "terminal": false,

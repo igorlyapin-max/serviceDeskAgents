@@ -21,24 +21,9 @@
     },
     {
       "when": {
-        "decision_type": "action_proposed",
-        "execution_mode": "operator_approval"
+        "decision_type": "action_proposed"
       },
-      "state_id": "pending_approval"
-    },
-    {
-      "when": {
-        "decision_type": "action_proposed",
-        "execution_mode": "auto_execute"
-      },
-      "state_id": "auto_execution_ready"
-    },
-    {
-      "when": {
-        "decision_type": "action_proposed",
-        "execution_mode": "blocked"
-      },
-      "state_id": "policy_blocked"
+      "state_id": "action_execution_requested"
     },
     {
       "when": {

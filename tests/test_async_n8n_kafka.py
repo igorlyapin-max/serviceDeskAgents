@@ -847,7 +847,7 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         self.assertEqual(run["status"], "waiting")
         self.assertEqual(wait["status"], "open")
 
-    def test_analyze_without_approval_does_not_create_external_wait_or_outbox(self) -> None:
+    def test_analyze_operator_approval_policy_still_dispatches_async_action(self) -> None:
         workflow = TicketWorkflow(
             contracts=self.contracts,
             case_store=self.case_store,
@@ -905,11 +905,14 @@ class AsyncN8nKafkaTest(unittest.TestCase):
         run = self.processing_store.latest_run(analysis["case_id"])
         waits = self.processing_store.list_waits(case_id=analysis["case_id"])["waits"]
         outbox = self.processing_store.list_outbox(case_id=analysis["case_id"])["messages"]
-        self.assertEqual(analysis["tool_results"][0]["status"], "pending_approval")
+        self.assertEqual(analysis["workflow_state"]["id"], "action_execution_requested")
+        self.assertEqual(analysis["execution_policy_results"][0]["execution_mode"], "operator_approval")
+        self.assertEqual(analysis["tool_results"][0]["status"], "success")
         self.assertEqual(run["status"], "waiting")
-        self.assertTrue(any(wait["wait_type"] == "operator_approval" for wait in waits))
-        self.assertFalse(any(wait["wait_type"] == "external_event_wait" for wait in waits))
-        self.assertFalse(any(message["event_type"] == "async_tool_invocation_requested" for message in outbox))
+        self.assertFalse(any(wait["wait_type"] == "operator_approval" for wait in waits))
+        self.assertTrue(any(wait["wait_type"] == "external_event_wait" for wait in waits))
+        self.assertTrue(any(message["event_type"] == "async_tool_invocation_requested" for message in outbox))
+        self.assertEqual(analysis["approval_requests"], [])
 
     def test_generated_runbook_action_has_contractual_n8n_launch(self) -> None:
         workflow = TicketWorkflow(

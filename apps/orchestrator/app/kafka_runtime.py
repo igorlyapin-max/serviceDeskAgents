@@ -1145,15 +1145,24 @@ def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingSt
     contracts = ContractRegistry()
     case_store = CaseStore(contracts)
     config_store = ConfigStore(contracts)
-    processing_store = ProcessingStore(case_store)
+    processing_store = ProcessingStore(case_store, config_store=config_store)
     for domain, attribute in (
         ("tools", "tool_catalog"),
         ("integration_endpoints", "integration_endpoint_catalog"),
         ("n8n_workflows", "n8n_workflow_catalog"),
     ):
         setattr(contracts, attribute, copy.deepcopy(config_store.active_payload(domain)))
+    from .workflow import TicketWorkflow
+
+    workflow = TicketWorkflow(
+        contracts=contracts,
+        case_store=case_store,
+        config_store=config_store,
+        processing_store=processing_store,
+    )
+    processing_store.attach_workflow(workflow)
     registry = ToolRegistry(contracts)
-    dispatcher = IntegrationDispatcher(contracts, registry)
+    dispatcher = workflow.integration_dispatcher or IntegrationDispatcher(contracts, registry)
     return contracts, config_store, processing_store, dispatcher
 
 

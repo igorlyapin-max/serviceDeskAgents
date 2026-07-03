@@ -190,6 +190,40 @@ def wait_for_email_by_ticket_openapi_tool() -> dict:
     return tool
 
 
+def wait_zabbix_problem_status_tool() -> dict:
+    return {
+        "tool_name": "n8n_wait_zabbix_problem_status",
+        "display_name": "Дождаться восстановления Zabbix problem",
+        "action_type": "read_only",
+        "parameters_schema": {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {
+                "problem_url": {"type": "string", "format": "uri"},
+                "problemUrl": {"type": "string", "format": "uri"},
+                "poll_interval_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
+                "pollIntervalMinutes": {"type": "integer", "minimum": 1, "maximum": 60},
+                "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 240},
+                "timeoutMinutes": {"type": "integer", "minimum": 1, "maximum": 240},
+                "request_id": {"type": "string"},
+            },
+            "allOf": [
+                {"anyOf": [{"required": ["problemUrl"]}, {"required": ["problem_url"]}]},
+                {"anyOf": [{"required": ["poll_interval_minutes"]}, {"required": ["pollIntervalMinutes"]}]},
+                {"anyOf": [{"required": ["timeout_minutes"]}, {"required": ["timeoutMinutes"]}]},
+            ],
+        },
+        "result_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "zabbix_status": {"type": "string"},
+                "message": {"type": "string"},
+            },
+        },
+    }
+
+
 def provider_mail_slot_payload() -> dict:
     return {
         "schema_version": "1.0",
@@ -339,6 +373,102 @@ def provider_mail_tool_payload() -> dict:
         ],
     }
     return {"schema_version": "1.0", "tools": [wait_tool, monitor_tool]}
+
+
+def provider_monitor_terminal_result_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["runbook_status", "message"],
+        "properties": {
+            "runbook_status": {"type": "string"},
+            "message": {"type": "string"},
+            "email_result": {
+                "type": ["object", "null"],
+                "properties": {
+                    "ticket_number": {"type": "string"},
+                    "body": {"type": ["string", "null"]},
+                    "subject": {"type": ["string", "null"]},
+                    "match_count": {"type": "integer"},
+                },
+                "additionalProperties": True,
+            },
+        },
+        "additionalProperties": True,
+    }
+
+
+def provider_monitor_endpoint_payload() -> dict:
+    payload = provider_mail_endpoint_payload()
+    operation = payload["endpoints"][0]["operations"]["monitor_provider_channel_repair"]
+    operation["request_schema"] = {
+        "type": "object",
+        "required": ["problemUrl", "service_request", "from", "replyTo"],
+        "properties": {
+            "problem_host": {"type": "string"},
+            "router_ref": {"type": "string"},
+            "problemUrl": {"type": "string"},
+            "service_request": {"type": "string"},
+            "from": {"type": "string"},
+            "replyTo": {"type": "string"},
+            "poll_interval_minutes": {"type": "integer", "default": 1},
+            "timeout_minutes": {"type": "integer", "default": 60},
+            "cc": {"type": "array", "items": {"type": "string"}},
+            "bcc": {"type": "array", "items": {"type": "string"}},
+            "request_id": {"type": "string"},
+            "template_id": {"type": "string"},
+        },
+        "anyOf": [
+            {"required": ["problem_host"]},
+            {"required": ["router_ref"]},
+        ],
+        "additionalProperties": True,
+    }
+    operation["async_event_contracts"] = {
+        "monitor_provider_channel_repair_completed": {
+            "display_name": "Результат мониторинга ремонта канала",
+            "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+            "result_schema": provider_monitor_terminal_result_schema(),
+            "contract_version": "1.0",
+            "contract_status": "valid",
+        },
+    }
+    operation["extensions"] = {
+        "result_delivery": {
+            "default_transport": "kafka_event",
+            "default_result_topic": "external.events",
+        },
+    }
+    return payload
+
+
+def provider_monitor_tool() -> dict:
+    endpoint = provider_monitor_endpoint_payload()["endpoints"][0]
+    operation = endpoint["operations"]["monitor_provider_channel_repair"]
+    return {
+        "tool_name": "n8n_monitor_provider_channel_repair",
+        "display_name": "Мониторить ремонт канала",
+        "action_type": "read_only",
+        "parameters_schema": operation["request_schema"],
+        "result_schema": operation["response_schema"],
+        "endpoint_bindings": [
+            {
+                "endpoint_id": endpoint["endpoint_id"],
+                "operation_id": operation["operation_id"],
+                "parameter_mapping": {
+                    "problem_host": "react:problem_host",
+                    "router_ref": "react:router_ref",
+                    "problemUrl": "react:problemUrl",
+                    "service_request": "react:service_request",
+                    "from": "react:from",
+                    "replyTo": "react:replyTo",
+                },
+                "result_mapping": {
+                    "email_result.body": "email_result.body",
+                    "email_result.subject": "email_result.subject",
+                },
+            }
+        ],
+    }
 
 
 def provider_mail_resolution_profile(body_hint: str, subject_hint: str) -> dict:
@@ -717,6 +847,36 @@ class ConfigAssistantTest(unittest.TestCase):
             },
         )
 
+    def test_attribute_resolution_step_parses_same_line_react_constants(self) -> None:
+        slot_schema = {
+            "slot_schema_id": "slot.zabbix_wait",
+            "slots": [
+                {"slot_id": "zabbix_url", "display_name": "Zabbix problem URL", "required": True},
+            ],
+        }
+
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Вызови ${ReAct.n8n_wait_zabbix_problem_status} используй "
+                "${paramReAct.n8n_wait_zabbix_problem_status.input.problem_url}<-${slot.zabbix_url} "
+                "${paramReAct.n8n_wait_zabbix_problem_status.input.poll_interval_minutes}<-1 "
+                "${paramReAct.n8n_wait_zabbix_problem_status.input.timeout_minutes}<-10"
+            ),
+            slot_schema=slot_schema,
+            tools=[wait_zabbix_problem_status_tool()],
+        )
+
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(
+            result["structure"]["parameter_mapping"],
+            {
+                "problem_url": "slot:zabbix_url",
+                "poll_interval_minutes": "constant:1",
+                "timeout_minutes": "constant:10",
+            },
+        )
+        self.assertFalse(any("request_id" in warning for warning in result["warnings"]), result["warnings"])
+
     def test_attribute_resolution_step_returns_output_mapping_hints_for_plain_slot_targets(self) -> None:
         slot_schema = {
             "slot_schema_id": "slot.provider_case",
@@ -796,6 +956,57 @@ class ConfigAssistantTest(unittest.TestCase):
         self.assertFalse(any("ticketNumber" in warning for warning in result["warnings"]), result["warnings"])
         self.assertFalse(any("pollIntervalMinutes" in warning for warning in result["warnings"]), result["warnings"])
         self.assertFalse(any("timeoutMinutes" in warning for warning in result["warnings"]), result["warnings"])
+
+    def test_attribute_resolution_step_compiles_provider_monitor_external_event_body_mapping(self) -> None:
+        slot_schema = {
+            "slot_schema_id": "slot.provider_channel_repair",
+            "slots": [
+                {"slot_id": "problem_host", "display_name": "Проблемный хост"},
+                {"slot_id": "problem_url", "display_name": "Ссылка на проблему"},
+                {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
+            ],
+        }
+
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Вызови ${ReAct.n8n_monitor_provider_channel_repair}. "
+                "${paramReAct.n8n_monitor_provider_channel_repair.input.problem_host}<-${slot.problem_host}\n"
+                "${paramReAct.n8n_monitor_provider_channel_repair.input.problemUrl}<-${slot.problem_url}\n"
+                "${paramReAct.n8n_monitor_provider_channel_repair.input.service_request}<-${case.ticket_id}\n"
+                "${paramReAct.n8n_monitor_provider_channel_repair.input.from}<-monitor@example.test\n"
+                "${paramReAct.n8n_monitor_provider_channel_repair.input.replyTo}<-monitor@example.test\n"
+                "результат ${paramReAct.n8n_monitor_provider_channel_repair.output.email_result.body}-> provider_mail_body"
+            ),
+            slot_schema=slot_schema,
+            tools=[provider_monitor_tool()],
+            integration_endpoints=provider_monitor_endpoint_payload()["endpoints"],
+        )
+
+        structure = result["structure"]
+        result_field_ids = [
+            field["field_id"]
+            for field in structure["generated_structure_metadata"]["result_fields"]
+        ]
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(structure["endpoint_id"], "mock")
+        self.assertEqual(structure["operation_id"], "monitor_provider_channel_repair")
+        self.assertEqual(
+            structure["completion_policy"]["expected_event_type"],
+            "monitor_provider_channel_repair_completed",
+        )
+        self.assertEqual(structure["completion_policy"]["result_transport"], "kafka_event")
+        self.assertIn("problem_host", structure["parameter_mapping"])
+        self.assertNotIn("router_ref", structure["parameter_mapping"])
+        self.assertIn("email_result.body", result_field_ids)
+        self.assertIn("email_result.subject", result_field_ids)
+        self.assertEqual(
+            result["references"]["output_mapping_hints"],
+            [{
+                "target": "provider_mail_body",
+                "field": "email_result.body",
+                "source_ref": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+            }],
+        )
 
     def test_config_store_normalizes_n8n_wait_react_contract_without_endpoint_alias_loss(self) -> None:
         with TemporaryDirectory() as tempdir:
@@ -1200,6 +1411,84 @@ class ConfigAssistantTest(unittest.TestCase):
                 "timeout_action": "escalate_operator",
                 "result_transport": "kafka_event",
             }
+
+            validation = store.validate_payload(
+                "attribute_resolution_profiles",
+                {"schema_version": "1.0", "profiles": [profile]},
+            )
+
+            self.assertEqual(validation["status"], "valid", validation["errors"])
+
+    def test_config_store_accepts_provider_monitor_nested_email_result_hint(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            slot_payload = {
+                "schema_version": "1.0",
+                "slot_schemas": [
+                    {
+                        "slot_schema_id": "slot.provider_channel_repair",
+                        "display_name": "Слоты мониторинга провайдера",
+                        "slots": [
+                            {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
+                            {"slot_id": "provider_mail_subject", "display_name": "Тема письма провайдера"},
+                        ],
+                    }
+                ],
+            }
+            profile = {
+                "profile_id": "profile.provider_monitor_mail",
+                "display_name": "Получить ответ провайдера",
+                "status": "active",
+                "description": "Проверочный профиль чтения terminal email_result.",
+                "slot_schema_id": "slot.provider_channel_repair",
+                "target_slot_id": "provider_mail_body",
+                "use_llm_after_steps": False,
+                "enrichment_steps": [
+                    {
+                        "step_id": "step1",
+                        "step_name": "Мониторить ремонт канала",
+                        "react_call": "n8n_monitor_provider_channel_repair",
+                        "endpoint_id": "mock",
+                        "operation_id": "monitor_provider_channel_repair",
+                        "completion_policy": {
+                            "mode": "external_event",
+                            "expected_event_type": "monitor_provider_channel_repair_completed",
+                            "max_wait_seconds": 86400,
+                            "timeout_action": "escalate_operator",
+                            "result_transport": "kafka_event",
+                            "result_topic": "external.events",
+                        },
+                        "parameter_mapping": {
+                            "problem_host": "constant:c2m-ntbook-routerg-047",
+                            "problemUrl": "constant:http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
+                            "service_request": "constant:МТС000000000000001",
+                            "from": "constant:monitor@example.test",
+                            "replyTo": "constant:monitor@example.test",
+                        },
+                        "configuration_instruction": "Мониторить ремонт канала провайдера.",
+                        "on_error": "escalate_operator",
+                    }
+                ],
+                "output_slots_order": [
+                    {
+                        "slot_id": "provider_mail_body",
+                        "order": 1,
+                        "required_for_success": True,
+                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                        "on_missing": "continue",
+                    },
+                    {
+                        "slot_id": "provider_mail_subject",
+                        "order": 2,
+                        "required_for_success": False,
+                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.subject}",
+                        "on_missing": "continue",
+                    },
+                ],
+            }
+            self.force_active_payload(store, "slot_schemas", slot_payload)
+            self.force_active_payload(store, "tools", {"schema_version": "1.0", "tools": [provider_monitor_tool()]})
+            self.force_active_payload(store, "integration_endpoints", provider_monitor_endpoint_payload())
 
             validation = store.validate_payload(
                 "attribute_resolution_profiles",

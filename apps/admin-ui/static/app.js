@@ -2030,6 +2030,7 @@ async function renderResolutionProfiles() {
     toolsConfig,
     endpointsConfig,
     modelRoutingConfig,
+    profileUsageConfig,
   ] = await Promise.all([
     loadDraftAwareCollection('attribute_resolution_profiles'),
     loadDraftAwareCollection('slot_schemas'),
@@ -2037,6 +2038,7 @@ async function renderResolutionProfiles() {
     loadDraftAwareCollection('tools'),
     loadDraftAwareCollection('integration_endpoints'),
     loadConfigEditPayload('model_routing'),
+    api('/admin/config/resolution-profiles/usage'),
   ]);
   const profiles = active.items || [];
   const activeSlotSchemas = slotSchemasConfig.activePayload?.slot_schemas || [];
@@ -2053,16 +2055,25 @@ async function renderResolutionProfiles() {
   state.lastData.toolCatalog = tools;
   state.lastData.integrationEndpoints = endpoints;
   state.lastData.modelConfig = normalizeModelConfig(modelRoutingConfig.payload || {});
+  state.lastData.resolutionProfileUsage = profileUsageConfig;
   if (!profiles.some((profile) => profile.profile_id === state.resolutionProfileId)) {
     state.resolutionProfileId = profiles[0]?.profile_id || '';
   }
   const selectedProfile = profiles.find((profile) => profile.profile_id === state.resolutionProfileId) || null;
   const profileOptions = profiles
-    .map(
-      (profile) => `<option value="${escapeHtml(profile.profile_id)}" ${
+    .map((profile) => {
+      const usage = resolutionProfileUsage(profile.profile_id);
+      const suffix = usage?.unused
+        ? ' · не используется'
+        : usage?.participates
+          ? ' · участвует'
+          : usage?.config_refs?.length
+            ? ' · есть ссылки'
+            : '';
+      return `<option value="${escapeHtml(profile.profile_id)}" ${
         profile.profile_id === state.resolutionProfileId ? 'selected' : ''
-      }>${escapeHtml(labelWithDraftState(profile, profile.display_name || profile.profile_id))}</option>`,
-    )
+      }>${escapeHtml(labelWithDraftState(profile, `${profile.display_name || profile.profile_id}${suffix}`))}</option>`;
+    })
     .join('');
   const editor = renderResolutionProfileEditor({
     profile: selectedProfile,
@@ -2172,7 +2183,33 @@ function draftAwareCollectionItems(activeItems = [], draftItems = [], idKey, dra
     return activeItems;
   }
   const activeById = Object.fromEntries((activeItems || []).map((item) => [item[idKey], item]));
-  return (draftItems || []).map((draftItem) => annotateDraftItem(draftItem, activeById[draftItem[idKey]], idKey, draft));
+  const draftById = Object.fromEntries((draftItems || []).map((item) => [item[idKey], item]));
+  const scope = draft.scope || {};
+  if (scope.type === 'collection_item' && scope.id_key === idKey && scope.id) {
+    const targetId = String(scope.id);
+    const seen = new Set();
+    const items = (activeItems || []).map((activeItem) => {
+      const itemId = String(activeItem[idKey] || '');
+      seen.add(itemId);
+      if (itemId !== targetId) {
+        return activeItem;
+      }
+      const draftItem = draftById[itemId] || activeItem;
+      return annotateDraftItem(draftItem, activeItem, idKey, draft);
+    });
+    const draftItem = draftById[targetId];
+    if (draftItem && !seen.has(targetId)) {
+      items.push(annotateDraftItem(draftItem, activeById[targetId], idKey, draft));
+    }
+    return items;
+  }
+  return (draftItems || []).map((draftItem) => {
+    const activeItem = activeById[draftItem[idKey]];
+    if (activeItem && JSON.stringify(stripDraftMetadata(activeItem)) === JSON.stringify(stripDraftMetadata(draftItem))) {
+      return activeItem;
+    }
+    return annotateDraftItem(draftItem, activeItem, idKey, draft);
+  });
 }
 
 function annotateDraftItem(draftItem, activeItem, idKey, draft) {
@@ -2188,7 +2225,10 @@ function annotateDraftItem(draftItem, activeItem, idKey, draft) {
 
 function draftLabelSuffix(item) {
   if (!item?.__draft_source) return '';
-  return item.__draft_only ? ' (только в черновике)' : ' (черновик)';
+  const status = item.__draft_status && !['draft', 'valid'].includes(item.__draft_status)
+    ? `: ${visibleLabels[item.__draft_status] || item.__draft_status}`
+    : '';
+  return item.__draft_only ? ` (только в черновике${status})` : ` (черновик${status})`;
 }
 
 function labelWithDraftState(item, label) {
@@ -2271,11 +2311,87 @@ function resolutionProfileHowToPanel() {
   `;
 }
 
+function resolutionProfileUsage(profileId) {
+  const profiles = state.lastData.resolutionProfileUsage?.profiles || [];
+  return profiles.find((profile) => profile.profile_id === profileId) || null;
+}
+
 function resolutionProfileUsagePanel(slotSchemas, scenarios, profileId) {
   void slotSchemas;
   void scenarios;
-  void profileId;
-  return '';
+  const usage = resolutionProfileUsage(profileId);
+  if (!usage) {
+    return `
+      <div class="slot-schema-derived warning-panel">
+        <div class="metric-label">Использование профиля</div>
+        <div class="meta">Данные использования профиля пока не загружены.</div>
+      </div>
+    `;
+  }
+  const usedRows = (usage.used_by || []).map((item) => {
+    const target = item.ref_type === 'stage'
+      ? `этап ${item.stage_name || item.stage_id || 'н/д'}`
+      : `слот ${item.slot_name || item.slot_id || 'н/д'}`;
+    return `
+      <tr>
+        <td>${escapeHtml(item.scenario_name || item.scenario_id || 'н/д')}</td>
+        <td><code>${escapeHtml(item.slot_schema_id || 'н/д')}</code></td>
+        <td>${escapeHtml(target)}</td>
+      </tr>
+    `;
+  }).join('');
+  const configRefRows = (usage.config_refs || []).map((item) => {
+    const target = item.ref_type === 'stage'
+      ? `этап ${item.stage_name || item.stage_id || 'н/д'}`
+      : `слот ${item.slot_name || item.slot_id || 'н/д'}`;
+    return `<li>${escapeHtml(`${item.slot_schema_name || item.slot_schema_id || 'н/д'} / ${target}`)}</li>`;
+  }).join('');
+  const blockerRows = (usage.delete_blockers || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('');
+  const status = usage.participates
+    ? 'Участвует в активном сценарии'
+    : usage.unused
+      ? 'Не используется'
+      : 'Есть ссылки в конфигурации';
+  return `
+    <div class="slot-schema-derived">
+      <div class="metric-label">Использование профиля</div>
+      <div class="status-strip">
+        <div class="status-strip-item">
+          <div class="status-strip-label">Статус</div>
+          <div class="status-strip-value">${badge(usage.status || 'active')}</div>
+        </div>
+        <div class="status-strip-item ${usage.validation_status !== 'valid' ? 'risk' : ''}">
+          <div class="status-strip-label">Валидация</div>
+          <div class="status-strip-value">${badge(usage.validation_status || 'unknown')}</div>
+        </div>
+        <div class="status-strip-item ${usage.delete_allowed ? '' : 'risk'}">
+          <div class="status-strip-label">Удаление</div>
+          <div class="status-strip-value">${usage.delete_allowed ? badge('enabled') : badge('blocked')}</div>
+        </div>
+        <div class="status-strip-item">
+          <div class="status-strip-label">Участие</div>
+          <div class="status-strip-value">${escapeHtml(status)}</div>
+        </div>
+      </div>
+      ${usedRows ? `
+        <table>
+          <thead><tr><th>Сценарий</th><th>Схема</th><th>Связь</th></tr></thead>
+          <tbody>${usedRows}</tbody>
+        </table>
+      ` : '<div class="empty">В активных сценариях профиль не выбран.</div>'}
+      ${configRefRows && !usedRows ? `
+        <div class="meta">Профиль не участвует в активном сценарии, но на него есть ссылки в конфигурации:</div>
+        <ul>${configRefRows}</ul>
+      ` : ''}
+      ${blockerRows ? `<div class="meta">Блокеры удаления:</div><ul>${blockerRows}</ul>` : ''}
+      ${(usage.validation_errors || []).length ? `
+        <details class="launch-editor">
+          <summary>Ошибки валидации</summary>
+          <ul>${usage.validation_errors.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+        </details>
+      ` : ''}
+    </div>
+  `;
 }
 
 function profileCleanupSlotIds(profile, slotSchema) {
@@ -2765,6 +2881,8 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
     if (!profile) {
       return '<div class="empty">Нет выбранного профиля для удаления</div>';
     }
+    const usage = resolutionProfileUsage(profile.profile_id);
+    const deleteBlocked = usage && !usage.delete_allowed;
     return `
       <form class="scenario-editor panel" data-form="resolution-profile-delete">
         <div>
@@ -2772,7 +2890,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           <div class="scenario-title">${escapeHtml(profile.display_name)}</div>
         </div>
         ${resolutionProfileUsagePanel(slotSchemas, scenarios, profile.profile_id)}
-        <button class="danger" type="submit">Удалить профиль</button>
+        <button class="danger" type="submit" ${deleteBlocked ? 'disabled' : ''}>Удалить профиль</button>
       </form>
     `;
   }
@@ -3090,6 +3208,20 @@ function selectedCandidateOperation(profile, tools, endpoints) {
 }
 
 function inferResultFieldsFromOperation(operation) {
+  const schema = operationTerminalResultSchema(operation || {});
+  const schemaNames = schemaResultFieldNames(schema);
+  if (schemaNames.length) {
+    return schemaNames.map((name) => {
+      const fieldSchema = schemaAtPath(schema, name) || {};
+      const fieldType = schemaType(fieldSchema);
+      return {
+        field_id: name,
+        display_name: fieldSchema.title || humanizeTechnicalKey(name),
+        field_type: fieldType === 'integer' ? 'number' : (fieldType || 'unknown'),
+        description: fieldSchema.description || '',
+      };
+    });
+  }
   const output = operation?.mock_output || {};
   const listKey = Object.keys(output).find((key) => Array.isArray(output[key]));
   const sample = listKey && output[listKey]?.[0] && typeof output[listKey][0] === 'object'
@@ -3181,7 +3313,7 @@ function profileEnrichmentSteps(profile = {}, tools = [], endpoints = []) {
 }
 
 function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpoints = []) {
-  const normalizedSteps = (steps || []).map((step, index) => normalizeEnrichmentStep(step, index, tools));
+  const normalizedSteps = (steps || []).map((step, index) => normalizeEnrichmentStep(step, index, tools, endpoints));
   if (!normalizedSteps.length) {
     state.resolutionEnrichmentEditIndex = 0;
     return '<div class="empty">Шаги обогащения не настроены. Добавьте шаг обогащения или оставьте профиль как черновик без внешних данных.</div>';
@@ -3211,9 +3343,13 @@ function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpo
   `;
 }
 
-function normalizeEnrichmentStep(step = {}, index = 0, tools = []) {
+function normalizeEnrichmentStep(step = {}, index = 0, tools = [], endpoints = []) {
   const tool = findToolInCatalog(tools, step.react_call) || (step.react_call ? null : tools[0]) || null;
   const reactCall = step.react_call || tool?.tool_name || '';
+  const binding = currentToolBinding(tool);
+  const endpointId = step.endpoint_id || binding?.endpoint_id || '';
+  const operationId = step.operation_id || binding?.operation_id || '';
+  const operation = endpointOperationById(endpoints, endpointId, operationId);
   return {
     step_id: normalizeEnrichmentStepId(step.step_id, index),
     step_name: step.step_name || '',
@@ -3222,7 +3358,7 @@ function normalizeEnrichmentStep(step = {}, index = 0, tools = []) {
     operation_id: step.operation_id || '',
     completion_policy: step.completion_policy || {},
     parameter_mapping: step.parameter_mapping || {},
-    result_fields: step.result_fields?.length ? step.result_fields : resultFieldsFromTool(tool),
+    result_fields: step.result_fields?.length ? step.result_fields : (operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool)),
     on_error: step.on_error || 'continue_to_llm',
     configuration_instruction: step.configuration_instruction || '',
     generated_structure_metadata: step.generated_structure_metadata || {},
@@ -5755,9 +5891,41 @@ function renderProcessingCaseDetail(detail) {
   const caseRecord = detail.case;
   const currentRun = (detail.runs || [])[0] || null;
   const activeWait = (detail.waits || []).find((wait) => ['open', 'reminded'].includes(wait.status));
-  const slotValues = caseRecord.analysis_snapshot?.simulation?.slot_values
+  const latestWait = activeWait || (detail.waits || [])[0] || null;
+  const runSlotValues = currentRun?.slot_values || {};
+  const snapshotSlotValues = caseRecord.analysis_snapshot?.simulation?.slot_values
     || caseRecord.analysis_snapshot?.slot_values
     || {};
+  const hasRunSlotValues = Object.keys(runSlotValues).length > 0;
+  const slotValues = hasRunSlotValues ? runSlotValues : snapshotSlotValues;
+  const slotSource = hasRunSlotValues ? 'runtime run slot_values' : 'analysis snapshot';
+  const runExtensions = currentRun?.extensions || {};
+  const slotContinuation = runExtensions.slot_continuation || [];
+  const resumeResults = currentRun?.resume_results || [];
+  const lastSlotContinuation = slotContinuation.length ? slotContinuation[slotContinuation.length - 1] : null;
+  const lastResumeResult = resumeResults.length ? resumeResults[resumeResults.length - 1] : null;
+  const waitOrigin = latestWait?.origin || {};
+  const waitDiagnostics = latestWait ? {
+    wait_id: latestWait.wait_id,
+    status: latestWait.status,
+    wait_type: latestWait.wait_type,
+    correlation_id: latestWait.correlation_id,
+    source_profile_id: waitOrigin.source_profile_id,
+    source_step_id: waitOrigin.source_step_id,
+    source_slot_schema_id: waitOrigin.source_slot_schema_id,
+    source_output_slots_order: waitOrigin.source_output_slots_order,
+    has_output_slot_mapping: Array.isArray(waitOrigin.source_output_slots_order)
+      && waitOrigin.source_output_slots_order.length > 0,
+  } : null;
+  const runtimeDiagnostics = {
+    slot_source: slotSource,
+    run_id: currentRun?.run_id || null,
+    current_step: currentRun?.current_step || null,
+    slot_materialization: runExtensions.slot_materialization || [],
+    last_slot_continuation: lastSlotContinuation,
+    last_resume_filled_slot_values: lastResumeResult?.filled_slot_values || {},
+    wait: waitDiagnostics,
+  };
   const eventRows = (detail.timeline?.events || []).slice(0, 8).map((event) => [
     escapeHtml(event.created_at),
     badge(event.event_type),
@@ -5770,6 +5938,7 @@ function renderProcessingCaseDetail(detail) {
       ${metric('Workflow', badge(caseRecord.current_workflow_state?.id || 'н/д'))}
       ${metric('Текущий run', escapeHtml(currentRun?.run_id || 'н/д'))}
       ${metric('Активное ожидание', activeWait ? badge(activeWait.wait_type) : 'нет')}
+      ${metric('Источник слотов', escapeHtml(slotSource))}
     </div>
     <div class="scenario-editor-actions">
       <button class="danger" type="button" data-action="processing-case-escalate" data-case-id="${escapeHtml(caseRecord.case_id)}">Эскалировать кейс</button>
@@ -5781,8 +5950,14 @@ function renderProcessingCaseDetail(detail) {
         ${jsonBlock({
           ticket_input: caseRecord.ticket_input,
           slots: slotValues,
+          slot_source: slotSource,
           workflow_state: caseRecord.current_workflow_state,
         })}
+      </div>
+      <div class="panel">
+        <div class="metric-label">Runtime diagnostics</div>
+        <div class="meta">Материализация слотов, continuation и wait mapping из актуального processing run.</div>
+        ${jsonBlock(runtimeDiagnostics)}
       </div>
       <div class="panel">
         <div class="metric-label">Последние события timeline</div>
@@ -10102,6 +10277,11 @@ async function deleteResolutionProfileForm() {
   if (!state.resolutionProfileId) {
     throw new Error('Профиль для удаления не выбран.');
   }
+  const usage = resolutionProfileUsage(state.resolutionProfileId);
+  if (usage && !usage.delete_allowed) {
+    const blockers = (usage.delete_blockers || []).join('; ') || 'профиль используется в конфигурации';
+    throw new Error(`Профиль нельзя удалить: ${blockers}.`);
+  }
   await applyResolutionProfileMutation('delete', { profile_id: state.resolutionProfileId });
 }
 
@@ -11692,6 +11872,7 @@ function enrichmentStepDraftFromCard(card, index) {
     completionPolicy.result_topic = card.querySelector('[data-enrichment-result-topic]')?.value?.trim() || 'external.events';
   }
   const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
+  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], endpointId, operationId);
   const metadataValue = card.querySelector('[data-enrichment-generated-metadata]')?.value || '{}';
   let generatedStructureMetadata = {};
   try {
@@ -11704,7 +11885,7 @@ function enrichmentStepDraftFromCard(card, index) {
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
     react_call: reactCall,
     parameter_mapping: parseEnrichmentParameterMapping(card),
-    result_fields: resultFieldsFromTool(tool),
+    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
     on_error: card.querySelector('[data-enrichment-on-error]')?.value || 'continue_to_llm',
     configuration_instruction: card.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
     generated_structure_metadata: generatedStructureMetadata,
@@ -12231,12 +12412,14 @@ function addEnrichmentStep(target) {
   const tools = currentResolutionToolsFromForm(form, steps);
   const index = steps.length;
   const tool = tools[0] || null;
+  const binding = currentToolBinding(tool);
+  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], binding?.endpoint_id || '', binding?.operation_id || '');
   steps.push({
     step_id: normalizeEnrichmentStepId('', index),
     step_name: '',
     react_call: tool?.tool_name || '',
     parameter_mapping: {},
-    result_fields: resultFieldsFromTool(tool),
+    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
     on_error: 'continue_to_llm',
   });
   state.resolutionEnrichmentEditIndex = index;
@@ -12301,7 +12484,7 @@ function refreshEnrichmentStepCard(target) {
       timeout_action: 'resume_agent',
     };
   }
-  step.result_fields = resultFieldsFromTool(tool);
+  step.result_fields = operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool);
   steps[index] = step;
   state.resolutionEnrichmentEditIndex = index;
   rerenderEnrichmentSteps(form, steps);
@@ -12327,7 +12510,7 @@ function refreshEnrichmentStepBindingCard(target) {
     react_call: reactCall,
     endpoint_id: binding.endpoint_id || '',
     operation_id: binding.operation_id || '',
-    result_fields: resultFieldsFromTool(tool),
+    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
   };
   if (!step.endpoint_id) delete step.endpoint_id;
   if (!step.operation_id) delete step.operation_id;

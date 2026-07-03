@@ -58,6 +58,9 @@ N8N_ACK_BODY_ALLOWED_KEYS = {
 TRACE_SOURCE_EXTENSION_KEYS = (
     "source_profile_id",
     "source_step_id",
+    "source_slot_schema_id",
+    "source_target_slot_id",
+    "source_output_slots_order",
     "debug_launch_id",
 )
 
@@ -492,10 +495,6 @@ class IntegrationDispatcher:
         if binding_error:
             return binding, self._require_result(self._with_trace(binding_error, invocation, binding))
 
-        policy_result = self._policy_gate(invocation)
-        if policy_result:
-            return binding, self._require_result(self._with_trace(policy_result, invocation, binding))
-
         endpoint_result = self._endpoint_gate(invocation, binding.endpoint)
         if endpoint_result:
             return binding, self._require_result(self._with_trace(endpoint_result, invocation, binding))
@@ -528,37 +527,6 @@ class IntegrationDispatcher:
                 "message": "; ".join(mismatches),
             },
         )
-
-    def _policy_gate(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
-        if not invocation["allowed"] or invocation["execution_mode"] == "blocked":
-            return self._base_result(
-                invocation,
-                "blocked",
-                error={
-                    "code": "blocked_by_policy",
-                    "message": "Политика выполнения заблокировала вызов инструмента.",
-                },
-            )
-
-        if invocation["execution_mode"] == "manual_only":
-            return self._base_result(
-                invocation,
-                "skipped",
-                output={
-                    "message": "Режим manual_only не отправляет вызовы в интеграции.",
-                },
-            )
-
-        if invocation["approval_required"] and not invocation["approved_by_operator"]:
-            return self._base_result(
-                invocation,
-                "pending_approval",
-                output={
-                    "message": "Перед вызовом интеграции требуется согласование оператора.",
-                },
-            )
-
-        return None
 
     def _endpoint_gate(
         self,
