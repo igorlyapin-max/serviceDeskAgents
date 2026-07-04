@@ -26,11 +26,9 @@ class RuntimeGuardrailsTest(unittest.TestCase):
                 "APP_ENV": "production",
                 "SECURITY_AUTH_MODE": "dev_header",
                 "POSTGRES_PASSWORD": "servicedesk_dev_password",
-                "N8N_DB_PASSWORD": "n8n_dev_password",
-                "N8N_ENCRYPTION_KEY": "replace_with_32_plus_chars_dev_key",
-                "N8N_WEBHOOK_TOKEN": "replace_with_dev_webhook_token",
                 "LITELLM_MASTER_KEY": "sk-dev-litellm-master-key",
                 "INTEGRATION_CALLBACK_TOKEN": "dev-callback-token",
+                "MCP_PROVIDER_OPS_TOKEN": "change_me_mcp_provider_ops_token",
             },
             clear=False,
         ):
@@ -47,6 +45,11 @@ class RuntimeGuardrailsTest(unittest.TestCase):
             {
                 "APP_ENV": "staging",
                 "SECURITY_AUTH_MODE": "dev_header",
+                "SECURITY_CALLBACK_AUTH_MODE": "oidc_jwks",
+                "CALLBACK_OIDC_ISSUER": "https://idp.example",
+                "CALLBACK_OIDC_AUDIENCE": "servicedesk-callbacks",
+                "CALLBACK_OIDC_ALLOWED_CLIENT_IDS": "mcp-provider-ops",
+                "CALLBACK_OIDC_JWKS_URL": "https://idp.example/.well-known/jwks.json",
                 "LOG_SINKS": "stdout",
             },
             clear=True,
@@ -63,13 +66,15 @@ class RuntimeGuardrailsTest(unittest.TestCase):
             {
                 "APP_ENV": "staging",
                 "SECURITY_AUTH_MODE": "oidc",
+                "SECURITY_CALLBACK_AUTH_MODE": "oidc_jwks",
+                "CALLBACK_OIDC_ISSUER": "https://idp.example",
+                "CALLBACK_OIDC_AUDIENCE": "servicedesk-callbacks",
+                "CALLBACK_OIDC_ALLOWED_CLIENT_IDS": "mcp-provider-ops",
+                "CALLBACK_OIDC_JWKS_URL": "https://idp.example/.well-known/jwks.json",
                 "LOG_SINKS": "stdout,jsonl",
                 "POSTGRES_PASSWORD": "strong-postgres-password",
-                "N8N_DB_PASSWORD": "strong-n8n-db-password",
-                "N8N_ENCRYPTION_KEY": "strong-n8n-encryption-key-32-chars",
-                "N8N_WEBHOOK_TOKEN": "strong-n8n-webhook-token",
                 "LITELLM_MASTER_KEY": "strong-litellm-master-key",
-                "INTEGRATION_CALLBACK_TOKEN__N8N": "strong-callback-token",
+                "MCP_PROVIDER_OPS_TOKEN": "strong-mcp-provider-token",
                 "KAFKA_SECURITY_PROTOCOL": "PLAINTEXT",
             },
             clear=True,
@@ -78,6 +83,73 @@ class RuntimeGuardrailsTest(unittest.TestCase):
                 validate_startup_environment()
 
         self.assertIn("Kafka external.events", str(context.exception))
+
+    def test_staging_rejects_source_token_callback_auth(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "staging",
+                "SECURITY_AUTH_MODE": "oidc",
+                "SECURITY_CALLBACK_AUTH_MODE": "source_token",
+                "LOG_SINKS": "stdout,jsonl",
+                "POSTGRES_PASSWORD": "strong-postgres-password",
+                "LITELLM_MASTER_KEY": "strong-litellm-master-key",
+                "MCP_PROVIDER_OPS_TOKEN": "strong-mcp-provider-token",
+                "INTEGRATION_CALLBACK_TOKEN__PROVIDER_OPS": "strong-callback-token",
+                "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("SECURITY_CALLBACK_AUTH_MODE=oidc_jwks/oidc_proxy_jwt", str(context.exception))
+
+    def test_staging_rejects_oidc_jwks_without_jwks_url(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "staging",
+                "SECURITY_AUTH_MODE": "oidc",
+                "SECURITY_CALLBACK_AUTH_MODE": "oidc_jwks",
+                "CALLBACK_OIDC_ISSUER": "https://idp.example",
+                "CALLBACK_OIDC_AUDIENCE": "servicedesk-callbacks",
+                "CALLBACK_OIDC_ALLOWED_CLIENT_IDS": "mcp-provider-ops",
+                "LOG_SINKS": "stdout,jsonl",
+                "POSTGRES_PASSWORD": "strong-postgres-password",
+                "LITELLM_MASTER_KEY": "strong-litellm-master-key",
+                "MCP_PROVIDER_OPS_TOKEN": "strong-mcp-provider-token",
+                "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("CALLBACK_OIDC_JWKS_URL", str(context.exception))
+
+    def test_staging_rejects_oidc_proxy_without_trust_proof(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "staging",
+                "SECURITY_AUTH_MODE": "oidc",
+                "SECURITY_CALLBACK_AUTH_MODE": "oidc_proxy_jwt",
+                "CALLBACK_OIDC_ISSUER": "https://idp.example",
+                "CALLBACK_OIDC_AUDIENCE": "servicedesk-callbacks",
+                "CALLBACK_OIDC_ALLOWED_CLIENT_IDS": "mcp-provider-ops",
+                "LOG_SINKS": "stdout,jsonl",
+                "POSTGRES_PASSWORD": "strong-postgres-password",
+                "LITELLM_MASTER_KEY": "strong-litellm-master-key",
+                "MCP_PROVIDER_OPS_TOKEN": "strong-mcp-provider-token",
+                "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeConfigurationError) as context:
+                validate_startup_environment()
+
+        self.assertIn("oidc_proxy_jwt требует", str(context.exception))
 
     def test_unknown_environment_is_rejected(self) -> None:
         with patch.dict(os.environ, {"APP_ENV": "sandbox"}, clear=True):
@@ -129,6 +201,20 @@ class RuntimeGuardrailsTest(unittest.TestCase):
         self.assertEqual(sanitized["пароль"], "параметр скрыт")
         self.assertEqual(sanitized["safe"], "visible")
 
+    def test_log_sanitizer_masks_personal_values_inside_safe_keys(self) -> None:
+        sanitized = sanitize_log_value(
+            "ticket_input",
+            {
+                "description": "Связаться с ivan.petrov@example.org или +7 999 123-45-67.",
+                "summary": "service host c2m-router-01",
+            },
+        )
+
+        self.assertNotIn("ivan.petrov@example.org", sanitized["description"])
+        self.assertNotIn("+7 999 123-45-67", sanitized["description"])
+        self.assertIn("персональные данные скрыты", sanitized["description"])
+        self.assertEqual(sanitized["summary"], "service host c2m-router-01")
+
     def test_debug_logging_event_respects_basic_and_verbose_levels(self) -> None:
         logger = Mock()
         with patch.dict(os.environ, {"DEBUG_LOGGING_ENABLED": "false"}, clear=True):
@@ -170,7 +256,6 @@ class RuntimeGuardrailsTest(unittest.TestCase):
         with (
             patch.object(runtime_guardrails, "_state_db_check", return_value={"name": "state_db", "status": "ok"}),
             patch.object(runtime_guardrails, "_kafka_bootstrap_check", return_value={"name": "kafka_bootstrap", "status": "ok"}),
-            patch.object(runtime_guardrails, "_n8n_health_check", return_value={"name": "n8n", "status": "ok"}),
             patch.object(runtime_guardrails, "_model_gateway_check", return_value={"name": "model_gateway", "status": "ok"}),
             patch.object(runtime_guardrails, "_integration_auth_check", return_value={"name": "integration_auth", "status": "ok"}),
         ):
@@ -184,6 +269,28 @@ class RuntimeGuardrailsTest(unittest.TestCase):
         async_check = next(check for check in report["checks"] if check["name"] == "async_runtime")
         self.assertEqual(async_check["status"], "error")
         self.assertIn("Outbox publisher", async_check["message"])
+
+    def test_async_runtime_check_reports_recovery_attention_as_degraded(self) -> None:
+        check = runtime_guardrails._async_runtime_check(
+            {
+                "schema_version": "1.0",
+                "runtime": {
+                    "schema_version": "1.0",
+                    "status": "ok",
+                    "issues": [],
+                    "required_components": [],
+                },
+                "recovery": {
+                    "schema_version": "1.0",
+                    "status": "needs_attention",
+                    "issues": ["Найдено зависших ExternalEvent idempotency receipts: 1"],
+                },
+            }
+        )
+
+        self.assertEqual(check["status"], "degraded")
+        self.assertIn("ExternalEvent", check["message"])
+        self.assertEqual(check["recovery"]["status"], "needs_attention")
 
     def test_model_gateway_check_uses_litellm_models_endpoint(self) -> None:
         class Response:
@@ -220,15 +327,12 @@ class RuntimeGuardrailsTest(unittest.TestCase):
     def test_integration_auth_check_reports_missing_token_env(self) -> None:
         config_store = Mock()
         config_store.active_payload.return_value = {
-            "endpoints": [
+            "environments": [
                 {
-                    "endpoint_id": "n8n",
-                    "enabled": True,
-                    "auth": {
-                        "type": "header_token",
-                        "header_name": "X-ServiceDesk-Token",
-                        "token_env": "N8N_WEBHOOK_TOKEN",
-                    },
+                    "environment_id": "provider_ops",
+                    "status": "active",
+                    "auth_mode": "bearer_token",
+                    "auth_ref": "env:MCP_PROVIDER_OPS_TOKEN",
                 }
             ]
         }
@@ -237,31 +341,75 @@ class RuntimeGuardrailsTest(unittest.TestCase):
             check = runtime_guardrails._integration_auth_check(config_store)
 
         self.assertEqual(check["status"], "error")
-        self.assertIn("n8n", check["message"])
-        self.assertIn("N8N_WEBHOOK_TOKEN", check["message"])
-        self.assertIn("X-ServiceDesk-Token", check["message"])
+        self.assertIn("provider_ops", check["message"])
+        self.assertIn("MCP_PROVIDER_OPS_TOKEN", check["message"])
 
     def test_integration_auth_check_accepts_configured_token_env(self) -> None:
         config_store = Mock()
         config_store.active_payload.return_value = {
-            "endpoints": [
+            "environments": [
                 {
-                    "endpoint_id": "n8n",
-                    "enabled": True,
-                    "auth": {
-                        "type": "header_token",
-                        "header_name": "X-ServiceDesk-Token",
-                        "token_env": "N8N_WEBHOOK_TOKEN",
-                    },
+                    "environment_id": "provider_ops",
+                    "status": "active",
+                    "auth_mode": "bearer_token",
+                    "auth_ref": "env:MCP_PROVIDER_OPS_TOKEN",
                 }
             ]
         }
 
-        with patch.dict(os.environ, {"N8N_WEBHOOK_TOKEN": "secret"}, clear=True):
+        with patch.dict(os.environ, {"MCP_PROVIDER_OPS_TOKEN": "secret"}, clear=True):
             check = runtime_guardrails._integration_auth_check(config_store)
 
         self.assertEqual(check["status"], "ok")
         self.assertNotIn("secret", check["message"])
+
+    def test_mcp_health_check_uses_origin_http_get(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        config_store = Mock()
+        config_store.active_payload.return_value = {
+            "environments": [
+                {
+                    "environment_id": "provider_ops",
+                    "status": "active",
+                    "base_url": "http://127.0.0.1:9000/mcp",
+                    "health_check": {"mode": "http_get", "path": "/health", "timeout_seconds": 2},
+                }
+            ]
+        }
+
+        with patch.object(runtime_guardrails.urllib.request, "urlopen", return_value=Response()) as urlopen_mock:
+            check = runtime_guardrails._mcp_health_check(config_store)
+
+        self.assertEqual(check["status"], "ok")
+        request = urlopen_mock.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:9000/health")
+
+    def test_mcp_health_check_degrades_on_unreachable_environment(self) -> None:
+        config_store = Mock()
+        config_store.active_payload.return_value = {
+            "environments": [
+                {
+                    "environment_id": "provider_ops",
+                    "status": "active",
+                    "base_url": "http://127.0.0.1:9000/mcp",
+                    "health_check": {"mode": "http_get", "path": "/health", "timeout_seconds": 2},
+                }
+            ]
+        }
+
+        with patch.object(runtime_guardrails.urllib.request, "urlopen", side_effect=OSError("connection refused")):
+            check = runtime_guardrails._mcp_health_check(config_store)
+
+        self.assertEqual(check["status"], "degraded")
+        self.assertIn("provider_ops", check["message"])
 
 
 if __name__ == "__main__":

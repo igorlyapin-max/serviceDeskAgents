@@ -13,6 +13,7 @@ from typing import Any
 
 from .action_gates import DEFAULT_STATE_DB_PATH, utc_now
 from .cases import CaseNotFound, CaseStore
+from .mcp_execution import build_async_context, build_mcp_tool_request, invoke_mcp_tool_request, validate_sync_result
 from .privacy import redact_for_llm
 
 
@@ -38,13 +39,8 @@ KAFKA_TOPICS = [
         "key": "case_id",
     },
     {
-        "topic": "tool.commands",
-        "description": "Команды на выполнение ReAct-вызовов и интеграций.",
-        "key": "case_id",
-    },
-    {
-        "topic": "tool.results",
-        "description": "Нормализованные результаты ReAct-вызовов.",
+        "topic": "mcp.commands",
+        "description": "Команды на выполнение внешних MCP capabilities.",
         "key": "case_id",
     },
     {
@@ -55,11 +51,6 @@ KAFKA_TOPICS = [
     {
         "topic": "timer.events",
         "description": "События таймеров, напоминаний и timeout.",
-        "key": "case_id",
-    },
-    {
-        "topic": "integration.events",
-        "description": "Callback и события внешних endpoint adapters.",
         "key": "case_id",
     },
     {
@@ -91,24 +82,26 @@ EXTERNAL_EVENT_WAIT_STATUS = {
     "timeout": "timed_out",
     "cancelled": "cancelled",
 }
-WAIT_ORIGIN_KINDS = {"react_call", "client_question", "approval", "timer", "system_policy", "unknown"}
-DEFAULT_ASYNC_TOOL_COMMAND_TOPIC = "tool.commands"
+WAIT_ORIGIN_KINDS = {"capability", "client_question", "approval", "timer", "system_policy", "unknown"}
+DEFAULT_ASYNC_MCP_COMMAND_TOPIC = "mcp.commands"
 DEFAULT_EXTERNAL_EVENT_TOPIC = "external.events"
-DEFAULT_EXTERNAL_EVENT_SOURCE = "n8n"
+DEFAULT_MCP_EXTERNAL_EVENT_SOURCE = "mcp"
 ASYNC_OUTBOX_STALE_SECONDS = 10
 RUNTIME_HEARTBEAT_STALE_SECONDS = 30
+RECOVERY_RECEIPT_STALE_SECONDS = 120
+RECOVERY_STUCK_RECEIPT_LIMIT = 20
 RUNTIME_REQUIRED_COMPONENTS = (
     {
         "role": "outbox_publisher",
         "display_name": "Outbox publisher",
-        "topic_env": "TOOL_COMMAND_TOPIC",
-        "default_topic": DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+        "topic_env": "MCP_COMMAND_TOPIC",
+        "default_topic": DEFAULT_ASYNC_MCP_COMMAND_TOPIC,
     },
     {
-        "role": "tool_worker",
-        "display_name": "Tool command worker",
-        "topic_env": "TOOL_COMMAND_TOPIC",
-        "default_topic": DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+        "role": "mcp_worker",
+        "display_name": "MCP command worker",
+        "topic_env": "MCP_COMMAND_TOPIC",
+        "default_topic": DEFAULT_ASYNC_MCP_COMMAND_TOPIC,
     },
     {
         "role": "external_event_worker",
@@ -326,38 +319,6 @@ class ProcessingStore:
 
         return self.case_detail(case["case_id"])
 
-    def record_integration_callback(self, result: dict[str, Any]) -> None:
-        case = result.get("case") or {}
-        case_id = case.get("case_id")
-        if not case_id:
-            return
-        run = self.latest_run(case_id)
-        now = utc_now()
-        self._append_case_event(
-            case_id,
-            "processing_external_event_received",
-            "Получено внешнее событие от integration endpoint.",
-            {
-                "run_id": run.get("run_id") if run else None,
-                "endpoint_id": result.get("tool_result", {}).get("endpoint_id"),
-                "operation_id": result.get("tool_result", {}).get("operation_id"),
-                "tool_status": result.get("tool_result", {}).get("status"),
-            },
-        )
-        self._enqueue(
-            "integration.events",
-            case_id,
-            "integration_callback_received",
-            {
-                "case_id": case_id,
-                "ticket_id": case.get("ticket_id"),
-                "received_at": now,
-                "tool_result": result.get("tool_result"),
-                "workflow_state": result.get("workflow_state"),
-            },
-            idempotency_key=f"{case_id}:integration:{result.get('tool_result', {}).get('invocation_id', now)}",
-        )
-
     def record_approval_decision(self, result: dict[str, Any]) -> None:
         gate = result.get("gate") or {}
         case_id = gate.get("extensions", {}).get("case_id")
@@ -461,7 +422,7 @@ class ProcessingStore:
             },
         )
         self._enqueue(
-            "timer.commands" if wait_type == "timer_wait" else "integration.events",
+            "timer.commands" if wait_type == "timer_wait" else "case.events",
             case_id,
             "wait_opened",
             {
@@ -474,12 +435,15 @@ class ProcessingStore:
         )
         return wait
 
-    def enqueue_async_tool_command(
+    def enqueue_async_capability_command(
         self,
         invocation: dict[str, Any],
         *,
+        capability: dict[str, Any],
+        environment: dict[str, Any],
+        binding: dict[str, Any],
         expected_event_type: str,
-        source: str = DEFAULT_EXTERNAL_EVENT_SOURCE,
+        source: str = DEFAULT_MCP_EXTERNAL_EVENT_SOURCE,
         topic: str | None = None,
         result_transport: str = "http_callback",
         result_topic: str | None = None,
@@ -490,15 +454,16 @@ class ProcessingStore:
     ) -> dict[str, Any]:
         case_id = invocation.get("case_id")
         if not case_id:
-            raise ProcessingConflict("Асинхронный ReAct-вызов требует case_id.")
-        if invocation.get("adapter_type") != "n8n_webhook":
-            raise ProcessingConflict("Асинхронный worker сейчас поддерживает только adapter_type=n8n_webhook.")
+            raise ProcessingConflict("Асинхронная capability требует case_id.")
+        if binding.get("execution_mode") != "async":
+            raise ProcessingConflict("enqueue_async_capability_command поддерживает только async capability binding.")
 
-        command_topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        command_topic = topic or os.getenv("MCP_COMMAND_TOPIC", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
         if result_transport not in EXTERNAL_EVENT_RESULT_TRANSPORTS:
             raise ProcessingConflict(f"Неподдерживаемый result_transport для ExternalEvent: {result_transport}.")
         event_topic = result_topic or os.getenv("EXTERNAL_EVENT_TOPIC", DEFAULT_EXTERNAL_EVENT_TOPIC)
-        command_idempotency_key = f"{case_id}:tool_command:{invocation['invocation_id']}"
+        invocation_id = invocation.get("invocation_id") or str(uuid.uuid4())
+        command_idempotency_key = f"{case_id}:capability_command:{invocation_id}"
         existing_message = self.outbox_message_by_idempotency_key(command_idempotency_key)
         if existing_message:
             existing_command = existing_message.get("payload") or {}
@@ -508,6 +473,7 @@ class ProcessingStore:
                 "command": existing_command,
                 "duplicate": True,
             }
+
         wait_payload = {
             "expected_event_type": expected_event_type,
             "result_transport": result_transport,
@@ -515,16 +481,17 @@ class ProcessingStore:
         }
         if contract_snapshot:
             wait_payload["contract_snapshot"] = copy.deepcopy(contract_snapshot)
+        invocation_extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
         wait_origin = {
-            "kind": "react_call",
-            "react_call": invocation.get("tool_name"),
-            "endpoint_id": invocation.get("endpoint_id"),
-            "operation_id": invocation.get("operation_id"),
+            "kind": "capability",
+            "capability_id": capability.get("capability_id"),
+            "mcp_environment_id": environment.get("environment_id"),
+            "mcp_tool_name": binding.get("mcp_tool_name"),
+            "execution_mode": binding.get("execution_mode"),
             "parameters": invocation.get("parameters", {}),
             "result_transport": result_transport,
             "result_topic": event_topic,
         }
-        invocation_extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
         for key in (
             "source_profile_id",
             "source_step_id",
@@ -541,7 +508,7 @@ class ProcessingStore:
             case_id,
             source=source,
             event_type=expected_event_type,
-            reason=reason or f"Ожидание результата ReAct-вызова {invocation.get('tool_name')}.",
+            reason=reason or f"Ожидание результата capability {capability.get('capability_id')}.",
             wait_type="external_event_wait",
             deadline_seconds=deadline_seconds,
             correlation_id=command_idempotency_key,
@@ -549,27 +516,30 @@ class ProcessingStore:
             origin=wait_origin,
         )
         callback_url = self.external_event_callback_url(source, base_url=callback_base_url)
+        async_context = build_async_context(
+            case_id=wait["case_id"],
+            run_id=wait["run_id"],
+            wait_id=wait["wait_id"],
+            correlation_id=wait["correlation_id"],
+            capability=capability,
+            expected_event_type=expected_event_type,
+            idempotency_key_base=command_idempotency_key,
+            result_transport=result_transport,
+            callback_url=callback_url if result_transport in {"http_callback", "both"} else None,
+            result_topic=event_topic if result_transport in {"kafka_event", "both"} else None,
+        )
+        mcp_request = build_mcp_tool_request(
+            capability=capability,
+            environment=environment,
+            binding=binding,
+            inputs=copy.deepcopy(invocation.get("parameters") or {}),
+            async_context=async_context,
+        )
         command_id = new_command_id()
-        command_invocation = copy.deepcopy(invocation)
-        command_invocation.setdefault("extensions", {})
-        command_invocation["extensions"]["async_callback"] = {
-            "source": source,
-            "callback_url": callback_url,
-            "case_id": wait["case_id"],
-            "ticket_id": wait["ticket_id"],
-            "run_id": wait["run_id"],
-            "wait_id": wait["wait_id"],
-            "correlation_id": wait["correlation_id"],
-            "event_type": expected_event_type,
-            "idempotency_key_base": command_idempotency_key,
-            "result_transport": result_transport,
-            "result_topic": event_topic,
-        }
-        self._prepare_async_invocation_for_storage(command_invocation)
         command = {
             "schema_version": "1.0",
             "command_id": command_id,
-            "command_type": "async_tool_invocation",
+            "command_type": "async_mcp_capability_invocation",
             "topic": command_topic,
             "case_id": wait["case_id"],
             "ticket_id": wait["ticket_id"],
@@ -582,12 +552,29 @@ class ProcessingStore:
             "result_transport": result_transport,
             "result_topic": event_topic,
             "idempotency_key": command_idempotency_key,
-            "invocation": command_invocation,
+            "capability_id": capability.get("capability_id"),
+            "mcp_environment_id": environment.get("environment_id"),
+            "mcp_tool_name": binding.get("mcp_tool_name"),
+            "capability_snapshot": copy.deepcopy(capability),
+            "mcp_environment_snapshot": copy.deepcopy(environment),
+            "capability_binding_snapshot": copy.deepcopy(binding),
+            "mcp_request": mcp_request,
+            "invocation": {
+                **copy.deepcopy(invocation),
+                "invocation_id": invocation_id,
+                "capability_id": capability.get("capability_id"),
+                "mcp_environment_id": environment.get("environment_id"),
+                "mcp_tool_name": binding.get("mcp_tool_name"),
+                "extensions": {
+                    **copy.deepcopy(invocation_extensions),
+                    "async_context": async_context,
+                },
+            },
         }
         outbox_message = self._enqueue(
             command_topic,
             wait["case_id"],
-            "async_tool_invocation_requested",
+            "async_mcp_capability_invocation_requested",
             command,
             idempotency_key=command["idempotency_key"],
         )
@@ -632,13 +619,23 @@ class ProcessingStore:
         event = copy.deepcopy(event)
         event.setdefault("received_at", utc_now())
         receipt = self.external_event_receipt(event["idempotency_key"])
+        receipt_claim: dict[str, Any] | None = None
         if receipt:
             self._ensure_external_event_receipt_matches(receipt, event)
             if receipt.get("receipt_status") == "processing":
-                raise ExternalEventIdempotencyConflict(
-                    "external_event_idempotency_conflict: idempotency_key уже обрабатывается другим worker."
-                )
-            return self._external_event_duplicate_result(receipt)
+                if not self._external_event_receipt_is_stale(receipt):
+                    raise ExternalEventIdempotencyConflict(
+                        "external_event_idempotency_conflict: idempotency_key уже обрабатывается другим worker."
+                    )
+                completed_recovery = self._recover_completed_external_event_receipt(receipt, event)
+                if completed_recovery is not None:
+                    return completed_recovery
+                receipt_claim = self._refresh_external_event_receipt_claim(receipt, event)
+                recovery_marker = event.get("recovery") if isinstance(event.get("recovery"), dict) else {}
+                recovery_marker["stale_receipt_reclaimed"] = True
+                event["recovery"] = recovery_marker
+            else:
+                return self._external_event_duplicate_result(receipt)
 
         wait = self.active_wait_by_correlation(
             event["correlation_id"],
@@ -661,7 +658,8 @@ class ProcessingStore:
             raise ProcessingConflict(
                 f"event_type {event['event_type']} не совпадает с ожидаемым {expected_event_type}."
             )
-        self._claim_external_event_receipt(event)
+        if receipt_claim is None:
+            receipt_claim = self._claim_external_event_receipt(event)
 
         now = utc_now()
         event["received_at"] = event.get("received_at") or now
@@ -674,21 +672,16 @@ class ProcessingStore:
         resume_task = None
         run = self.latest_run(wait["case_id"])
         if event["status"] in EXTERNAL_EVENT_TERMINAL_STATUSES:
-            wait["status"] = EXTERNAL_EVENT_WAIT_STATUS[event["status"]]
-            wait["completed_at"] = now
-            wait["completion_event_id"] = event["event_id"]
-            if run and run.get("run_id") == wait.get("run_id") and run.get("status") not in TERMINAL_RUN_STATUSES:
-                run["status"] = "queued"
-                run["current_step"] = "external_event_received"
-                run["updated_at"] = now
-                run["completed_at"] = None
-                run.setdefault("resume_events", []).append(copy.deepcopy(event_summary))
-                self._save_run(run)
-                resume_task = self._build_external_event_resume_task(run, wait, safe_event, now)
-                with self._connect() as connection:
-                    self._insert_task(connection, resume_task)
-
-        self._save_wait(wait)
+            wait, resume_task = self._apply_terminal_external_event(
+                wait=wait,
+                run=run,
+                event=event,
+                event_summary=event_summary,
+                safe_event=safe_event,
+                now=now,
+            )
+        else:
+            self._save_wait(wait)
         self._append_case_event(
             wait["case_id"],
             "processing_external_event_received",
@@ -704,20 +697,6 @@ class ProcessingStore:
                 "external_event": safe_event,
                 "origin": wait.get("origin"),
             },
-        )
-        self._enqueue(
-            "integration.events",
-            wait["case_id"],
-            "external_event_received",
-            {
-                "case_id": wait["case_id"],
-                "ticket_id": wait["ticket_id"],
-                "run_id": wait["run_id"],
-                "wait_id": wait["wait_id"],
-                "origin": wait.get("origin"),
-                "external_event": safe_event,
-            },
-            idempotency_key=event["idempotency_key"],
         )
         if resume_task:
             self._enqueue(
@@ -745,7 +724,7 @@ class ProcessingStore:
         }
         if resume_task:
             result["resume_task"] = resume_task
-        self._complete_external_event_receipt(event, result)
+        self._complete_external_event_receipt(event, result, expected_receipt=receipt_claim)
         return result
 
     def overview(self) -> dict[str, Any]:
@@ -802,6 +781,7 @@ class ProcessingStore:
                 order by role, topic, component_id
                 """
             ).fetchall()
+            recovery = self._recovery_overview(connection)
         waits_by_type: dict[str, dict[str, int]] = {}
         for row in wait_rows:
             waits_by_type.setdefault(str(row["wait_type"]), {})[str(row["status"])] = int(row["count"])
@@ -816,6 +796,7 @@ class ProcessingStore:
                 "oldest_pending": self._oldest_pending_summary(oldest_pending),
             },
             "runtime": runtime,
+            "recovery": recovery,
             "runs_by_status": self._counts(run_rows, "status"),
             "tasks_by_status": self._counts(task_rows, "status"),
             "waits_by_type": waits_by_type,
@@ -932,12 +913,12 @@ class ProcessingStore:
             if status != "ok":
                 issues.append(message)
 
-        tool_topic = os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
-        stale_tool_outbox = self._stale_pending_topic_summary(outbox_rows, tool_topic)
-        if stale_tool_outbox:
+        mcp_topic = os.getenv("MCP_COMMAND_TOPIC", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
+        stale_mcp_outbox = self._stale_pending_topic_summary(outbox_rows, mcp_topic)
+        if stale_mcp_outbox:
             issues.append(
                 (
-                    f"В topic {tool_topic} есть неопубликованный outbox старше "
+                    f"В topic {mcp_topic} есть неопубликованный outbox старше "
                     f"{ASYNC_OUTBOX_STALE_SECONDS} сек."
                 )
             )
@@ -949,8 +930,66 @@ class ProcessingStore:
             "required_components": required,
             "components": heartbeats,
             "issues": issues,
-            "stale_tool_outbox": stale_tool_outbox,
+            "stale_mcp_outbox": stale_mcp_outbox,
             "oldest_pending": self._oldest_pending_summary(oldest_pending),
+        }
+
+    def _recovery_overview(self, connection: sqlite3.Connection) -> dict[str, Any]:
+        stale_seconds = self._recovery_receipt_stale_seconds()
+        cutoff = add_seconds(utc_now(), -stale_seconds)
+        tool_rows = connection.execute(
+            """
+            select idempotency_key, command_id, case_id, wait_id, correlation_id,
+                   status, worker_id, created_at, updated_at, receipt_json
+            from tool_command_receipts
+            where status in ('claimed', 'dispatch_started', 'processing')
+              and updated_at <= ?
+            order by updated_at asc, idempotency_key asc
+            limit ?
+            """,
+            (cutoff, RECOVERY_STUCK_RECEIPT_LIMIT),
+        ).fetchall()
+        external_rows = connection.execute(
+            """
+            select idempotency_key, source, case_id, correlation_id, status,
+                   created_at, updated_at, receipt_json
+            from external_event_receipts
+            where updated_at <= ?
+            order by updated_at asc, idempotency_key asc
+            """,
+            (cutoff,),
+        ).fetchall()
+        stale_tool_receipts = [self._stale_tool_receipt_summary(row) for row in tool_rows]
+        stale_external_receipts = []
+        for row in external_rows:
+            summary = self._stale_external_event_receipt_summary(row)
+            if summary is None:
+                continue
+            stale_external_receipts.append(summary)
+            if len(stale_external_receipts) >= RECOVERY_STUCK_RECEIPT_LIMIT:
+                break
+        issues: list[str] = []
+        if stale_tool_receipts:
+            issues.append(
+                (
+                    f"Найдено зависших MCP command receipts: {len(stale_tool_receipts)}; "
+                    "проверьте, был ли внешний вызов принят исполнителем."
+                )
+            )
+        if stale_external_receipts:
+            issues.append(
+                (
+                    f"Найдено зависших ExternalEvent idempotency receipts: {len(stale_external_receipts)}; "
+                    "повторная доставка того же события сможет восстановить обработку."
+                )
+            )
+        return {
+            "schema_version": "1.0",
+            "status": "needs_attention" if issues else "ok",
+            "stale_seconds": stale_seconds,
+            "issues": issues,
+            "stale_tool_command_receipts": stale_tool_receipts,
+            "stale_external_event_receipts": stale_external_receipts,
         }
 
     @staticmethod
@@ -960,6 +999,57 @@ class ProcessingStore:
         except ValueError:
             return RUNTIME_HEARTBEAT_STALE_SECONDS
         return max(5, value)
+
+    @staticmethod
+    def _recovery_receipt_stale_seconds() -> int:
+        try:
+            value = int(os.getenv("ASYNC_RECOVERY_RECEIPT_STALE_SECONDS", str(RECOVERY_RECEIPT_STALE_SECONDS)))
+        except ValueError:
+            return RECOVERY_RECEIPT_STALE_SECONDS
+        return max(5, value)
+
+    @classmethod
+    def _stale_tool_receipt_summary(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "idempotency_key": row["idempotency_key"],
+            "command_id": row["command_id"],
+            "case_id": row["case_id"],
+            "wait_id": row["wait_id"],
+            "correlation_id": row["correlation_id"],
+            "status": row["status"],
+            "worker_id": row["worker_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "age_seconds": cls._age_seconds(row["updated_at"]),
+            "recovery_action": (
+                "redeliver_command_after_lease"
+                if row["status"] == "claimed"
+                else "manual_verify_external_executor_before_retry"
+            ),
+        }
+
+    @classmethod
+    def _stale_external_event_receipt_summary(cls, row: sqlite3.Row) -> dict[str, Any] | None:
+        try:
+            receipt = json.loads(row["receipt_json"] or "{}")
+        except json.JSONDecodeError:
+            receipt = {}
+        if receipt.get("receipt_status") != "processing":
+            return None
+        return {
+            "idempotency_key": row["idempotency_key"],
+            "event_id": receipt.get("event_id"),
+            "source": row["source"],
+            "case_id": row["case_id"],
+            "wait_id": receipt.get("wait_id"),
+            "correlation_id": row["correlation_id"],
+            "event_type": receipt.get("event_type"),
+            "event_status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "age_seconds": cls._age_seconds(row["updated_at"]),
+            "recovery_action": "redeliver_same_external_event",
+        }
 
     @classmethod
     def _runtime_heartbeat_summary(cls, row: sqlite3.Row, stale_seconds: int) -> dict[str, Any]:
@@ -1468,9 +1558,9 @@ class ProcessingStore:
         idempotency_key: str,
     ) -> None:
         self._enqueue(
-            "tool.results",
+            "case.events",
             case_id,
-            "tool_command_result_recorded",
+            "mcp_command_result_recorded",
             {
                 "case_id": case_id,
                 "tool_result": result,
@@ -1478,7 +1568,7 @@ class ProcessingStore:
             idempotency_key=idempotency_key,
         )
 
-    def verify_tool_command(self, command: dict[str, Any]) -> None:
+    def verify_tool_command(self, command: dict[str, Any]) -> dict[str, Any]:
         wait = self.require_wait(command["wait_id"])
         expected = {
             "case_id": wait["case_id"],
@@ -1501,12 +1591,25 @@ class ProcessingStore:
         message = self.outbox_message_by_idempotency_key(command["idempotency_key"])
         if not message:
             raise ProcessingNotFound(command["idempotency_key"])
-        if message.get("topic") != command.get("topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC):
+        command_topic = command.get("topic") or message.get("topic") or DEFAULT_ASYNC_MCP_COMMAND_TOPIC
+        if message.get("topic") != command_topic:
             raise ProcessingConflict("tool command topic не совпадает с outbox.")
         stored_command = message.get("payload") or {}
+        if not isinstance(stored_command, dict):
+            raise ProcessingConflict("persisted outbox payload для tool command должен быть object.")
         for key in ("command_id", "case_id", "wait_id", "correlation_id", "idempotency_key"):
             if stored_command.get(key) != command.get(key):
                 raise ProcessingConflict(f"tool command {key} не совпадает с persisted outbox payload.")
+        stored_mismatched = [
+            key
+            for key, value in expected.items()
+            if value not in (None, "") and stored_command.get(key) != value
+        ]
+        if stored_mismatched:
+            raise ProcessingConflict(
+                f"persisted tool command не совпадает с wait_state: {', '.join(sorted(stored_mismatched))}."
+            )
+        return copy.deepcopy(stored_command)
 
     def tool_command_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1654,8 +1757,11 @@ class ProcessingStore:
             "tool_result_status": (tool_result or {}).get("status"),
             "tool_result_error": (tool_result or {}).get("error"),
             "tool_result_output": (tool_result or {}).get("output"),
+            "capability_id": (tool_result or {}).get("capability_id"),
+            "mcp_environment_id": tool_extensions.get("mcp_environment_id"),
+            "mcp_tool_name": tool_extensions.get("mcp_tool_name"),
+            "external_execution_id": tool_extensions.get("external_execution_id"),
             "endpoint_url": tool_extensions.get("endpoint_url"),
-            "n8n_ack_body": tool_extensions.get("n8n_ack_body"),
         }
 
     @staticmethod
@@ -1712,12 +1818,13 @@ class ProcessingStore:
         dead_letter: dict[str, Any] | None,
         external_event_receipts: list[dict[str, Any]],
     ) -> tuple[str, str, str, str]:
+        labels = ProcessingStore._async_delivery_labels(async_wait, wait, outbox_message)
         if dead_letter:
             error = ((dead_letter.get("payload") or {}).get("error") or dead_letter.get("last_error") or "н/д")
             return (
                 "worker_failed",
                 f"Команда попала в dead-letter: {error}",
-                "ToolCommandWorker не смог обработать команду и записал ее в dead-letter.",
+                f"{labels['worker']} не смог обработать команду и записал ее в dead-letter.",
                 "error",
             )
         terminal_receipts = [
@@ -1745,24 +1852,35 @@ class ProcessingStore:
                 detail = "; ".join(part for part in detail_parts if part)
                 return (
                     "external_event_progress",
-                    f"n8n workflow выполняется: {message or detail or 'получено промежуточное состояние polling.'}",
-                    "Workflow был запущен и вернул промежуточный progress ExternalEvent; terminal результат еще ожидается.",
+                    f"{labels['executor']} выполняется: {message or detail or 'получено промежуточное состояние polling.'}",
+                    (
+                        f"{labels['executor']} запущен и вернул промежуточный progress ExternalEvent; "
+                        "terminal результат еще ожидается."
+                    ),
                     "pending",
                 )
             if event_status == "success":
                 message = event_result.get("message") if isinstance(event_result, dict) else None
                 return (
                     "external_event_received",
-                    f"Получен успешный внешний результат n8n: {message}" if message else "Получен успешный внешний результат n8n.",
-                    "Команда была доставлена до n8n, workflow вернул terminal ExternalEvent со статусом success.",
+                    (
+                        f"Получен успешный внешний результат {labels['executor']}: {message}"
+                        if message
+                        else f"Получен успешный внешний результат {labels['executor']}."
+                    ),
+                    f"Команда была доставлена до {labels['target']}, terminal ExternalEvent вернул статус success.",
                     "ok",
                 )
             if event_status == "timeout":
                 message = event_result.get("message") if isinstance(event_result, dict) else None
                 return (
                     "external_event_timeout",
-                    f"n8n вернул timeout по асинхронному workflow: {message}" if message else "n8n вернул timeout по асинхронному workflow.",
-                    "Workflow был запущен, но завершился timeout ExternalEvent; требуется разбор результата или эскалация.",
+                    (
+                        f"{labels['executor']} вернул timeout: {message}"
+                        if message
+                        else f"{labels['executor']} вернул timeout."
+                    ),
+                    "Исполнение было запущено, но завершилось timeout ExternalEvent; требуется разбор результата или эскалация.",
                     "warning",
                 )
             if event_status in {"error", "cancelled"}:
@@ -1779,14 +1897,14 @@ class ProcessingStore:
                 error_text = f"{error_code}: {error_message}" if error_code and error_code != error_message else str(error_message)
                 return (
                     "external_event_failed",
-                    f"n8n вернул ошибочный внешний результат: {error_text}",
-                    "Workflow был запущен, но terminal ExternalEvent сообщил ошибку; бизнес-действие не завершилось успешно.",
+                    f"{labels['executor']} вернул ошибочный внешний результат: {error_text}",
+                    "Исполнение было запущено, но terminal ExternalEvent сообщил ошибку; бизнес-действие не завершилось успешно.",
                     "error",
                 )
             return (
                 "external_event_received",
-                f"Получен внешний результат n8n со статусом {latest.get('status')}.",
-                "Команда была доставлена до n8n, внешний результат вернулся в оркестратор.",
+                f"Получен внешний результат {labels['executor']} со статусом {latest.get('status')}.",
+                f"Команда была доставлена до {labels['target']}, внешний результат вернулся в оркестратор.",
                 "ok",
             )
         if wait and wait.get("status") not in ACTIVE_WAIT_STATUSES:
@@ -1804,8 +1922,8 @@ class ProcessingStore:
             if receipt_status == "completed" and tool_status in {"success", "dry_run_completed"}:
                 return (
                     "waiting_external_event",
-                    "Worker обработал команду и n8n-вызов принят; ожидается внешний результат.",
-                    "Исполнение дошло до n8n, но финальный ExternalEvent еще не получен.",
+                    f"{labels['worker']} обработал команду, {labels['target']} принял вызов; ожидается внешний результат.",
+                    f"Исполнение дошло до {labels['target']}, но финальный ExternalEvent еще не получен.",
                     "ok",
                 )
             if receipt_status == "completed":
@@ -1823,21 +1941,25 @@ class ProcessingStore:
                     "http_403",
                     "endpoint_response_contract_violation",
                 }:
+                    status = "mcp_launch_rejected" if labels["kind"] == "capability" else "external_launch_rejected"
                     return (
-                        "n8n_launch_rejected",
-                        f"n8n отклонил запуск workflow: {error_code}: {error_message}",
-                        "ToolCommandWorker вызвал n8n endpoint, но webhook вернул ошибку до accepted; письмо и дальнейший мониторинг не выполнялись.",
+                        status,
+                        f"{labels['target']} отклонил запуск: {error_code}: {error_message}",
+                        (
+                            f"{labels['worker']} вызвал {labels['target']}, но получил ошибку до accepted; "
+                            "дальнейший мониторинг не выполнялся."
+                        ),
                         "error",
                     )
                 return (
                     "worker_failed",
                     f"Worker завершил команду с ошибкой: {error_code}: {error_message}",
-                    "ToolCommandWorker вызвал endpoint, но получил ошибочный результат.",
+                    f"{labels['worker']} вызвал {labels['target']}, но получил ошибочный результат.",
                     "error",
                 )
             return (
                 "worker_started",
-                "ToolCommandWorker начал обработку команды, но завершение еще не записано.",
+                f"{labels['worker']} начал обработку команды, но завершение еще не записано.",
                 "Команда уже взята worker-ом; нужно дождаться завершения или проверить зависший worker.",
                 "pending",
             )
@@ -1846,8 +1968,11 @@ class ProcessingStore:
             if outbox_status == "published":
                 return (
                     "published_to_kafka",
-                    "Команда опубликована в Kafka, но ToolCommandWorker еще не записал receipt.",
-                    "Сообщение дошло до Kafka; ToolCommandWorker для topic tool.commands не обработал его или еще не завершил обработку.",
+                    f"Команда опубликована в Kafka, но {labels['worker']} еще не записал receipt.",
+                    (
+                        f"Сообщение дошло до Kafka; {labels['worker']} для topic {labels['topic']} "
+                        "не обработал его или еще не завершил обработку."
+                    ),
                     "pending",
                 )
             if outbox_status == "publishing":
@@ -1870,14 +1995,14 @@ class ProcessingStore:
                     "queued_in_outbox",
                     (
                         f"Команда создана в outbox, но не опубликована в Kafka более "
-                        f"{ASYNC_OUTBOX_STALE_SECONDS} сек.; фактический вызов n8n не запускался."
+                        f"{ASYNC_OUTBOX_STALE_SECONDS} сек.; фактический вызов {labels['target']} не запускался."
                     ),
-                    "Outbox publisher не запущен, остановлен или не обрабатывает topic tool.commands.",
+                    f"Outbox publisher не запущен, остановлен или не обрабатывает topic {labels['topic']}.",
                     "warning",
                 )
             return (
                 "queued_in_outbox",
-                "Команда создана в outbox и ожидает публикации publisher-ом; фактический вызов n8n еще не запускался.",
+                f"Команда создана в outbox и ожидает публикации publisher-ом; фактический вызов {labels['target']} еще не запускался.",
                 "Outbox publisher еще не обработал pending сообщение.",
                 "pending",
             )
@@ -1895,10 +2020,48 @@ class ProcessingStore:
             "warning",
         )
 
+    @staticmethod
+    def _async_delivery_labels(
+        async_wait: dict[str, Any],
+        wait: dict[str, Any] | None,
+        outbox_message: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        origin = wait.get("origin") if isinstance(wait, dict) and isinstance(wait.get("origin"), dict) else {}
+        payload = outbox_message.get("payload") if isinstance(outbox_message, dict) and isinstance(outbox_message.get("payload"), dict) else {}
+        is_capability = (
+            origin.get("kind") == "capability"
+            or payload.get("command_type") == "async_mcp_capability_invocation"
+            or async_wait.get("topic") == DEFAULT_ASYNC_MCP_COMMAND_TOPIC
+        )
+        if is_capability:
+            capability_id = origin.get("capability_id") or payload.get("capability_id") or "capability"
+            return {
+                "kind": "capability",
+                "executor": f"capability {capability_id}",
+                "target": "MCP-окружение",
+                "worker": "McpCommandWorker",
+                "topic": DEFAULT_ASYNC_MCP_COMMAND_TOPIC,
+            }
+        return {
+            "kind": "unknown",
+            "executor": "external capability",
+            "target": "MCP-окружение",
+            "worker": "McpCommandWorker",
+            "topic": DEFAULT_ASYNC_MCP_COMMAND_TOPIC,
+        }
+
     def begin_tool_command(self, command: dict[str, Any], *, worker_id: str) -> dict[str, Any]:
         self.verify_tool_command(command)
         existing = self.tool_command_receipt(command["idempotency_key"])
         if existing:
+            if existing.get("status") == "claimed" and self._tool_command_receipt_is_stale(existing):
+                refreshed = self._refresh_tool_command_receipt_claim(existing, worker_id=worker_id)
+                return {
+                    "schema_version": "1.0",
+                    "duplicate": False,
+                    "status": refreshed["status"],
+                    "receipt": refreshed,
+                }
             return {
                 "schema_version": "1.0",
                 "duplicate": True,
@@ -1913,8 +2076,9 @@ class ProcessingStore:
             "case_id": command["case_id"],
             "wait_id": command["wait_id"],
             "correlation_id": command["correlation_id"],
-            "status": "processing",
+            "status": "claimed",
             "worker_id": worker_id,
+            "claim_token": f"claim-{uuid.uuid4().hex[:12]}",
             "created_at": now,
             "updated_at": now,
         }
@@ -1951,9 +2115,55 @@ class ProcessingStore:
         return {
             "schema_version": "1.0",
             "duplicate": False,
-            "status": "processing",
+            "status": "claimed",
             "receipt": receipt,
         }
+
+    def mark_tool_command_dispatch_started(
+        self,
+        command: dict[str, Any],
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        existing = self.tool_command_receipt(command["idempotency_key"])
+        if not existing:
+            raise ProcessingConflict(f"tool command receipt не найден: {command['idempotency_key']}")
+        if existing.get("status") == "dispatch_started":
+            return existing
+        if existing.get("status") != "claimed":
+            raise ProcessingConflict(
+                f"tool command receipt должен быть claimed перед dispatch: {command['idempotency_key']}"
+            )
+        now = utc_now()
+        started = copy.deepcopy(existing)
+        started["status"] = "dispatch_started"
+        started["worker_id"] = worker_id
+        started["dispatch_started_at"] = now
+        started["updated_at"] = now
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update tool_command_receipts
+                set status = 'dispatch_started',
+                    worker_id = ?,
+                    receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                  and receipt_json = ?
+                """,
+                (
+                    worker_id,
+                    self._to_json(started),
+                    now,
+                    command["idempotency_key"],
+                    self._to_json(existing),
+                ),
+            )
+        if not cursor.rowcount:
+            raise ProcessingConflict(
+                f"tool command receipt dispatch уже изменен другим worker: {command['idempotency_key']}"
+            )
+        return started
 
     def complete_tool_command(
         self,
@@ -1984,7 +2194,7 @@ class ProcessingStore:
                     receipt_json = ?,
                     updated_at = ?
                 where idempotency_key = ?
-                  and status = 'processing'
+                  and status in ('claimed', 'dispatch_started', 'processing')
                 """,
                 (worker_id, self._to_json(receipt), now, command["idempotency_key"]),
             )
@@ -1995,6 +2205,46 @@ class ProcessingStore:
             raise ProcessingConflict(f"tool command receipt не найден или уже завершен: {command['idempotency_key']}")
         return receipt
 
+    @classmethod
+    def _tool_command_receipt_is_stale(cls, receipt: dict[str, Any]) -> bool:
+        age_seconds = cls._age_seconds(receipt.get("updated_at"))
+        if age_seconds is None:
+            return True
+        return age_seconds >= cls._recovery_receipt_stale_seconds()
+
+    def _refresh_tool_command_receipt_claim(self, receipt: dict[str, Any], *, worker_id: str) -> dict[str, Any]:
+        now = utc_now()
+        refreshed = copy.deepcopy(receipt)
+        refreshed["status"] = "claimed"
+        refreshed["worker_id"] = worker_id
+        refreshed["claim_token"] = f"claim-{uuid.uuid4().hex[:12]}"
+        refreshed["recovered_at"] = now
+        refreshed["updated_at"] = now
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update tool_command_receipts
+                set status = 'claimed',
+                    worker_id = ?,
+                    receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                  and receipt_json = ?
+                """,
+                (
+                    worker_id,
+                    self._to_json(refreshed),
+                    now,
+                    receipt["idempotency_key"],
+                    self._to_json(receipt),
+                ),
+            )
+        if not cursor.rowcount:
+            raise ProcessingConflict(
+                f"tool command receipt уже переарендован другим worker: {receipt['idempotency_key']}"
+            )
+        return refreshed
+
     def record_tool_command_dead_letter(
         self,
         command: dict[str, Any],
@@ -2004,8 +2254,8 @@ class ProcessingStore:
     ) -> dict[str, Any]:
         dead_letter = {
             "schema_version": "1.0",
-            "source_topic": command.get("topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC),
-            "event_type": "tool_command_failed",
+            "source_topic": command.get("topic", DEFAULT_ASYNC_MCP_COMMAND_TOPIC),
+            "event_type": "mcp_command_failed",
             "case_id": command.get("case_id", "unknown"),
             "wait_id": command.get("wait_id"),
             "correlation_id": command.get("correlation_id"),
@@ -2018,7 +2268,7 @@ class ProcessingStore:
         self._enqueue(
             "dead-letter",
             str(command.get("case_id") or "unknown"),
-            "tool_command_failed",
+            "mcp_command_failed",
             dead_letter,
             idempotency_key=f"{command.get('idempotency_key') or command.get('command_id')}:dead_letter",
         )
@@ -2411,7 +2661,7 @@ class ProcessingStore:
                 "source_hint": rule.get("source_hint"),
                 "event_id": external_event.get("event_id"),
                 "event_type": external_event.get("event_type"),
-                "reason": "Слот заполнен из terminal ExternalEvent результата ReAct-вызова.",
+                "reason": "Слот заполнен из terminal ExternalEvent результата capability.",
             }
         return materialized
 
@@ -2601,36 +2851,51 @@ class ProcessingStore:
         tool_name: Any = None,
         endpoint_id: Any = None,
         operation_id: Any = None,
+        capability_id: Any = None,
+        mcp_environment_id: Any = None,
+        mcp_tool_name: Any = None,
     ) -> str:
         return "|".join(
             str(value or "")
             for value in (profile_id, step_id, tool_name, endpoint_id, operation_id)
+            + (capability_id, mcp_environment_id, mcp_tool_name)
         )
 
     @classmethod
     def _tool_launch_key_from_launch(cls, launch: dict[str, Any]) -> str:
+        if launch.get("capability_id") or launch.get("mcp_environment_id") or launch.get("mcp_tool_name"):
+            return cls._tool_launch_key_from_parts(
+                profile_id=launch.get("profile_id"),
+                step_id=launch.get("step_id"),
+                capability_id=launch.get("capability_id"),
+                mcp_environment_id=launch.get("mcp_environment_id"),
+                mcp_tool_name=launch.get("mcp_tool_name"),
+            )
         return cls._tool_launch_key_from_parts(
             profile_id=launch.get("profile_id"),
             step_id=launch.get("step_id"),
             tool_name=launch.get("tool_name"),
             endpoint_id=launch.get("endpoint_id"),
             operation_id=launch.get("operation_id"),
+            capability_id=launch.get("capability_id"),
+            mcp_environment_id=launch.get("mcp_environment_id"),
+            mcp_tool_name=launch.get("mcp_tool_name"),
         )
 
     @classmethod
     def _tool_launch_key_from_wait(cls, wait: dict[str, Any]) -> str | None:
         origin = wait.get("origin") if isinstance(wait.get("origin"), dict) else {}
-        tool_name = origin.get("react_call")
-        endpoint_id = origin.get("endpoint_id")
-        operation_id = origin.get("operation_id")
-        if not (tool_name or endpoint_id or operation_id):
+        capability_id = origin.get("capability_id")
+        mcp_environment_id = origin.get("mcp_environment_id")
+        mcp_tool_name = origin.get("mcp_tool_name")
+        if not (capability_id or mcp_environment_id or mcp_tool_name):
             return None
         return cls._tool_launch_key_from_parts(
             profile_id=origin.get("source_profile_id"),
             step_id=origin.get("source_step_id"),
-            tool_name=tool_name,
-            endpoint_id=endpoint_id,
-            operation_id=operation_id,
+            capability_id=capability_id,
+            mcp_environment_id=mcp_environment_id,
+            mcp_tool_name=mcp_tool_name,
         )
 
     @staticmethod
@@ -2652,17 +2917,21 @@ class ProcessingStore:
                 "extensions",
             }
         }
-        result.setdefault("tool_name", launch.get("tool_name"))
+        result.setdefault("tool_name", launch.get("tool_name") or launch.get("capability_id"))
+        if launch.get("capability_id"):
+            result.setdefault("capability_id", launch.get("capability_id"))
         result.setdefault("action_id", f"{launch.get('launch_id')}.action")
-        result.setdefault("action_type", launch.get("action_type") or "read_only")
+        result.setdefault("action_type", "mcp_capability" if launch.get("launch_type") == "capability" else launch.get("action_type") or "read_only")
         result.setdefault("parameters", copy.deepcopy(launch.get("parameters") or {}))
         result.setdefault("reason", f"Продолжение сценария после ExternalEvent: {launch.get('launch_id')}.")
         result.setdefault("risk_level", "medium" if result["action_type"] == "action" else "low")
         result.setdefault("expected_effect", "Будет выполнен следующий готовый шаг профиля разрешения.")
         result.setdefault("requires_state_change", result["action_type"] == "action")
         extensions = result.setdefault("extensions", {})
-        extensions.setdefault("endpoint_id", launch.get("endpoint_id"))
-        extensions.setdefault("operation_id", launch.get("operation_id"))
+        extensions.setdefault("capability_id", launch.get("capability_id"))
+        extensions.setdefault("mcp_environment_id", launch.get("mcp_environment_id"))
+        extensions.setdefault("mcp_tool_name", launch.get("mcp_tool_name"))
+        extensions.setdefault("execution_mode", launch.get("execution_mode"))
         extensions.setdefault("completion_policy", copy.deepcopy(launch.get("completion_policy") or {"mode": "sync"}))
         extensions.setdefault("source_profile_id", launch.get("profile_id"))
         extensions.setdefault("source_step_id", launch.get("step_id"))
@@ -2696,7 +2965,7 @@ class ProcessingStore:
 
     @staticmethod
     def _unresolved_action_parameters(action: dict[str, Any]) -> list[str]:
-        unresolved_prefixes = ("slot:", "case:", "step:", "react:", "output:")
+        unresolved_prefixes = ("slot:", "case:", "step:", "output:")
         unresolved: list[str] = []
         for parameter, value in (action.get("parameters") or {}).items():
             if isinstance(value, str) and value.startswith(unresolved_prefixes):
@@ -2734,12 +3003,331 @@ class ProcessingStore:
             "profile_id": launch.get("profile_id"),
             "step_id": launch.get("step_id"),
             "tool_name": launch.get("tool_name"),
-            "endpoint_id": launch.get("endpoint_id"),
-            "operation_id": launch.get("operation_id"),
+            "capability_id": launch.get("capability_id"),
+            "mcp_environment_id": launch.get("mcp_environment_id"),
+            "mcp_tool_name": launch.get("mcp_tool_name"),
         }
         run.setdefault("extensions", {}).setdefault("continuation_tool_dispatches", []).append(marker)
         self._save_run(run)
         return marker
+
+    def _capability_context_for_launch(self, launch: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if not self.config_store:
+            raise ProcessingConflict("ConfigStore не подключен: capability launch невозможен.")
+        capability_id = launch.get("capability_id")
+        environment_id = launch.get("mcp_environment_id")
+        mcp_tool_name = launch.get("mcp_tool_name")
+        capability = next(
+            (
+                item
+                for item in self.config_store.active_payload("capabilities").get("capabilities", [])
+                if item.get("capability_id") == capability_id
+            ),
+            None,
+        )
+        if not capability:
+            raise ProcessingConflict(f"Capability не найдена: {capability_id}.")
+        environments = self.config_store.active_payload("mcp_environments").get("environments", [])
+        environment = next((item for item in environments if item.get("environment_id") == environment_id), None)
+        if not environment:
+            raise ProcessingConflict(f"MCP-окружение не найдено: {environment_id}.")
+        bindings = [
+            item
+            for item in self.config_store.active_payload("capability_bindings").get("bindings", [])
+            if item.get("capability_id") == capability_id
+            and item.get("environment_id") == environment_id
+            and item.get("mcp_tool_name") == mcp_tool_name
+            and item.get("status") == "active"
+        ]
+        if len(bindings) != 1:
+            raise ProcessingConflict(
+                f"Для capability {capability_id} не найдена однозначная active binding в {environment_id}."
+            )
+        return copy.deepcopy(capability), copy.deepcopy(environment), copy.deepcopy(bindings[0])
+
+    @staticmethod
+    def _source_extensions_from_action(action: dict[str, Any]) -> dict[str, Any]:
+        action_extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        return {
+            key: copy.deepcopy(value)
+            for key in (
+                "source_profile_id",
+                "source_step_id",
+                "source_slot_schema_id",
+                "source_target_slot_id",
+                "source_output_slots_order",
+                "debug_launch_id",
+            )
+            if (value := action_extensions.get(key)) not in (None, "", {}, [])
+        }
+
+    @staticmethod
+    def _capability_launch_from_action(action: dict[str, Any]) -> dict[str, Any]:
+        action_extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        capability_id = action.get("capability_id") or action_extensions.get("capability_id") or action.get("tool_name")
+        action_id = str(action.get("action_id") or f"{capability_id}.action")
+        launch_id = str(action_extensions.get("debug_launch_id") or action_id.removesuffix(".action"))
+        return {
+            "launch_id": launch_id,
+            "launch_type": "capability",
+            "profile_id": action_extensions.get("source_profile_id"),
+            "slot_schema_id": action_extensions.get("source_slot_schema_id"),
+            "target_slot_id": action_extensions.get("source_target_slot_id"),
+            "output_slots_order": copy.deepcopy(action_extensions.get("source_output_slots_order") or []),
+            "step_id": action_extensions.get("source_step_id"),
+            "tool_name": action.get("tool_name") or capability_id,
+            "capability_id": capability_id,
+            "mcp_environment_id": action_extensions.get("mcp_environment_id"),
+            "mcp_tool_name": action_extensions.get("mcp_tool_name"),
+            "execution_mode": action_extensions.get("execution_mode"),
+            "completion_policy": copy.deepcopy(action_extensions.get("completion_policy") or {}),
+        }
+
+    def dispatch_capability_action(
+        self,
+        action: dict[str, Any],
+        policy_result: dict[str, Any],
+        *,
+        case_id: str,
+        ticket_id: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.latest_run(case_id)
+        if not run:
+            raise ProcessingNotFound(f"У кейса {case_id} нет processing run для capability dispatch.")
+        enriched_action = copy.deepcopy(action)
+        launch = self._capability_launch_from_action(enriched_action)
+        enriched_action.setdefault("tool_name", launch.get("capability_id") or "capability")
+        enriched_action.setdefault("action_id", f"{launch.get('launch_id')}.action")
+        enriched_action.setdefault("parameters", {})
+        invocation_id = f"{run['run_id']}:{launch.get('launch_id')}"
+        enriched_action.setdefault("extensions", {})["initial_dispatch"] = True
+        result = self._dispatch_capability_launch(
+            run=run,
+            launch=launch,
+            action=enriched_action,
+            policy_rule_id=policy_result.get("policy_rule_id") or "mcp_capability.dispatch",
+            invocation_id=invocation_id,
+        )
+        result.setdefault(
+            "invocation",
+            {
+                "invocation_id": invocation_id,
+                "case_id": case_id,
+                "ticket_id": ticket_id,
+                "capability_id": launch.get("capability_id"),
+                "mcp_environment_id": launch.get("mcp_environment_id"),
+                "mcp_tool_name": launch.get("mcp_tool_name"),
+                "parameters": copy.deepcopy(enriched_action.get("parameters") or {}),
+            },
+        )
+        return result
+
+    def _dispatch_capability_launch_after_external_event(
+        self,
+        *,
+        run: dict[str, Any],
+        launch: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._dispatch_capability_launch(
+            run=run,
+            launch=launch,
+            action=action,
+            policy_rule_id="external_event_resume.configured_profile",
+        )
+
+    def _dispatch_capability_launch(
+        self,
+        *,
+        run: dict[str, Any],
+        launch: dict[str, Any],
+        action: dict[str, Any],
+        policy_rule_id: str,
+        invocation_id: str | None = None,
+    ) -> dict[str, Any]:
+        capability, environment, binding = self._capability_context_for_launch(launch)
+        completion_policy = copy.deepcopy(launch.get("completion_policy") or capability.get("default_completion_policy") or {})
+        if binding.get("execution_mode") == "sync":
+            return self._dispatch_sync_capability_launch_after_external_event(
+                run=run,
+                launch=launch,
+                action=action,
+                capability=capability,
+                environment=environment,
+                binding=binding,
+                completion_policy=completion_policy,
+                policy_rule_id=policy_rule_id,
+                invocation_id=invocation_id,
+            )
+        if binding.get("execution_mode") != "async":
+            raise ProcessingConflict(f"Неподдерживаемый MCP execution_mode: {binding.get('execution_mode')}.")
+        if completion_policy.get("mode") != "external_event":
+            raise ProcessingConflict("Async capability dispatch требует completion_policy.mode=external_event.")
+        expected_event_type = completion_policy.get("expected_event_type")
+        if not expected_event_type:
+            raise ProcessingConflict("Async capability dispatch требует expected_event_type.")
+        action_extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        invocation = {
+            "invocation_id": invocation_id or f"{run['run_id']}:{launch.get('launch_id')}",
+            "case_id": run["case_id"],
+            "ticket_id": run.get("ticket_id"),
+            "parameters": copy.deepcopy(action.get("parameters") or {}),
+            "extensions": copy.deepcopy(action_extensions),
+        }
+        contract_snapshot = None
+        if self.config_store:
+            try:
+                contract_snapshot = self.config_store.capability_event_contract_snapshot(
+                    capability_id=capability["capability_id"],
+                    event_type=expected_event_type,
+                )
+            except Exception:
+                contract_snapshot = None
+        queued = self.enqueue_async_capability_command(
+            invocation,
+            capability=capability,
+            environment=environment,
+            binding=binding,
+            expected_event_type=expected_event_type,
+            result_transport=completion_policy.get("result_transport", "http_callback"),
+            result_topic=completion_policy.get("result_topic"),
+            contract_snapshot=contract_snapshot,
+            deadline_seconds=completion_policy.get("max_wait_seconds"),
+            reason=f"Ожидание результата capability {capability['capability_id']}.",
+        )
+        return {
+            "invocation": queued["command"]["invocation"],
+            "tool_result": self._async_capability_queued_result(
+                action=action,
+                launch=launch,
+                queued=queued,
+                completion_policy=completion_policy,
+                policy_rule_id=policy_rule_id,
+            ),
+        }
+
+    def _dispatch_sync_capability_launch_after_external_event(
+        self,
+        *,
+        run: dict[str, Any],
+        launch: dict[str, Any],
+        action: dict[str, Any],
+        capability: dict[str, Any],
+        environment: dict[str, Any],
+        binding: dict[str, Any],
+        completion_policy: dict[str, Any],
+        policy_rule_id: str,
+        invocation_id: str | None = None,
+    ) -> dict[str, Any]:
+        invocation_id = invocation_id or f"{run['run_id']}:{launch.get('launch_id')}"
+        mcp_request = build_mcp_tool_request(
+            capability=capability,
+            environment=environment,
+            binding=binding,
+            inputs=copy.deepcopy(action.get("parameters") or {}),
+        )
+        mcp_result = invoke_mcp_tool_request(
+            environment=environment,
+            mcp_request=mcp_request,
+            secret_resolver=os.getenv,
+            request_id=invocation_id,
+        )
+        validate_sync_result(mcp_result, capability)
+        tool_result = {
+            "schema_version": "1.0",
+            "invocation_id": invocation_id,
+            "action_id": action.get("action_id") or f"{launch.get('launch_id')}.action",
+            "tool_name": capability["capability_id"],
+            "endpoint_id": environment["environment_id"],
+            "adapter_type": "mcp_tool",
+            "operation_id": binding["mcp_tool_name"],
+            "status": "success",
+            "policy_rule_id": policy_rule_id,
+            "duration_ms": 0,
+            "attempts": 1,
+            "output": copy.deepcopy(mcp_result),
+            "extensions": {
+                **self._source_extensions_from_action(action),
+                "mock": False,
+                "capability_id": capability["capability_id"],
+                "mcp_environment_id": environment["environment_id"],
+                "mcp_tool_name": binding["mcp_tool_name"],
+                "execution_mode": binding.get("execution_mode"),
+                "completion_policy": copy.deepcopy(completion_policy),
+                "diagnostics": copy.deepcopy(mcp_result.get("diagnostics") or {}),
+            },
+        }
+        self.record_tool_command_result(
+            tool_result,
+            case_id=run["case_id"],
+            idempotency_key=f"{run['case_id']}:capability_sync:{invocation_id}",
+        )
+        return {
+            "invocation": {
+                "invocation_id": invocation_id,
+                "case_id": run["case_id"],
+                "ticket_id": run.get("ticket_id"),
+                "capability_id": capability["capability_id"],
+                "mcp_environment_id": environment["environment_id"],
+                "mcp_tool_name": binding["mcp_tool_name"],
+                "parameters": copy.deepcopy(action.get("parameters") or {}),
+            },
+            "tool_result": tool_result,
+        }
+
+    @staticmethod
+    def _async_capability_queued_result(
+        *,
+        action: dict[str, Any],
+        launch: dict[str, Any],
+        queued: dict[str, Any],
+        completion_policy: dict[str, Any],
+        policy_rule_id: str,
+    ) -> dict[str, Any]:
+        wait = queued["wait"]
+        command = queued["command"]
+        source_extensions = ProcessingStore._source_extensions_from_action(action)
+        return {
+            "schema_version": "1.0",
+            "invocation_id": command["invocation"]["invocation_id"],
+            "action_id": action.get("action_id") or f"{launch.get('launch_id')}.action",
+            "tool_name": command["capability_id"],
+            "endpoint_id": command["mcp_environment_id"],
+            "adapter_type": "mcp_tool",
+            "operation_id": command["mcp_tool_name"],
+            "status": "success",
+            "policy_rule_id": policy_rule_id,
+            "duration_ms": 0,
+            "attempts": 0,
+            "output": {
+                "runbook_status": "accepted",
+                "message": "Асинхронная capability поставлена в очередь выполнения внешним MCP.",
+                "async_delivery": True,
+                "wait_id": wait["wait_id"],
+                "correlation_id": wait["correlation_id"],
+                "result_transport": command.get("result_transport"),
+                "result_topic": command.get("result_topic"),
+                "invocation_id": command["invocation"]["invocation_id"],
+                "action_id": action.get("action_id"),
+            },
+            "extensions": {
+                **source_extensions,
+                "mock": False,
+                "capability_id": command["capability_id"],
+                "mcp_environment_id": command["mcp_environment_id"],
+                "mcp_tool_name": command["mcp_tool_name"],
+                "async_wait": {
+                    "wait_id": wait["wait_id"],
+                    "run_id": wait["run_id"],
+                    "correlation_id": wait["correlation_id"],
+                    "event_type": command["expected_event_type"],
+                    "callback_url": command["callback_url"],
+                    "command_id": command["command_id"],
+                    "topic": command["topic"],
+                    "completion_policy": copy.deepcopy(completion_policy),
+                },
+            },
+        }
 
     def _dispatch_ready_tool_launches_after_external_event(
         self,
@@ -2757,9 +3345,7 @@ class ProcessingStore:
             if launch.get("status") == "ready"
         ]
         if not ready_launches:
-            return {"status": "skipped", "reason": "Нет готовых ReAct-шагов после ExternalEvent."}
-        if workflow is None:
-            return {"status": "skipped", "reason": "TicketWorkflow не подключен к ProcessingStore."}
+            return {"status": "skipped", "reason": "Нет готовых capability-шагов после ExternalEvent."}
 
         actions_by_id = {
             action.get("action_id"): action
@@ -2804,14 +3390,23 @@ class ProcessingStore:
                 event_id=event_id,
             )
             try:
-                dispatch_result = workflow.dispatch_tool(
-                    action,
-                    self._continuation_policy_for_action(action),
-                    case_id=run["case_id"],
-                    ticket_id=run.get("ticket_id"),
-                    approved_by_operator=True,
-                    operator_id="external_event_resume",
-                )
+                if launch.get("launch_type") == "capability":
+                    dispatch_result = self._dispatch_capability_launch_after_external_event(
+                        run=run,
+                        launch=launch,
+                        action=action,
+                    )
+                else:
+                    if workflow is None:
+                        raise ProcessingConflict("TicketWorkflow не подключен к ProcessingStore.")
+                    dispatch_result = workflow.dispatch_tool(
+                        action,
+                        self._continuation_policy_for_action(action),
+                        case_id=run["case_id"],
+                        ticket_id=run.get("ticket_id"),
+                        approved_by_operator=True,
+                        operator_id="external_event_resume",
+                    )
                 tool_result = dispatch_result.get("tool_result") or {}
                 async_wait = (tool_result.get("extensions") or {}).get("async_wait")
                 marker["status"] = "queued" if async_wait else tool_result.get("status", "completed")
@@ -3272,6 +3867,18 @@ class ProcessingStore:
             raise ProcessingNotFound(task_id)
         return row
 
+    def task_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select task_json
+                from agent_tasks
+                where idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return json.loads(row["task_json"]) if row else None
+
     def require_wait(self, wait_id: str) -> dict[str, Any]:
         row = self._get_json_by_id("wait_states", "wait_id", wait_id, "wait_json")
         if row is None:
@@ -3503,6 +4110,41 @@ class ProcessingStore:
             ),
         )
 
+    def _insert_task_if_absent(self, connection: sqlite3.Connection, task: dict[str, Any]) -> dict[str, Any]:
+        cursor = connection.execute(
+            """
+            insert or ignore into agent_tasks (
+                task_id, run_id, case_id, ticket_id, task_type, status, topic,
+                worker_id, attempt, lease_until, heartbeat_at, idempotency_key,
+                created_at, updated_at, task_json
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task["task_id"],
+                task["run_id"],
+                task["case_id"],
+                task["ticket_id"],
+                task["task_type"],
+                task["status"],
+                task["topic"],
+                task.get("worker_id"),
+                task.get("attempt", 0),
+                task.get("lease_until"),
+                task.get("heartbeat_at"),
+                task["idempotency_key"],
+                task["created_at"],
+                task["updated_at"],
+                self._to_json(task),
+            ),
+        )
+        if cursor.rowcount:
+            return task
+        existing = self._task_by_idempotency_key(connection, task["idempotency_key"])
+        if existing:
+            return existing
+        raise ProcessingConflict(f"Не удалось создать или найти задачу {task['idempotency_key']}.")
+
     def _insert_wait(self, connection: sqlite3.Connection, wait: dict[str, Any]) -> None:
         connection.execute(
             """
@@ -3530,25 +4172,28 @@ class ProcessingStore:
 
     def _save_run(self, run: dict[str, Any]) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                update processing_runs
-                set status = ?,
-                    current_step = ?,
-                    updated_at = ?,
-                    completed_at = ?,
-                    run_json = ?
-                where run_id = ?
-                """,
-                (
-                    run["status"],
-                    run.get("current_step"),
-                    run["updated_at"],
-                    run.get("completed_at"),
-                    self._to_json(run),
-                    run["run_id"],
-                ),
-            )
+            self._save_run_in_connection(connection, run)
+
+    def _save_run_in_connection(self, connection: sqlite3.Connection, run: dict[str, Any]) -> None:
+        connection.execute(
+            """
+            update processing_runs
+            set status = ?,
+                current_step = ?,
+                updated_at = ?,
+                completed_at = ?,
+                run_json = ?
+            where run_id = ?
+            """,
+            (
+                run["status"],
+                run.get("current_step"),
+                run["updated_at"],
+                run.get("completed_at"),
+                self._to_json(run),
+                run["run_id"],
+            ),
+        )
 
     def _save_task(self, task: dict[str, Any]) -> None:
         with self._connect() as connection:
@@ -3597,6 +4242,64 @@ class ProcessingStore:
                     wait["wait_id"],
                 ),
             )
+
+    def _apply_terminal_external_event(
+        self,
+        *,
+        wait: dict[str, Any],
+        run: dict[str, Any] | None,
+        event: dict[str, Any],
+        event_summary: dict[str, Any],
+        safe_event: dict[str, Any],
+        now: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        terminal_wait = copy.deepcopy(wait)
+        terminal_wait["status"] = EXTERNAL_EVENT_WAIT_STATUS[event["status"]]
+        terminal_wait["completed_at"] = now
+        terminal_wait["completion_event_id"] = event["event_id"]
+        terminal_wait["updated_at"] = now
+
+        updated_run = None
+        resume_task = None
+        if run and run.get("run_id") == terminal_wait.get("run_id") and run.get("status") not in TERMINAL_RUN_STATUSES:
+            updated_run = copy.deepcopy(run)
+            updated_run["status"] = "queued"
+            updated_run["current_step"] = "external_event_received"
+            updated_run["updated_at"] = now
+            updated_run["completed_at"] = None
+            updated_run.setdefault("resume_events", []).append(copy.deepcopy(event_summary))
+            resume_task = self._build_external_event_resume_task(updated_run, terminal_wait, safe_event, now)
+
+        placeholders = ", ".join("?" for _ in ACTIVE_WAIT_STATUSES)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                update wait_states
+                set status = ?,
+                    deadline_at = ?,
+                    updated_at = ?,
+                    wait_json = ?
+                where wait_id = ?
+                  and status in ({placeholders})
+                """,
+                (
+                    terminal_wait["status"],
+                    terminal_wait.get("deadline_at"),
+                    terminal_wait["updated_at"],
+                    self._to_json(terminal_wait),
+                    terminal_wait["wait_id"],
+                    *sorted(ACTIVE_WAIT_STATUSES),
+                ),
+            )
+            if not cursor.rowcount:
+                raise ProcessingConflict(
+                    f"wait {terminal_wait['wait_id']} уже завершен другим terminal ExternalEvent."
+                )
+            if updated_run is not None:
+                self._save_run_in_connection(connection, updated_run)
+            if resume_task is not None:
+                resume_task = self._insert_task_if_absent(connection, resume_task)
+        return terminal_wait, resume_task
 
     def _set_related_active_items(
         self,
@@ -3953,6 +4656,81 @@ class ProcessingStore:
                 "external_event_idempotency_conflict: idempotency_key уже использован для события с другим payload."
             )
 
+    @classmethod
+    def _external_event_receipt_is_stale(cls, receipt: dict[str, Any]) -> bool:
+        age_seconds = cls._age_seconds(receipt.get("updated_at"))
+        if age_seconds is None:
+            return True
+        return age_seconds >= cls._recovery_receipt_stale_seconds()
+
+    def _recover_completed_external_event_receipt(
+        self,
+        receipt: dict[str, Any],
+        event: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        wait_id = event.get("wait_id") or receipt.get("wait_id")
+        if not wait_id:
+            return None
+        try:
+            wait = self.require_wait(wait_id)
+        except ProcessingNotFound:
+            return None
+        if wait.get("status") in ACTIVE_WAIT_STATUSES:
+            return None
+        if wait.get("completion_event_id") not in {None, "", event.get("event_id")}:
+            return None
+        external_events = wait.get("external_events") if isinstance(wait.get("external_events"), list) else []
+        if external_events and not any(item.get("event_id") == event.get("event_id") for item in external_events):
+            return None
+        result = {
+            "schema_version": "1.0",
+            "accepted": True,
+            "duplicate": False,
+            "external_event": self._external_event_for_storage(event),
+            "wait": wait,
+            "case": self.case_store.require(wait["case_id"]),
+        }
+        resume_task = self.task_by_idempotency_key(f"{wait['case_id']}:{wait['wait_id']}:{event['event_id']}:resume")
+        if resume_task:
+            result["resume_task"] = resume_task
+        completed = self._complete_external_event_receipt(event, result)
+        return self._external_event_duplicate_result(completed)
+
+    def _refresh_external_event_receipt_claim(self, receipt: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        refreshed = copy.deepcopy(receipt)
+        refreshed["claim_token"] = f"claim-{uuid.uuid4().hex[:12]}"
+        refreshed["updated_at"] = now
+        refreshed["recovered_at"] = now
+        refreshed["result"] = {
+            "schema_version": "1.0",
+            "accepted": True,
+            "duplicate": True,
+            "idempotency_key": event["idempotency_key"],
+            "recovery": "stale_processing_receipt_reclaimed",
+        }
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                update external_event_receipts
+                set receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                  and updated_at = ?
+                """,
+                (
+                    self._to_json(refreshed),
+                    now,
+                    receipt["idempotency_key"],
+                    receipt.get("updated_at"),
+                ),
+            )
+        if not cursor.rowcount:
+            raise ExternalEventIdempotencyConflict(
+                "external_event_idempotency_conflict: stale processing receipt уже переарендован другим worker."
+            )
+        return refreshed
+
     @staticmethod
     def _ensure_external_event_source_matches(wait: dict[str, Any], event: dict[str, Any]) -> None:
         expected_sources = {
@@ -4048,6 +4826,7 @@ class ProcessingStore:
             "correlation_id": event["correlation_id"],
             "status": event["status"],
             "payload_hash": self._external_event_payload_hash(event),
+            "claim_token": f"claim-{uuid.uuid4().hex[:12]}",
             "created_at": now,
             "updated_at": now,
             "result": {
@@ -4098,8 +4877,11 @@ class ProcessingStore:
         self,
         event: dict[str, Any],
         result: dict[str, Any],
+        *,
+        expected_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
+        created_at = (expected_receipt or {}).get("created_at") or now
         receipt = {
             "schema_version": "1.0",
             "receipt_status": "completed",
@@ -4112,28 +4894,54 @@ class ProcessingStore:
             "correlation_id": event["correlation_id"],
             "status": event["status"],
             "payload_hash": self._external_event_payload_hash(event),
-            "created_at": now,
+            "created_at": created_at,
             "updated_at": now,
             "result": copy.deepcopy(result),
         }
+        if expected_receipt and expected_receipt.get("claim_token"):
+            receipt["claim_token"] = expected_receipt["claim_token"]
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                update external_event_receipts
-                set status = ?,
-                    receipt_json = ?,
-                    updated_at = ?
-                where idempotency_key = ?
-                """,
-                (
-                    receipt["status"],
-                    self._to_json(receipt),
-                    receipt["updated_at"],
-                    receipt["idempotency_key"],
-                ),
-            )
+            if expected_receipt is None:
+                cursor = connection.execute(
+                    """
+                    update external_event_receipts
+                    set status = ?,
+                        receipt_json = ?,
+                        updated_at = ?
+                    where idempotency_key = ?
+                    """,
+                    (
+                        receipt["status"],
+                        self._to_json(receipt),
+                        receipt["updated_at"],
+                        receipt["idempotency_key"],
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    update external_event_receipts
+                    set status = ?,
+                        receipt_json = ?,
+                        updated_at = ?
+                    where idempotency_key = ?
+                      and receipt_json = ?
+                    """,
+                    (
+                        receipt["status"],
+                        self._to_json(receipt),
+                        receipt["updated_at"],
+                        receipt["idempotency_key"],
+                        self._to_json(expected_receipt),
+                    ),
+                )
         if not cursor.rowcount:
-            raise ProcessingConflict(f"external event receipt не найден: {event['idempotency_key']}")
+            existing = self.external_event_receipt(event["idempotency_key"])
+            if existing and existing.get("receipt_status") == "completed":
+                return existing
+            raise ExternalEventIdempotencyConflict(
+                "external_event_idempotency_conflict: receipt claim уже изменен другим worker."
+            )
         return receipt
 
     def _ensure_schema(self) -> None:

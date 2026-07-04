@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/capability-catalog.schema.json",
+  "title": "Capability Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "capability_id",
+          "display_name",
+          "status",
+          "description",
+          "contract_version",
+          "execution_modes",
+          "input_schema",
+          "output_schema",
+          "async_event_contracts",
+          "default_completion_policy",
+          "diagnostic_schema"
+        ],
+        "properties": {
+          "capability_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1200
+          },
+          "contract_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "execution_modes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/execution_mode"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "input_schema": {
+            "$ref": "#/$defs/json_schema"
+          },
+          "output_schema": {
+            "$ref": "#/$defs/json_schema"
+          },
+          "async_event_contracts": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/event_type"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/async_event_contract"
+            }
+          },
+          "default_completion_policy": {
+            "$ref": "#/$defs/completion_policy"
+          },
+          "diagnostic_schema": {
+            "$ref": "#/$defs/json_schema"
+          },
+          "extensions": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "active",
+        "planned",
+        "disabled"
+      ]
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": [
+        "sync",
+        "async"
+      ]
+    },
+    "json_schema": {
+      "type": "object",
+      "minProperties": 1
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$"
+    },
+    "completion_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "max_wait_seconds",
+        "timeout_action"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "sync",
+            "external_event"
+          ]
+        },
+        "max_wait_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "expected_event_type": {
+          "$ref": "#/$defs/event_type"
+        },
+        "timeout_action": {
+          "type": "string",
+          "enum": [
+            "resume_agent",
+            "escalate_operator",
+            "debug_stop",
+            "mark_failed",
+            "cancel"
+          ]
+        }
+      }
+    },
+    "async_event_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "display_name",
+        "statuses",
+        "result_schema",
+        "contract_version",
+        "contract_status"
+      ],
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1200
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "progress",
+              "success",
+              "error",
+              "timeout",
+              "cancelled"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "result_schema": {
+          "$ref": "#/$defs/json_schema"
+        },
+        "progress_schema": {
+          "$ref": "#/$defs/json_schema"
+        },
+        "error_schema": {
+          "$ref": "#/$defs/json_schema"
+        },
+        "contract_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "contract_status": {
+          "type": "string",
+          "enum": [
+            "valid",
+            "draft",
+            "broken"
+          ]
+        }
+      }
+    }
+  }
+}

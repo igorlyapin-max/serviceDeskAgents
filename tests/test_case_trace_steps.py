@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from apps.orchestrator.app.debug_runtime import DebugRuntime
-from apps.orchestrator.app.integrations import IntegrationDispatcher
+from apps.orchestrator.app.debug_runtime import DebugRuntime, sanitize_payload
 from apps.orchestrator.app.processing import ProcessingStore
 
 
@@ -84,20 +83,20 @@ def detail_for_state(
 
 class CaseTraceStepsTest(unittest.TestCase):
     def test_trace_parameter_redaction_masks_secret_sources_and_sensitive_names(self) -> None:
-        redacted = IntegrationDispatcher._redact_trace_parameters(
+        redacted, masked_paths = sanitize_payload(
             {
                 "query": "Иванов Иван",
                 "api_key": "open-secret",
                 "manager_password": "hidden",
                 "session": "hidden-too",
-            },
-            parameter_mapping={"query": "slot:user_login", "api_key": "secret:openai_api_key"},
+            }
         )
 
         self.assertEqual(redacted["query"], "Иванов Иван")
-        self.assertEqual(redacted["api_key"], "параметр скрыт")
-        self.assertEqual(redacted["manager_password"], "параметр скрыт")
-        self.assertEqual(redacted["session"], "параметр скрыт")
+        self.assertEqual(redacted["api_key"], "<masked>")
+        self.assertEqual(redacted["manager_password"], "<masked>")
+        self.assertEqual(redacted["session"], "<masked>")
+        self.assertEqual(masked_paths, ["api_key", "manager_password", "session"])
 
     def test_success_case_has_five_steps_and_success_outcome(self) -> None:
         detail = detail_for_state()
@@ -244,7 +243,7 @@ class CaseTraceStepsTest(unittest.TestCase):
                     "output": {"user_login": "ivanov"},
                     "extensions": {
                         "trace": {
-                            "react_parameters": {
+                            "capability_parameters": {
                                 "target_name": "Иванов Иван",
                             },
                             "operation_parameters": {
@@ -270,23 +269,23 @@ class CaseTraceStepsTest(unittest.TestCase):
         self.assertIn("query", tool_table["rows"][0][5])
         self.assertIn("параметр скрыт", tool_table["rows"][0][5])
 
-    def test_react_wait_is_linked_to_steps_four_and_five(self) -> None:
+    def test_capability_wait_is_linked_to_steps_four_and_five(self) -> None:
         detail = detail_for_state(
             workflow_category="waiting",
             workflow_state_id="waiting_external_event",
             waits=[
                 {
-                    "wait_id": "wait-react",
+                    "wait_id": "wait-capability",
                     "wait_type": "external_event_wait",
                     "status": "open",
                     "deadline_at": "2026-06-02T00:00:00Z",
-                    "correlation_id": "case-test:runbook:wait-react",
-                    "reason": "Ожидание завершения ранбука.",
+                    "correlation_id": "case-test:capability:wait-capability",
+                    "reason": "Ожидание результата capability.",
                     "origin": {
-                        "kind": "react_call",
-                        "react_call": "start_systemcenter_runbook",
-                        "endpoint_id": "n8n",
-                        "operation_id": "start_systemcenter_runbook",
+                        "kind": "capability",
+                        "capability_id": "start_systemcenter_runbook",
+                        "mcp_environment_id": "env.provider_ops",
+                        "mcp_tool_name": "start_systemcenter_runbook",
                     },
                     "payload": {},
                 }
@@ -294,10 +293,10 @@ class CaseTraceStepsTest(unittest.TestCase):
         )
         steps = DebugRuntime._build_case_trace_steps(detail, [])
 
-        react_wait_table = steps[3]["tables"][0]
+        capability_wait_table = steps[3]["tables"][0]
         wait_table = steps[4]["tables"][0]
-        self.assertEqual(react_wait_table["rows"][0][0], "start_systemcenter_runbook")
-        self.assertEqual(react_wait_table["rows"][0][1], "n8n")
+        self.assertEqual(capability_wait_table["rows"][0][0], "start_systemcenter_runbook")
+        self.assertEqual(capability_wait_table["rows"][0][1], "env.provider_ops")
         self.assertIn("start_systemcenter_runbook", wait_table["rows"][0][3])
         self.assertEqual(DebugRuntime._case_trace_agent_outcome(detail)["label"], "Ожидание внешнего события")
 

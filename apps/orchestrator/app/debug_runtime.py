@@ -196,7 +196,7 @@ class DebugRuntime:
                         for slot in slots
                         if slot.get("required")
                     ],
-                    "react_calls": [],
+                    "capabilities": [],
                     "variants": self._scenario_variants(slots, []),
                 }
             )
@@ -820,7 +820,7 @@ class DebugRuntime:
         for item in trace_items:
             result = result_by_invocation.get(item.get("invocation_id"), item)
             trace = (result.get("extensions") or {}).get("trace") or {}
-            react_parameters = trace.get("react_parameters")
+            capability_parameters = trace.get("capability_parameters")
             operation_parameters = trace.get("operation_parameters")
             parameter_mapping = trace.get("parameter_mapping")
             tool_rows.append([
@@ -828,7 +828,7 @@ class DebugRuntime:
                 value_preview(item.get("endpoint_id") or result.get("endpoint_id")),
                 value_preview(item.get("operation_id") or result.get("operation_id")),
                 value_preview(item.get("status") or result.get("status")),
-                value_preview(react_parameters if react_parameters is not None else "недоступно в старой трассе", limit=420),
+                value_preview(capability_parameters if capability_parameters is not None else "недоступно в старой трассе", limit=420),
                 value_preview(operation_parameters if operation_parameters is not None else "недоступно в старой трассе", limit=420),
                 value_preview(parameter_mapping if parameter_mapping is not None else "недоступно в старой трассе", limit=420),
                 value_preview(item.get("duration_ms") or result.get("duration_ms")),
@@ -853,18 +853,18 @@ class DebugRuntime:
             ]
             for wait in waits
         ]
-        react_wait_rows = [
+        capability_wait_rows = [
             [
-                value_preview((wait.get("origin") or {}).get("react_call")),
-                value_preview((wait.get("origin") or {}).get("endpoint_id")),
-                value_preview((wait.get("origin") or {}).get("operation_id")),
+                value_preview((wait.get("origin") or {}).get("capability_id")),
+                value_preview((wait.get("origin") or {}).get("mcp_environment_id") or (wait.get("origin") or {}).get("endpoint_id")),
+                value_preview((wait.get("origin") or {}).get("mcp_tool_name") or (wait.get("origin") or {}).get("operation_id")),
                 value_preview(wait.get("wait_id")),
                 value_preview(wait.get("status")),
                 value_preview(wait.get("deadline_at")),
                 value_preview(wait.get("correlation_id")),
             ]
             for wait in waits
-            if (wait.get("origin") or {}).get("kind") == "react_call"
+            if (wait.get("origin") or {}).get("kind") == "capability"
         ]
         approval_rows = [
             [
@@ -910,13 +910,13 @@ class DebugRuntime:
                 ],
                 tables=[
                     cls._trace_table("Решение", ["Поле", "Значение"], classification_rows),
-                    cls._trace_table("Предложенные действия", ["Action ID", "ReAct-вызов", "Риск", "Параметры"], action_rows),
+                    cls._trace_table("Предложенные действия", ["Action ID", "Capability/call", "Риск", "Параметры"], action_rows),
                 ],
                 events=cls._events_for_step(events, {"analysis_completed"}),
             ),
             cls._case_trace_step(
                 3,
-                "Планирование ReAct",
+                "Планирование действий",
                 (runs[0].get("status") if runs else "not_executed") or "not_executed",
                 "Запуск обработки, задачи агентов, lease/heartbeat и outbox-события.",
                 metrics=[
@@ -935,7 +935,7 @@ class DebugRuntime:
                 4,
                 "Выполнение и инструменты",
                 "error" if has_tool_errors else ("blocked" if has_blocked_tools else ("success" if tool_rows else "not_executed")),
-                "ReAct-вызовы, endpoint-операции, статусы и результаты инструментов.",
+                "Capability/integration calls, статусы и результаты инструментов.",
                 metrics=[
                     cls._trace_metric("Вызовов", len(tool_rows)),
                     cls._trace_metric("Ошибок", sum(1 for item in tool_results if item.get("status") not in {"success", "dry_run_completed", "blocked"})),
@@ -945,12 +945,12 @@ class DebugRuntime:
                     cls._trace_table(
                         "Вызовы",
                         [
-                            "ReAct",
-                            "Endpoint",
-                            "Операция",
+                            "Capability/call",
+                            "Environment",
+                            "Tool",
                             "Статус",
-                            "Параметры ReAct",
-                            "Параметры endpoint",
+                            "Параметры call",
+                            "Параметры execution",
                             "Маппинг параметров",
                             "ms",
                             "Attempts",
@@ -962,12 +962,12 @@ class DebugRuntime:
                         tool_rows,
                     ),
                     cls._trace_table(
-                        "Ожидания, открытые ReAct-вызовами",
-                        ["ReAct", "Endpoint", "Операция", "Wait", "Статус", "Deadline", "Correlation"],
-                        react_wait_rows,
+                        "Ожидания capability",
+                        ["Capability", "Environment", "Tool", "Wait", "Статус", "Deadline", "Correlation"],
+                        capability_wait_rows,
                     ),
                 ],
-                events=cls._events_for_step(events, {"tool_result_recorded", "integration_callback_received", "processing_external_event_received"}),
+                events=cls._events_for_step(events, {"tool_result_recorded", "processing_external_event_received"}),
             ),
             cls._case_trace_step(
                 5,
@@ -1224,118 +1224,12 @@ class DebugRuntime:
         return {"schema_version": "1.0", "capture": capture}
 
     def create_mock_from_capture(self, capture_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        capture = self.require_capture(capture_id)
-        if capture.get("validation", {}).get("status") != "valid":
-            raise DebugRuntimeError("Нельзя создать mock из ответа, который не проходит response_schema.")
-        if not capture.get("sanitized"):
-            raise DebugRuntimeError("Перед созданием mock нужно выполнить обезличивание captured response.")
-        endpoint_catalog = self.config_store.active_payload("integration_endpoints")
-        endpoint, operation = self._find_operation(
-            endpoint_catalog,
-            capture["endpoint_id"],
-            capture["operation_id"],
-        )
-        mock_output = copy.deepcopy(capture.get("sanitized_response_payload") or {})
-        operation["mock_output"] = mock_output
-        example = {
-            "example_id": f"mock-{capture['capture_id']}",
-            "display_name": payload.get("example_name") or f"Captured {capture['capture_id']}",
-            "description": payload.get("description") or "Mock создан из захваченного endpoint-вызова.",
-            "request_example": copy.deepcopy(capture.get("sanitized_request_payload") or {}),
-            "response_example": mock_output,
-            "expected_status": capture.get("technical_status") or "success",
-            "tags": payload.get("tags") or ["captured"],
-            "source": "captured",
-            "sanitized": True,
-            "captured_at": capture.get("created_at"),
-            "captured_from_endpoint": capture.get("endpoint_id"),
-            "contract_version": capture.get("contract_version"),
-        }
-        examples = operation.setdefault("mock_examples", [])
-        examples = [item for item in examples if item.get("example_id") != example["example_id"]]
-        examples.append(example)
-        operation["mock_examples"] = examples
-
-        draft = self.config_store.create_draft(
-            domain="integration_endpoints",
-            payload=endpoint_catalog,
-            created_by=payload.get("operator_id") or "admin-1",
-            base_version_id=self.config_store.active_version_id("integration_endpoints"),
-        )
-        draft = self.config_store.validate_draft(draft["draft_id"])
-        if draft.get("validation", {}).get("status") != "valid":
-            raise ConfigRegistryError("; ".join(draft.get("validation", {}).get("errors", [])))
-        regression = {
-            "schema_version": "1.0",
-            "status": "skipped",
-            "run_at": utc_now(),
-            "run_id": f"mock-capture-{capture_id}",
-            "summary": {"reason": "Mock создан из валидированного captured response."},
-            "gates": [
-                {
-                    "gate_id": "captured_mock_response_schema",
-                    "status": "passed",
-                    "message": "Captured response прошел response_schema операции.",
-                }
-            ],
-        }
-        self.config_store.save_regression(draft["draft_id"], regression)
-        version = self.config_store.activate_draft(draft["draft_id"], payload.get("operator_id") or "admin-1")
-        self.workflow.apply_config_payload("integration_endpoints", version["payload"])
-        if hasattr(self.workflow.integration_dispatcher, "capture_recorder"):
-            self.workflow.integration_dispatcher.capture_recorder = self
-        capture["mock_example_id"] = example["example_id"]
-        capture["mock_version_id"] = version["version_id"]
-        capture["status"] = "mock_created"
-        capture["updated_at"] = utc_now()
-        self._save_capture(capture)
-        return {
-            "schema_version": "1.0",
-            "capture": capture,
-            "mock_example": example,
-            "config_version": version,
-            "endpoint": {
-                "endpoint_id": endpoint["endpoint_id"],
-                "operation_id": capture["operation_id"],
-            },
-        }
+        _ = capture_id, payload
+        raise DebugRuntimeError("Endpoint capture mock generation удален; используйте capability/MCP mock_output.")
 
     def mark_capture_contract_broken(self, capture_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        capture = self.require_capture(capture_id)
-        endpoint_catalog = self.config_store.active_payload("integration_endpoints")
-        _, operation = self._find_operation(
-            endpoint_catalog,
-            capture["endpoint_id"],
-            capture["operation_id"],
-        )
-        operation["contract_status"] = "broken"
-        operation["extensions"] = {
-            **operation.get("extensions", {}),
-            "broken_by_capture_id": capture_id,
-            "broken_reason": payload.get("reason") or "Captured response не соответствует контракту.",
-        }
-        draft = self.config_store.create_draft(
-            domain="integration_endpoints",
-            payload=endpoint_catalog,
-            created_by=payload.get("operator_id") or "admin-1",
-            base_version_id=self.config_store.active_version_id("integration_endpoints"),
-        )
-        draft = self.config_store.validate_draft(draft["draft_id"])
-        regression = {
-            "schema_version": "1.0",
-            "status": "skipped",
-            "run_at": utc_now(),
-            "run_id": f"contract-broken-{capture_id}",
-            "summary": {"reason": "Операция помечена как broken по captured response."},
-            "gates": [],
-        }
-        self.config_store.save_regression(draft["draft_id"], regression)
-        version = self.config_store.activate_draft(draft["draft_id"], payload.get("operator_id") or "admin-1")
-        self.workflow.apply_config_payload("integration_endpoints", version["payload"])
-        capture["status"] = "contract_marked_broken"
-        capture["updated_at"] = utc_now()
-        self._save_capture(capture)
-        return {"schema_version": "1.0", "capture": capture, "config_version": version}
+        _ = capture_id, payload
+        raise DebugRuntimeError("Endpoint contract marking удален; используйте capability contract_status.")
 
     def active_capture_session(self, endpoint_id: str, operation_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1988,9 +1882,8 @@ class DebugRuntime:
         }
 
     def _require_operation(self, endpoint_id: str | None, operation_id: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
-        if not endpoint_id or not operation_id:
-            raise DebugRuntimeError("Нужно выбрать endpoint и операцию.")
-        return self._find_operation(self.config_store.active_payload("integration_endpoints"), endpoint_id, operation_id)
+        _ = endpoint_id, operation_id
+        raise DebugRuntimeError("Endpoint operations удалены; используйте capability/MCP diagnostics.")
 
     @staticmethod
     def _find_operation(

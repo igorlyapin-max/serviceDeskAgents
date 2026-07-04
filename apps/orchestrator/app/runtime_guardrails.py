@@ -5,6 +5,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -27,11 +28,9 @@ DEBUG_LEVELS = {"Basic", "Verbose"}
 
 WEAK_SECRET_DEFAULTS = {
     "POSTGRES_PASSWORD": {"servicedesk_dev_password", "change_me_postgres_password"},
-    "N8N_DB_PASSWORD": {"n8n_dev_password", "change_me_n8n_db_password"},
-    "N8N_ENCRYPTION_KEY": {"replace_with_32_plus_chars_dev_key", "change_me_n8n_encryption_key_32_chars_min"},
-    "N8N_WEBHOOK_TOKEN": {"replace_with_dev_webhook_token", "change_me_n8n_webhook_token"},
     "LITELLM_MASTER_KEY": {"sk-dev-litellm-master-key", "change_me_litellm_master_key"},
     "INTEGRATION_CALLBACK_TOKEN": {"dev-callback-token", "change_me_integration_callback_token"},
+    "MCP_PROVIDER_OPS_TOKEN": {"change_me_mcp_provider_ops_token"},
 }
 
 DEFAULT_METRICS_ALLOWED_IPS = "127.0.0.1,::1"
@@ -60,6 +59,9 @@ SENSITIVE_LOG_KEYWORDS = (
     "учетные_данные",
     "учётные_данные",
 )
+
+LOG_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+LOG_PHONE_RE = re.compile(r"(?<![\w+])(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
 
 
 class RuntimeConfigurationError(RuntimeError):
@@ -119,9 +121,33 @@ def validate_startup_environment() -> None:
     auth_mode = os.getenv("SECURITY_AUTH_MODE", "dev_header").strip().lower()
     if auth_mode in {"dev_header", "disabled"}:
         errors.append("SECURITY_AUTH_MODE=dev_header/disabled запрещен для shared/staging/production.")
+    callback_auth_mode = os.getenv("SECURITY_CALLBACK_AUTH_MODE", "source_token").strip().lower()
+    if callback_auth_mode not in {"oidc_jwks", "oidc_proxy_jwt"}:
+        errors.append("SECURITY_CALLBACK_AUTH_MODE=oidc_jwks/oidc_proxy_jwt обязателен для shared/staging/production callbacks.")
+    else:
+        if not os.getenv("CALLBACK_OIDC_ISSUER", "").strip():
+            errors.append("CALLBACK_OIDC_ISSUER обязателен для OIDC callbacks.")
+        if not os.getenv("CALLBACK_OIDC_AUDIENCE", "").strip():
+            errors.append("CALLBACK_OIDC_AUDIENCE обязателен для OIDC callbacks.")
+        if not os.getenv("CALLBACK_OIDC_ALLOWED_CLIENT_IDS", "").strip():
+            errors.append("CALLBACK_OIDC_ALLOWED_CLIENT_IDS обязателен для OIDC callbacks.")
+        if callback_auth_mode == "oidc_jwks" and not os.getenv("CALLBACK_OIDC_JWKS_URL", "").strip():
+            errors.append("CALLBACK_OIDC_JWKS_URL обязателен для oidc_jwks callbacks.")
+        if callback_auth_mode == "oidc_proxy_jwt":
+            has_trusted_ip = bool(os.getenv("CALLBACK_OIDC_PROXY_TRUSTED_IPS", "").strip())
+            has_trusted_header = bool(os.getenv("CALLBACK_OIDC_PROXY_TRUST_HEADER", "").strip()) and bool(
+                os.getenv("CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE", "").strip()
+            )
+            if not has_trusted_ip and not has_trusted_header:
+                errors.append(
+                    "oidc_proxy_jwt требует CALLBACK_OIDC_PROXY_TRUSTED_IPS или "
+                    "CALLBACK_OIDC_PROXY_TRUST_HEADER/CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE."
+                )
 
     for env_name, weak_values in WEAK_SECRET_DEFAULTS.items():
         if env_name == "INTEGRATION_CALLBACK_TOKEN":
+            if callback_auth_mode in {"oidc_jwks", "oidc_proxy_jwt"}:
+                continue
             source_specific_tokens = [
                 value
                 for key, value in os.environ.items()
@@ -204,8 +230,8 @@ def readiness_report(*, config_store: Any, workflow: Any, processing_store: Any)
 
     checks.append(_check("processing_store", processing_probe))
     checks.append(_kafka_bootstrap_check())
-    checks.append(_n8n_health_check())
     checks.append(_integration_auth_check(config_store))
+    checks.append(_mcp_health_check(config_store))
     if processing_overview:
         checks.append(_async_runtime_check(processing_overview))
 
@@ -337,7 +363,15 @@ def sanitize_log_value(key: str, value: Any) -> Any:
         }
     if isinstance(value, list):
         return [sanitize_log_value(key, item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_log_string(value)
     return value
+
+
+def _sanitize_log_string(value: str) -> str:
+    redacted = LOG_EMAIL_RE.sub("персональные данные скрыты", value)
+    redacted = LOG_PHONE_RE.sub("персональные данные скрыты", redacted)
+    return redacted
 
 
 def log_local_security_warnings(logger: logging.Logger) -> None:
@@ -431,41 +465,6 @@ def _kafka_bootstrap_check() -> dict[str, Any]:
     }
 
 
-def _n8n_health_check() -> dict[str, Any]:
-    base_url = os.getenv("N8N_HEALTH_URL", "").strip()
-    if not base_url:
-        webhook_base = os.getenv("N8N_WEBHOOK_BASE_URL", "http://127.0.0.1:5678/webhook")
-        parsed = urllib.parse.urlparse(webhook_base)
-        if not parsed.scheme or not parsed.netloc:
-            return {
-                "name": "n8n",
-                "status": "error",
-                "message": f"N8N_WEBHOOK_BASE_URL имеет некорректный формат: {webhook_base}",
-            }
-        base_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/healthz", "", "", ""))
-    request = urllib.request.Request(base_url, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=_readiness_network_timeout()) as response:
-            status_code = int(getattr(response, "status", 0) or 0)
-    except (OSError, urllib.error.URLError) as error:
-        return {
-            "name": "n8n",
-            "status": "error",
-            "message": f"{base_url}: {error}",
-        }
-    if 200 <= status_code < 300:
-        return {
-            "name": "n8n",
-            "status": "ok",
-            "message": base_url,
-        }
-    return {
-        "name": "n8n",
-        "status": "error",
-        "message": f"{base_url}: HTTP {status_code}",
-    }
-
-
 def _model_gateway_check(model_config: dict[str, Any]) -> dict[str, Any]:
     gateway = model_config.get("gateway") if isinstance(model_config, dict) else {}
     providers = model_config.get("providers") if isinstance(model_config, dict) else {}
@@ -533,46 +532,148 @@ def _model_provider_for_alias(providers: dict[str, Any], alias: Any) -> dict[str
 
 def _integration_auth_check(config_store: Any) -> dict[str, Any]:
     try:
-        payload = config_store.active_payload("integration_endpoints")
+        payload = config_store.active_payload("mcp_environments")
     except Exception as error:  # noqa: BLE001 - readiness must report dependency failures
         return {
-            "name": "integration_auth",
+            "name": "mcp_auth",
             "status": "error",
-            "message": f"Не удалось прочитать integration_endpoints: {error}",
+            "message": f"Не удалось прочитать mcp_environments: {error}",
         }
 
     missing: list[str] = []
     checked = 0
-    for endpoint in payload.get("endpoints", []) if isinstance(payload, dict) else []:
-        if not isinstance(endpoint, dict) or not endpoint.get("enabled", True):
+    for environment in payload.get("environments", []) if isinstance(payload, dict) else []:
+        if not isinstance(environment, dict) or environment.get("status") in {"disabled", "deprecated"}:
             continue
-        auth = endpoint.get("auth")
-        if not isinstance(auth, dict) or auth.get("type") in {None, "", "none"}:
+        auth_mode = environment.get("auth_mode")
+        if auth_mode in {None, "", "none", "signed_event"}:
             continue
-        token_env = str(auth.get("token_env") or "").strip()
-        header_name = str(auth.get("header_name") or "Authorization").strip()
+        auth_ref = str(environment.get("auth_ref") or "").strip()
         checked += 1
-        if not token_env or not os.getenv(token_env):
+        if not auth_ref:
+            missing.append(f"{environment.get('environment_id') or 'unknown'} требует auth_ref для {auth_mode}")
+            continue
+        prefix, separator, env_name = auth_ref.partition(":")
+        if prefix == "env" and separator == ":" and not os.getenv(env_name):
             missing.append(
-                f"{endpoint.get('endpoint_id') or 'unknown'} требует {token_env or 'token_env'} "
-                f"для заголовка {header_name}"
+                f"{environment.get('environment_id') or 'unknown'} требует env {env_name} для {auth_mode}"
             )
 
     if missing:
         return {
-            "name": "integration_auth",
+            "name": "mcp_auth",
             "status": "error",
             "message": "; ".join(missing),
         }
     return {
-        "name": "integration_auth",
+        "name": "mcp_auth",
         "status": "ok",
-        "message": f"Проверено endpoint auth: {checked}",
+        "message": f"Проверено MCP auth: {checked}",
     }
+
+
+def _mcp_health_check(config_store: Any) -> dict[str, Any]:
+    try:
+        payload = config_store.active_payload("mcp_environments")
+    except Exception as error:  # noqa: BLE001 - readiness must report dependency failures
+        return {
+            "name": "mcp_health",
+            "status": "error",
+            "message": f"Не удалось прочитать mcp_environments: {error}",
+        }
+
+    checked = 0
+    skipped = 0
+    degraded: list[str] = []
+    for environment in payload.get("environments", []) if isinstance(payload, dict) else []:
+        if not isinstance(environment, dict) or environment.get("status") in {"disabled", "deprecated"}:
+            continue
+        environment_id = str(environment.get("environment_id") or "unknown")
+        health_check = environment.get("health_check") if isinstance(environment.get("health_check"), dict) else {}
+        mode = str(health_check.get("mode") or "disabled")
+        if mode == "disabled":
+            skipped += 1
+            continue
+        try:
+            if mode == "http_get":
+                _check_mcp_http_health(environment, health_check)
+            elif mode == "mcp_ping":
+                from .mcp_execution import invoke_mcp_tools_list
+
+                invoke_mcp_tools_list(
+                    environment=_environment_with_resolved_mcp_base_url(environment),
+                    secret_resolver=os.getenv,
+                    request_id=f"{environment_id}.ready",
+                    timeout_seconds=_health_check_timeout(health_check),
+                    attempts=1,
+                )
+            else:
+                degraded.append(f"{environment_id}: unsupported health_check.mode={mode}")
+                continue
+        except Exception as error:  # noqa: BLE001 - readiness reports dependency failures
+            degraded.append(f"{environment_id}: {type(error).__name__}: {error}")
+            continue
+        checked += 1
+
+    if degraded:
+        return {
+            "name": "mcp_health",
+            "status": "degraded",
+            "message": "; ".join(degraded),
+            "checked": checked,
+            "skipped": skipped,
+        }
+    return {
+        "name": "mcp_health",
+        "status": "ok",
+        "message": f"Проверено MCP health: {checked}, пропущено: {skipped}",
+        "checked": checked,
+        "skipped": skipped,
+    }
+
+
+def _check_mcp_http_health(environment: dict[str, Any], health_check: dict[str, Any]) -> None:
+    base_url = _resolve_mcp_base_url(environment)
+    path = str(health_check.get("path") or "/health")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    parsed = urllib.parse.urlsplit(base_url)
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    url = urllib.parse.urljoin(f"{origin}/", path.lstrip("/"))
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=_health_check_timeout(health_check)) as response:
+        status_code = int(getattr(response, "status", 0) or 0)
+    if not 200 <= status_code < 300:
+        raise OSError(f"{url}: HTTP {status_code}")
+
+
+def _resolve_mcp_base_url(environment: dict[str, Any]) -> str:
+    value = str(environment.get("base_url") or "").strip()
+    prefix, separator, env_name = value.partition(":")
+    if prefix == "env" and separator == ":":
+        value = os.getenv(env_name, "").strip()
+    if not value:
+        raise OSError(f"{environment.get('environment_id') or 'unknown'} base_url пустой")
+    return value
+
+
+def _environment_with_resolved_mcp_base_url(environment: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(environment)
+    resolved["base_url"] = _resolve_mcp_base_url(environment)
+    return resolved
+
+
+def _health_check_timeout(health_check: dict[str, Any]) -> float:
+    value = health_check.get("timeout_seconds")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return _readiness_network_timeout()
 
 
 def _async_runtime_check(processing_overview: dict[str, Any]) -> dict[str, Any]:
     runtime = processing_overview.get("runtime") if isinstance(processing_overview, dict) else None
+    recovery = processing_overview.get("recovery") if isinstance(processing_overview, dict) else None
     if not isinstance(runtime, dict):
         return {
             "name": "async_runtime",
@@ -580,20 +681,32 @@ def _async_runtime_check(processing_overview: dict[str, Any]) -> dict[str, Any]:
             "message": "ProcessingStore не вернул блок runtime.",
         }
     issues = [str(item) for item in runtime.get("issues") or []]
+    recovery_issues = []
+    if isinstance(recovery, dict) and recovery.get("status") not in {None, "ok"}:
+        recovery_issues = [str(item) for item in recovery.get("issues") or []]
     status = runtime.get("status")
-    if status == "ok" and not issues:
+    if status == "ok" and not issues and not recovery_issues:
         return {
             "name": "async_runtime",
             "status": "ok",
             "message": "Async runtime компоненты работают.",
             "components": runtime.get("required_components", []),
         }
+    if status == "ok" and recovery_issues:
+        return {
+            "name": "async_runtime",
+            "status": "degraded",
+            "message": "; ".join(recovery_issues),
+            "components": runtime.get("required_components", []),
+            "recovery": recovery,
+        }
     return {
         "name": "async_runtime",
         "status": "error",
         "message": "; ".join(issues) or "Async runtime не готов.",
         "components": runtime.get("required_components", []),
-        "stale_tool_outbox": runtime.get("stale_tool_outbox"),
+        "stale_mcp_outbox": runtime.get("stale_mcp_outbox"),
+        "recovery": recovery,
     }
 
 

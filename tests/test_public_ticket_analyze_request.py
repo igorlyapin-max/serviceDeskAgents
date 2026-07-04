@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from pydantic import ValidationError
 
-from apps.orchestrator.app.main import TicketAnalyzeRequest
+from apps.orchestrator.app.main import TicketAnalyzeRequest, ticket_debug_shape
 
 
 class TicketAnalyzeRequestTest(unittest.TestCase):
@@ -37,6 +38,22 @@ class TicketAnalyzeRequestTest(unittest.TestCase):
 
         fields = {error["loc"][0] for error in context.exception.errors()}
         self.assertIn("unknown_debug_override", fields)
+
+    def test_ticket_debug_shape_does_not_include_raw_ticket_text(self) -> None:
+        shape = ticket_debug_shape(
+            {
+                "ticket_id": "T-1",
+                "description": "Не работает сервис, password=secret-value",
+                "original_problem": "http://example.invalid/problem",
+                "channel_parameters": {"service_desk_request_id": "SR-1"},
+            }
+        )
+        serialized = json.dumps(shape, ensure_ascii=False)
+
+        self.assertTrue(shape["has_description"])
+        self.assertGreater(shape["description_length"], 0)
+        self.assertNotIn("secret-value", serialized)
+        self.assertNotIn("Не работает сервис", serialized)
 
 
 if __name__ == "__main__":

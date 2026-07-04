@@ -29,7 +29,7 @@ class ChannelWaitingPolicyTest(unittest.TestCase):
                 {
                     "policy_id": "escalation.password_reset",
                     "auto_close": {
-                        "requires_tool_success": True,
+                        "requires_capability_success": True,
                         "requires_user_confirmation": False,
                     },
                     "waiting": {

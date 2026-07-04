@@ -57,7 +57,7 @@
               "classification",
               "escalation",
               "summarization",
-              "tool_selection"
+              "capability_selection"
             ]
           },
           "display_name": {

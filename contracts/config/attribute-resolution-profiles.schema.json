@@ -170,8 +170,9 @@
       "required": [
         "step_name",
         "step_id",
-        "react_call",
-        "parameter_mapping",
+        "capability_id",
+        "input_mapping",
+        "output_mapping",
         "on_error"
       ],
       "properties": {
@@ -186,13 +187,10 @@
           "maxLength": 40,
           "pattern": "^step[1-9][0-9]*$"
         },
-        "react_call": {
+        "capability_id": {
           "$ref": "#/$defs/id"
         },
-        "endpoint_id": {
-          "$ref": "#/$defs/id"
-        },
-        "operation_id": {
+        "mcp_environment_id": {
           "$ref": "#/$defs/id"
         },
         "completion_policy": {
@@ -205,11 +203,19 @@
         "generated_structure_metadata": {
           "$ref": "#/$defs/generated_structure_metadata"
         },
-        "parameter_mapping": {
+        "input_mapping": {
           "type": "object",
           "additionalProperties": {
             "type": "string",
             "pattern": "^(slot|output|step|case|constant|secret):.+$"
+          }
+        },
+        "output_mapping": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
           }
         },
         "on_error": {

@@ -15,18 +15,13 @@ from .action_gates import (
 )
 from .cases import CaseStore, new_case_id
 from .config_registry import (
-    DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
     ConfigStore,
-    async_event_types_for_operation,
-    default_async_completion_policy_for_operation,
     default_model_routing,
     default_prompt_catalog,
-    operation_response_looks_like_async_ack,
     runtime_model_routing,
 )
 from .contracts import CONTRACTS_ROOT, ContractRegistry, ContractValidationError, load_json
 from .feedback import FeedbackStore
-from .integrations import IntegrationDispatcher, ToolRegistry
 from .knowledge import KnowledgeIndexer, KnowledgeRetriever
 
 
@@ -122,12 +117,7 @@ class TicketWorkflow:
         self.config_store = config_store
         self.policy = ExecutionPolicy(self.contracts)
         self.state_resolver = WorkflowStateResolver(self.contracts)
-        self.tool_registry = ToolRegistry(self.contracts)
         self.capture_recorder = None
-        self.integration_dispatcher = IntegrationDispatcher(
-            self.contracts,
-            self.tool_registry,
-        )
         self.action_gate_store = action_gate_store or ActionGateStore(self.contracts)
         self.knowledge_indexer = knowledge_indexer or KnowledgeIndexer(self.contracts)
         self.knowledge_retriever = knowledge_retriever or KnowledgeRetriever(self.contracts)
@@ -233,7 +223,10 @@ class TicketWorkflow:
     ) -> bool:
         if not self.processing_store:
             return False
-        if not self._has_external_event_action(proposed_actions):
+        if not (
+            self._has_external_event_action(proposed_actions)
+            or self._has_mcp_capability_action(proposed_actions)
+        ):
             return False
 
         analysis_context = {
@@ -265,6 +258,19 @@ class TicketWorkflow:
             ):
                 return True
         return False
+
+    @staticmethod
+    def _is_mcp_capability_action(action: dict[str, Any]) -> bool:
+        extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        return bool(
+            action.get("action_type") == "mcp_capability"
+            or action.get("capability_id")
+            or extensions.get("capability_id")
+        )
+
+    @classmethod
+    def _has_mcp_capability_action(cls, actions: list[dict[str, Any]]) -> bool:
+        return any(cls._is_mcp_capability_action(action) for action in actions)
 
     def _action_with_launch_source_metadata(self, action: dict[str, Any]) -> dict[str, Any]:
         extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
@@ -324,52 +330,129 @@ class TicketWorkflow:
         approved_by_operator: bool = False,
         operator_id: str | None = None,
     ) -> dict[str, Any]:
+        _ = approved_by_operator, operator_id
         action = self._action_with_launch_source_metadata(action)
-        preferred_launch = self._preferred_launch_for_action(action)
-        invocation = self.tool_registry.build_invocation(
-            action,
-            policy_result,
-            case_id=case_id,
-            ticket_id=ticket_id,
-            approved_by_operator=approved_by_operator,
-            operator_id=operator_id,
-            endpoint_id=preferred_launch.get("endpoint_id") if preferred_launch else None,
-            operation_id=preferred_launch.get("operation_id") if preferred_launch else None,
-        )
-        completion_policy = self._completion_policy_for_invocation(action, invocation, preferred_launch=preferred_launch)
-        if self._should_enqueue_async_tool(invocation, completion_policy):
-            preflight_result = self.integration_dispatcher.preflight(invocation)
-            if preflight_result:
+        if self._is_mcp_capability_action(action):
+            if not self.processing_store or not case_id:
                 return {
-                    "invocation": invocation,
-                    "tool_result": preflight_result,
+                    "invocation": {
+                        "schema_version": "1.0",
+                        "invocation_id": f"mcp-not-dispatched-{uuid.uuid4().hex[:12]}",
+                        "action_id": action.get("action_id") or "unknown-action",
+                        "tool_name": action.get("tool_name") or action.get("capability_id") or "capability",
+                        "case_id": case_id,
+                        "ticket_id": ticket_id,
+                    },
+                    "tool_result": self._capability_dispatch_error_result(
+                        action,
+                        policy_result,
+                        "ProcessingStore или case_id не подключены для MCP capability dispatch.",
+                    ),
                 }
-            queued = self.processing_store.enqueue_async_tool_command(
-                invocation,
-                expected_event_type=completion_policy["expected_event_type"],
-                result_transport=completion_policy.get("result_transport", "http_callback"),
-                result_topic=completion_policy.get("result_topic"),
-                contract_snapshot=self._external_event_contract_snapshot(invocation, completion_policy),
-                deadline_seconds=completion_policy.get("max_wait_seconds"),
-                reason=f"Ожидание результата ReAct-вызова {invocation['tool_name']}.",
-            )
-            tool_result = self._async_tool_queued_result(invocation, queued, completion_policy)
-            self._attach_async_delivery_diagnostics(tool_result)
-            return {
-                "invocation": queued["command"]["invocation"],
-                "tool_result": tool_result,
-            }
-        async_contract_error = self._missing_async_contract_result(invocation, completion_policy)
-        if async_contract_error:
-            return {
-                "invocation": invocation,
-                "tool_result": async_contract_error,
-            }
-        result = self.integration_dispatcher.dispatch(invocation)
+            try:
+                dispatch_result = self.processing_store.dispatch_capability_action(
+                    action,
+                    policy_result,
+                    case_id=case_id,
+                    ticket_id=ticket_id,
+                )
+                self.contracts.require_valid("tool_result", dispatch_result["tool_result"])
+                return dispatch_result
+            except ContractValidationError:
+                raise
+            except Exception as error:  # noqa: BLE001 - dispatch failure must be visible in case trace.
+                return {
+                    "invocation": {
+                        "schema_version": "1.0",
+                        "invocation_id": f"mcp-dispatch-failed-{uuid.uuid4().hex[:12]}",
+                        "action_id": action.get("action_id") or "unknown-action",
+                        "tool_name": action.get("tool_name") or action.get("capability_id") or "capability",
+                        "case_id": case_id,
+                        "ticket_id": ticket_id,
+                    },
+                    "tool_result": self._capability_dispatch_error_result(action, policy_result, str(error)),
+                }
+        invocation = {
+            "schema_version": "1.0",
+            "invocation_id": f"legacy-removed-{uuid.uuid4().hex[:12]}",
+            "action_id": action.get("action_id") or "unknown-action",
+            "tool_name": action.get("tool_name") or "removed_legacy_action",
+            "case_id": case_id,
+            "ticket_id": ticket_id,
+        }
+        result = {
+            "schema_version": "1.0",
+            "invocation_id": invocation["invocation_id"],
+            "action_id": invocation["action_id"],
+            "tool_name": invocation["tool_name"],
+            "endpoint_id": "legacy_removed",
+            "adapter_type": "queue",
+            "operation_id": "legacy_removed",
+            "status": "error",
+            "policy_rule_id": policy_result.get("policy_rule_id") or "legacy_operation_binding_removed",
+            "duration_ms": 0,
+            "attempts": 0,
+            "error": {
+                "code": "legacy_operation_binding_removed",
+                "message": "Старые operation bindings удалены; настройте исполнение через Capability/MCP.",
+            },
+            "extensions": {
+                "diagnostic_status": "legacy_operation_binding_removed",
+                "capability_required": True,
+            },
+        }
+        self.contracts.require_valid("tool_result", result)
         return {
             "invocation": invocation,
             "tool_result": result,
         }
+
+    def _capability_dispatch_error_result(
+        self,
+        action: dict[str, Any],
+        policy_result: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        extensions = action.get("extensions") if isinstance(action.get("extensions"), dict) else {}
+        capability_id = action.get("capability_id") or extensions.get("capability_id") or action.get("tool_name") or "capability"
+        source_extensions = {
+            key: copy.deepcopy(value)
+            for key in (
+                "source_profile_id",
+                "source_step_id",
+                "source_slot_schema_id",
+                "source_target_slot_id",
+                "source_output_slots_order",
+                "debug_launch_id",
+            )
+            if (value := extensions.get(key)) not in (None, "", {}, [])
+        }
+        result = {
+            "schema_version": "1.0",
+            "invocation_id": f"mcp-dispatch-failed-{uuid.uuid4().hex[:12]}",
+            "action_id": action.get("action_id") or "unknown-action",
+            "tool_name": str(capability_id),
+            "endpoint_id": str(extensions.get("mcp_environment_id") or "mcp"),
+            "adapter_type": "mcp_tool",
+            "operation_id": str(extensions.get("mcp_tool_name") or capability_id),
+            "status": "error",
+            "policy_rule_id": policy_result.get("policy_rule_id") or "mcp_capability.dispatch_failed",
+            "duration_ms": 0,
+            "attempts": 0,
+            "error": {
+                "code": "mcp_capability_dispatch_failed",
+                "message": message[:1000],
+            },
+            "extensions": {
+                **source_extensions,
+                "diagnostic_status": "mcp_capability_dispatch_failed",
+                "capability_id": capability_id,
+                "mcp_environment_id": extensions.get("mcp_environment_id"),
+                "mcp_tool_name": extensions.get("mcp_tool_name"),
+            },
+        }
+        self.contracts.require_valid("tool_result", result)
+        return result
 
     def get_action_gate(self, gate_id: str) -> dict[str, Any]:
         return self.action_gate_store.require(gate_id)
@@ -417,29 +500,12 @@ class TicketWorkflow:
             "approvals": self.action_gate_store.summary(),
             "feedback": self.feedback_store.summary(),
             "knowledge": self.knowledge_status(),
-            "tools": {
-                "count": len(self.contracts.tool_catalog["tools"]),
-                "names": [
-                    tool["tool_name"]
-                    for tool in self.contracts.tool_catalog["tools"]
-                ],
-            },
-            "integrations": {
-                "endpoint_count": len(self.contracts.integration_endpoint_catalog["endpoints"]),
-                "enabled_endpoint_count": sum(
-                    1
-                    for endpoint in self.contracts.integration_endpoint_catalog["endpoints"]
-                    if endpoint["enabled"]
-                ),
-            },
             "models": self.model_config(),
         }
 
     def catalog_inventory(self) -> dict[str, Any]:
         return {
             "schema_version": "1.0",
-            "tools": self.contracts.tool_catalog,
-            "integration_endpoints": self.contracts.integration_endpoint_catalog,
             "workflow": {
                 "state_catalog": self.contracts.workflow_state_catalog,
                 "transition_rules": self.contracts.workflow_transition_rules,
@@ -457,11 +523,6 @@ class TicketWorkflow:
             return self.config_store.active_payload("prompts")
         return default_prompt_catalog()
 
-    def n8n_workflow_catalog(self) -> dict[str, Any]:
-        if self.config_store:
-            return self.config_store.active_payload("n8n_workflows")
-        return self.contracts.n8n_workflow_catalog
-
     def attach_config_store(self, config_store: ConfigStore) -> None:
         self.config_store = config_store
         self.apply_active_config()
@@ -473,35 +534,14 @@ class TicketWorkflow:
         if not self.config_store:
             return
         for domain in (
-            "integration_endpoints",
-            "tools",
             "workflow_states",
             "workflow_transitions",
-            "n8n_workflows",
         ):
             active_config = self.config_store.active_config(domain)
             if active_config["source"] == "active_version":
                 self.apply_config_payload(domain, active_config["payload"])
 
     def apply_config_payload(self, domain: str, payload: dict[str, Any]) -> None:
-        if domain == "tools":
-            self.contracts.tool_catalog = copy.deepcopy(payload)
-            self.tool_registry = ToolRegistry(self.contracts)
-            self.integration_dispatcher = IntegrationDispatcher(
-                self.contracts,
-                self.tool_registry,
-            )
-            self.integration_dispatcher.capture_recorder = self.capture_recorder
-            return
-        if domain == "integration_endpoints":
-            self.contracts.integration_endpoint_catalog = copy.deepcopy(payload)
-            self.tool_registry = ToolRegistry(self.contracts)
-            self.integration_dispatcher = IntegrationDispatcher(
-                self.contracts,
-                self.tool_registry,
-            )
-            self.integration_dispatcher.capture_recorder = self.capture_recorder
-            return
         if domain == "workflow_states":
             self.contracts.workflow_state_catalog = copy.deepcopy(payload)
             self.state_resolver = WorkflowStateResolver(self.contracts)
@@ -510,9 +550,6 @@ class TicketWorkflow:
             self.contracts.workflow_transition_rules = copy.deepcopy(payload)
             self.state_resolver = WorkflowStateResolver(self.contracts)
             return
-        if domain == "n8n_workflows":
-            self.contracts.n8n_workflow_catalog = copy.deepcopy(payload)
-
     def list_feedback(self, limit: int = 100) -> list[dict[str, Any]]:
         records = self.feedback_store.list_all()
         return list(reversed(records))[: max(limit, 0)]
@@ -584,28 +621,6 @@ class TicketWorkflow:
 
     def get_case_timeline(self, case_id: str) -> dict[str, Any]:
         return self.case_store.timeline(case_id)
-
-    def handle_integration_callback(self, callback: dict[str, Any]) -> dict[str, Any]:
-        callback = copy.deepcopy(callback)
-        if "received_at" not in callback:
-            callback["received_at"] = utc_now()
-        self.contracts.require_valid("integration_callback", callback)
-        tool_result = self._tool_result_from_callback(callback)
-        self.contracts.require_valid("tool_result", tool_result)
-        self.tool_registry.validate_result(tool_result)
-        workflow_state = self.state_resolver.resolve({"tool_status": tool_result["status"]})
-        case = self.case_store.record_integration_callback(
-            callback,
-            tool_result,
-            workflow_state,
-        )
-        return {
-            "schema_version": "1.0",
-            "accepted": True,
-            "case": case,
-            "workflow_state": workflow_state,
-            "tool_result": tool_result,
-        }
 
     def _run_evaluation_case(
         self,
@@ -1018,41 +1033,16 @@ class TicketWorkflow:
         return {
             "schema_version": "1.0",
             "decision": {
-                "type": "action_proposed",
-                "summary": f"Запустить ранбук System Center для перезапуска {service}.",
+                "type": "escalation_needed",
+                "summary": f"{service}: нужен capability-based recovery сценарий.",
+                "reason": "Старый operation binding удален; автоматическое действие должно быть описано через Capability/MCP профиль.",
+                "target_team": "configured-escalation-channel",
                 "confidence": 0.83,
             },
-            "operator_message": "Проверьте предложенный ранбук перед выполнением.",
-            "internal_reasoning_summary": "Детерминированное правило этапа 3 выбрало предложение ранбука.",
+            "operator_message": "Передайте заявку ответственному исполнителю или настройте capability-based сценарий восстановления.",
+            "internal_reasoning_summary": "Детерминированное правило не создает старое действие после удаления operation bindings.",
             "citations": [],
-            "proposed_actions": [
-                {
-                    "tool_name": "start_systemcenter_runbook",
-                    "action_id": f"restart_{service}".replace("-", "_"),
-                    "action_type": "action",
-                    "parameters": {
-                        "runbook_code": "restart_service",
-                        "app_name": service,
-                    },
-                    "reason": "Заявка соответствует сценарию перезапуска через ранбук.",
-                    "risk_level": "medium",
-                    "expected_effect": f"Для {service} будет запущена настроенная операция восстановления.",
-                    "requires_state_change": True,
-                    "risk_notes": "Политика MVP требует согласования оператора перед выполнением.",
-                    "extensions": {
-                        "endpoint_id": "n8n",
-                        "operation_id": "start_systemcenter_runbook",
-                        "completion_policy": {
-                            "mode": "external_event",
-                            "max_wait_seconds": 3600,
-                            "timeout_action": "escalate_operator",
-                            "expected_event_type": "start_systemcenter_runbook_completed",
-                            "result_transport": "kafka_event",
-                            "result_topic": DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
-                        },
-                    },
-                }
-            ],
+            "proposed_actions": [],
         }
 
     def _dispatch_tool_node(
@@ -1145,7 +1135,7 @@ class TicketWorkflow:
                 "diagnostic_status": "not_dispatched",
                 "contract_name": error.contract_name,
                 "trace": {
-                    "react_parameters": copy.deepcopy(action.get("parameters") or {}),
+                    "capability_parameters": copy.deepcopy(action.get("parameters") or {}),
                     "endpoint_id": endpoint_id,
                     "operation_id": operation_id,
                     "execution_mode": policy.get("execution_mode"),
@@ -1154,249 +1144,6 @@ class TicketWorkflow:
             },
         }
         self.contracts.require_valid("tool_result", result)
-        return result
-
-    def _completion_policy_for_invocation(
-        self,
-        action: dict[str, Any],
-        invocation: dict[str, Any],
-        *,
-        preferred_launch: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        async_default = self._default_async_completion_policy_for_invocation(invocation)
-        extensions = action.get("extensions") or {}
-        completion_policy = extensions.get("completion_policy")
-        if isinstance(completion_policy, dict):
-            policy = copy.deepcopy(completion_policy)
-            return self._completion_policy_with_async_defaults(policy, async_default)
-        if preferred_launch:
-            policy = copy.deepcopy(preferred_launch.get("completion_policy") or {"mode": "sync"})
-            return self._completion_policy_with_async_defaults(policy, async_default)
-        if async_default:
-            return async_default
-        return {"mode": "sync", "max_wait_seconds": 0, "timeout_action": "resume_agent"}
-
-    @staticmethod
-    def _completion_policy_with_async_defaults(
-        policy: dict[str, Any],
-        async_default: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        if not async_default:
-            return policy
-        if not policy or policy.get("mode") == "sync":
-            return copy.deepcopy(async_default)
-        if policy.get("mode") != "external_event":
-            return policy
-        merged = copy.deepcopy(policy)
-        for key in ("expected_event_type", "max_wait_seconds", "timeout_action"):
-            if not merged.get(key) and async_default.get(key):
-                merged[key] = async_default[key]
-        for key in ("result_transport", "result_topic"):
-            if not merged.get(key) and async_default.get(key):
-                merged[key] = async_default[key]
-        return merged
-
-    def _default_async_completion_policy_for_invocation(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
-        if not self.config_store:
-            return None
-        endpoint_id = invocation.get("endpoint_id")
-        operation_id = invocation.get("operation_id")
-        if not endpoint_id or not operation_id:
-            return None
-        try:
-            endpoint = next(
-                (
-                    item
-                    for item in self.config_store.active_payload("integration_endpoints").get("endpoints", [])
-                    if item.get("endpoint_id") == endpoint_id
-                ),
-                None,
-            )
-            operation = (endpoint or {}).get("operations", {}).get(operation_id)
-            delivery_defaults = self._delivery_defaults_for_operation(endpoint_id, operation_id)
-        except Exception:
-            return None
-        return default_async_completion_policy_for_operation(
-            operation,
-            operation_id=operation_id,
-            delivery_defaults=delivery_defaults,
-        )
-
-    def _delivery_defaults_for_operation(self, endpoint_id: str, operation_id: str) -> dict[str, Any]:
-        if not self.config_store:
-            return {}
-        workflows = self.config_store.active_payload("n8n_workflows").get("workflows", [])
-        fallback_delivery: dict[str, Any] | None = None
-        for workflow in workflows:
-            if workflow.get("endpoint_id") != endpoint_id:
-                continue
-            delivery = workflow.get("result_delivery") or {}
-            if not delivery:
-                continue
-            operations = workflow.get("operations") or []
-            if operation_id not in operations:
-                if not operations and fallback_delivery is None:
-                    fallback_delivery = delivery
-                continue
-            return {
-                "result_transport": delivery.get("default_transport") or "http_callback",
-                "result_topic": delivery.get("default_result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
-            }
-        if fallback_delivery:
-            return {
-                "result_transport": fallback_delivery.get("default_transport") or "http_callback",
-                "result_topic": fallback_delivery.get("default_result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
-            }
-        return {}
-
-    def _missing_async_contract_result(
-        self,
-        invocation: dict[str, Any],
-        completion_policy: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if invocation.get("adapter_type") != "n8n_webhook":
-            return None
-        if completion_policy.get("mode") == "external_event":
-            return None
-        operation = self._operation_for_invocation(invocation)
-        if async_event_types_for_operation(operation):
-            return None
-        if not operation_response_looks_like_async_ack(operation):
-            return None
-        result = IntegrationDispatcher._base_result(
-            invocation,
-            "error",
-            error={
-                "code": "async_event_contract_missing",
-                "message": (
-                    f"Endpoint-операция {invocation.get('endpoint_id')}/{invocation.get('operation_id')} "
-                    "выглядит как асинхронный ACK (runbook_status/async_delivery), но не содержит "
-                    "async_event_contracts. Переимпортируйте OpenAPI-контракт n8n с x-result-delivery "
-                    "или исправьте контракт операции перед запуском."
-                ),
-            },
-            extensions={
-                "diagnostic_status": "async_event_contract_missing",
-                "root_cause": "endpoint_operation_without_async_event_contracts",
-            },
-        )
-        try:
-            binding = self.tool_registry.resolve(
-                invocation["tool_name"],
-                endpoint_id=invocation.get("endpoint_id"),
-                operation_id=invocation.get("operation_id"),
-            )
-            result = IntegrationDispatcher._with_trace(result, invocation, binding)
-        except Exception:
-            pass
-        self.contracts.require_valid("tool_result", result)
-        return result
-
-    def _operation_for_invocation(self, invocation: dict[str, Any]) -> dict[str, Any] | None:
-        if not self.config_store:
-            return None
-        endpoint_id = invocation.get("endpoint_id")
-        operation_id = invocation.get("operation_id")
-        if not endpoint_id or not operation_id:
-            return None
-        try:
-            endpoint = next(
-                (
-                    item
-                    for item in self.config_store.active_payload("integration_endpoints").get("endpoints", [])
-                    if item.get("endpoint_id") == endpoint_id
-                ),
-                None,
-            )
-            return (endpoint or {}).get("operations", {}).get(operation_id)
-        except Exception:
-            return None
-
-    def _preferred_launch_for_action(self, action: dict[str, Any]) -> dict[str, Any] | None:
-        extensions = action.get("extensions") or {}
-        endpoint_id = extensions.get("endpoint_id")
-        operation_id = extensions.get("operation_id")
-        completion_policy = extensions.get("completion_policy")
-        if endpoint_id or operation_id or isinstance(completion_policy, dict):
-            launch = {
-                "tool_name": action["tool_name"],
-                "endpoint_id": endpoint_id,
-                "operation_id": operation_id,
-                "completion_policy": copy.deepcopy(completion_policy or {"mode": "sync"}),
-            }
-            return {key: value for key, value in launch.items() if value not in (None, "", {}, [])}
-        return None
-
-    def _should_enqueue_async_tool(self, invocation: dict[str, Any], completion_policy: dict[str, Any]) -> bool:
-        return (
-            invocation.get("adapter_type") == "n8n_webhook"
-            and completion_policy.get("mode") == "external_event"
-            and bool(completion_policy.get("expected_event_type"))
-            and self.processing_store is not None
-        )
-
-    def _external_event_contract_snapshot(
-        self,
-        invocation: dict[str, Any],
-        completion_policy: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if not self.config_store:
-            return None
-        endpoint_id = invocation.get("endpoint_id")
-        operation_id = invocation.get("operation_id")
-        event_type = completion_policy.get("expected_event_type")
-        if not endpoint_id or not operation_id or not event_type:
-            return None
-        return self.config_store.external_event_contract_snapshot(
-            endpoint_id=endpoint_id,
-            operation_id=operation_id,
-            event_type=event_type,
-        )
-
-    def _async_tool_queued_result(
-        self,
-        invocation: dict[str, Any],
-        queued: dict[str, Any],
-        completion_policy: dict[str, Any],
-    ) -> dict[str, Any]:
-        wait = queued["wait"]
-        command = queued["command"]
-        result = IntegrationDispatcher._base_result(
-            invocation,
-            "success",
-            output={
-                "runbook_status": "accepted",
-                "message": "Асинхронный ReAct-вызов поставлен в очередь выполнения.",
-                "async_delivery": True,
-                "wait_id": wait["wait_id"],
-                "correlation_id": wait["correlation_id"],
-                "result_transport": command.get("result_transport"),
-                "result_topic": command.get("result_topic"),
-                "invocation_id": invocation.get("invocation_id"),
-                "action_id": invocation.get("operation_id"),
-            },
-            extensions={
-                "mock": False,
-                "async_wait": {
-                    "wait_id": wait["wait_id"],
-                    "run_id": wait["run_id"],
-                    "correlation_id": wait["correlation_id"],
-                    "event_type": command["expected_event_type"],
-                    "callback_url": command["callback_url"],
-                    "command_id": command["command_id"],
-                    "topic": command["topic"],
-                    "completion_policy": copy.deepcopy(completion_policy),
-                },
-            },
-        )
-        binding = self.tool_registry.resolve(
-            invocation["tool_name"],
-            endpoint_id=invocation.get("endpoint_id"),
-            operation_id=invocation.get("operation_id"),
-        )
-        result = IntegrationDispatcher._with_trace(result, invocation, binding)
-        self.contracts.require_valid("tool_result", result)
-        self.tool_registry.validate_result(result)
         return result
 
     @staticmethod
@@ -1628,7 +1375,7 @@ class TicketWorkflow:
             {
                 "event": "tool_dispatched",
                 "actor_type": "system",
-                "actor_id": "integration_dispatcher",
+                "actor_id": "capability_dispatcher",
                 "created_at": now,
                 "message": f"Диспетчер вернул статус инструмента {tool_result['status']}.",
             }
@@ -1653,23 +1400,3 @@ class TicketWorkflow:
         if tool_status == "blocked":
             return "blocked"
         return "failed"
-
-    @staticmethod
-    def _tool_result_from_callback(callback: dict[str, Any]) -> dict[str, Any]:
-        result = {
-            "schema_version": "1.0",
-            "invocation_id": callback["invocation_id"],
-            "action_id": callback["action_id"],
-            "tool_name": callback["tool_name"],
-            "endpoint_id": callback["endpoint_id"],
-            "adapter_type": callback["adapter_type"],
-            "operation_id": callback["operation_id"],
-            "status": callback["status"],
-            "policy_rule_id": callback["policy_rule_id"],
-            "duration_ms": callback.get("duration_ms", 0),
-            "attempts": callback.get("attempts", 0),
-        }
-        for optional_key in ("output", "error", "extensions"):
-            if optional_key in callback:
-                result[optional_key] = copy.deepcopy(callback[optional_key])
-        return result

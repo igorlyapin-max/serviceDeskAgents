@@ -13,11 +13,10 @@ class KafkaRuntimeCliTest(unittest.TestCase):
         contracts = Mock(name="contracts")
         config_store = Mock(name="config_store")
         processing_store = Mock(name="processing_store")
-        dispatcher = Mock(name="dispatcher")
         publisher = Mock(name="publisher")
         publisher.publish_batch.return_value = {"mode": "publish-once"}
-        tool_worker = Mock(name="tool_worker")
-        tool_worker.process_commands.return_value = {"mode": "worker"}
+        mcp_worker = Mock(name="mcp_worker")
+        mcp_worker.process_commands.return_value = {"mode": "mcp-worker"}
         event_worker = Mock(name="event_worker")
         event_worker.process_events.return_value = {"mode": "external-event-worker"}
         producer = Mock(name="producer")
@@ -31,12 +30,12 @@ class KafkaRuntimeCliTest(unittest.TestCase):
             patch.object(
                 kafka_runtime,
                 "build_default_runtime",
-                return_value=(contracts, config_store, processing_store, dispatcher),
+                return_value=(contracts, config_store, processing_store),
             ),
             patch.object(kafka_runtime, "JsonKafkaProducer", return_value=producer),
             patch.object(kafka_runtime, "JsonKafkaConsumer", return_value=consumer),
             patch.object(kafka_runtime, "OutboxPublisher", return_value=publisher),
-            patch.object(kafka_runtime, "ToolCommandWorker", return_value=tool_worker),
+            patch.object(kafka_runtime, "McpCommandWorker", return_value=mcp_worker),
             patch.object(kafka_runtime, "ExternalEventWorker", return_value=event_worker),
             patch("builtins.print"),
         ):
@@ -44,7 +43,7 @@ class KafkaRuntimeCliTest(unittest.TestCase):
 
         return {
             "publisher": publisher,
-            "tool_worker": tool_worker,
+            "mcp_worker": mcp_worker,
             "event_worker": event_worker,
         }
 
@@ -73,7 +72,7 @@ class KafkaRuntimeCliTest(unittest.TestCase):
             [
                 "publisher",
                 "--topic",
-                "tool.commands",
+                "mcp.commands",
                 "--limit",
                 "3",
                 "--interval-seconds",
@@ -85,15 +84,15 @@ class KafkaRuntimeCliTest(unittest.TestCase):
 
         result["publisher"].publish_forever.assert_called_once_with(
             limit=3,
-            topics=["tool.commands"],
+            topics=["mcp.commands"],
             interval_seconds=0.5,
             max_batches=2,
         )
 
-    def test_tool_worker_without_limit_is_long_running(self) -> None:
-        result = self.run_main(["worker"])
+    def test_mcp_worker_without_limit_is_long_running(self) -> None:
+        result = self.run_main(["mcp-worker"])
 
-        _, kwargs = result["tool_worker"].process_commands.call_args
+        _, kwargs = result["mcp_worker"].process_commands.call_args
         self.assertIsNone(kwargs["limit"])
 
     def test_external_event_worker_without_limit_is_long_running(self) -> None:
@@ -102,10 +101,10 @@ class KafkaRuntimeCliTest(unittest.TestCase):
         _, kwargs = result["event_worker"].process_events.call_args
         self.assertIsNone(kwargs["limit"])
 
-    def test_explicit_limit_applies_to_tool_worker(self) -> None:
-        result = self.run_main(["worker", "--limit", "3"])
+    def test_explicit_limit_applies_to_mcp_worker(self) -> None:
+        result = self.run_main(["mcp-worker", "--limit", "3"])
 
-        _, kwargs = result["tool_worker"].process_commands.call_args
+        _, kwargs = result["mcp_worker"].process_commands.call_args
         self.assertEqual(kwargs["limit"], 3)
 
     def test_explicit_limit_applies_to_external_event_worker(self) -> None:
@@ -130,7 +129,7 @@ class KafkaRuntimeCliTest(unittest.TestCase):
             {
                 "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
                 "KAFKA_SASL_MECHANISM": "SCRAM-SHA-512",
-                "KAFKA_SASL_USERNAME": "svc-n8n",
+                "KAFKA_SASL_USERNAME": "svc-provider-ops",
                 "KAFKA_SASL_PASSWORD": "secret",
                 "KAFKA_SSL_CA_FILE": "/etc/kafka/ca.pem",
             },
@@ -140,7 +139,7 @@ class KafkaRuntimeCliTest(unittest.TestCase):
 
         self.assertEqual(config["security_protocol"], "SASL_SSL")
         self.assertEqual(config["sasl_mechanism"], "SCRAM-SHA-512")
-        self.assertEqual(config["sasl_plain_username"], "svc-n8n")
+        self.assertEqual(config["sasl_plain_username"], "svc-provider-ops")
         self.assertEqual(config["sasl_plain_password"], "secret")
         self.assertEqual(config["ssl_cafile"], "/etc/kafka/ca.pem")
         self.assertTrue(config["ssl_check_hostname"])
@@ -169,6 +168,37 @@ class KafkaRuntimeCliTest(unittest.TestCase):
         with patch.dict(os.environ, {"KAFKA_SECURITY_PROTOCOL": "SASL_SSL"}, clear=True):
             with self.assertRaises(kafka_runtime.KafkaRuntimeError):
                 kafka_runtime.kafka_client_security_config()
+
+    def test_outbox_publisher_publishes_payload_not_storage_envelope(self) -> None:
+        processing_store = Mock(name="processing_store")
+        producer = Mock(name="producer")
+        outbox_message = {
+            "schema_version": "1.0",
+            "message_id": "msg-1",
+            "topic": "external.events",
+            "key": "case-123",
+            "event_type": "external_event_received",
+            "idempotency_key": "idem-1",
+            "status": "publishing",
+            "created_at": "2026-07-04T00:00:00Z",
+            "attempts": 0,
+            "payload": {
+                "schema_version": "1.0",
+                "event_id": "evt-1",
+                "case_id": "case-123",
+            },
+        }
+        processing_store.claim_outbox_batch.return_value = [outbox_message]
+
+        result = kafka_runtime.OutboxPublisher(
+            processing_store,
+            producer,
+            worker_id="publisher-1",
+        ).publish_batch(close_producer=False)
+
+        producer.publish.assert_called_once_with("external.events", "case-123", outbox_message["payload"])
+        processing_store.mark_outbox_published.assert_called_once_with("msg-1", worker_id="publisher-1")
+        self.assertEqual(result["published"], 1)
 
 
 if __name__ == "__main__":

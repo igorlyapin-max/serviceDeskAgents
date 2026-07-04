@@ -120,10 +120,6 @@ for (const tool of toolCatalog.tools) {
   if (!tool.parameters_schema || !tool.result_schema || !tool.policy) {
     throw new Error(`${tool.tool_name} must define parameters_schema, result_schema, and policy`);
   }
-  const reactParameterNames = new Set([
-    ...(tool.parameters_schema.required || []),
-    ...Object.keys(tool.parameters_schema.properties || {}),
-  ]);
   for (const binding of tool.endpoint_bindings) {
     const endpoint = endpointById.get(binding.endpoint_id);
     if (!endpoint) {
@@ -134,33 +130,9 @@ for (const tool of toolCatalog.tools) {
         `${tool.tool_name} references unknown operation_id ${binding.operation_id} on ${binding.endpoint_id}`,
       );
     }
-    const operation = endpoint.operations[binding.operation_id];
-    const requestSchema = operation.request_schema || {};
-    const mapping = binding.parameter_mapping || {};
-    for (const requiredParam of requestSchema.required || []) {
-      if (!Object.prototype.hasOwnProperty.call(mapping, requiredParam)) {
-        throw new Error(
-          `${tool.tool_name} binding ${binding.endpoint_id}/${binding.operation_id} misses operation parameter ${requiredParam}`,
-        );
-      }
-    }
-    for (const [operationParam, sourceRef] of Object.entries(mapping)) {
-      const [source, ...rest] = String(sourceRef).split(':');
-      const value = rest.join(':');
-      if (!['react', 'constant', 'secret'].includes(source) || !value) {
-        throw new Error(
-          `${tool.tool_name} binding ${binding.endpoint_id}/${binding.operation_id} has invalid mapping ${operationParam}=${sourceRef}`,
-        );
-      }
-      if (source === 'react' && !reactParameterNames.has(value)) {
-        throw new Error(
-          `${tool.tool_name} binding ${binding.endpoint_id}/${binding.operation_id} references unknown react parameter ${value}`,
-        );
-      }
-    }
   }
 }
-console.log('integration catalog ok: tool bindings reference known endpoints and operations');
+console.log('legacy integration catalog ok: tool bindings reference known endpoints and operations');
 
 const knowledgeSourceCatalog = await readJson('contracts/knowledge/knowledge-source-catalog.json');
 const sourceIds = new Set();
@@ -218,34 +190,5 @@ for (const secret of securityCatalog.secret_references) {
   secretIds.add(secret.secret_id);
 }
 console.log('security catalog ok: roles, users and secret references are valid');
-
-const n8nWorkflowCatalog = await readJson('contracts/config/n8n-workflow-catalog.json');
-const workflowIds = new Set();
-for (const workflow of n8nWorkflowCatalog.workflows) {
-  if (workflowIds.has(workflow.workflow_id)) {
-    throw new Error(`duplicate n8n workflow_id: ${workflow.workflow_id}`);
-  }
-  workflowIds.add(workflow.workflow_id);
-  if (!endpointById.has(workflow.endpoint_id)) {
-    throw new Error(
-      `n8n workflow ${workflow.workflow_id} references unknown endpoint_id: ${workflow.endpoint_id}`,
-    );
-  } else {
-    const endpoint = endpointById.get(workflow.endpoint_id);
-    for (const operationId of workflow.operations || []) {
-      if (!endpoint.operations[operationId]) {
-        throw new Error(
-          `n8n workflow ${workflow.workflow_id} references unknown operation ${operationId} on ${workflow.endpoint_id}`,
-        );
-      }
-    }
-  }
-  if (workflow.callback_endpoint_id && !endpointById.has(workflow.callback_endpoint_id)) {
-    throw new Error(
-      `n8n workflow ${workflow.workflow_id} references unknown callback_endpoint_id: ${workflow.callback_endpoint_id}`,
-    );
-  }
-}
-console.log('n8n workflow catalog ok: workflow mappings reference known endpoints and operations');
 
 console.log('Contract validation completed.');

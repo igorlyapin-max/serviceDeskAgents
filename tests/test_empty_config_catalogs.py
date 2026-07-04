@@ -16,14 +16,14 @@ COLLECTION_KEYS = {
     "orchestrator_policy": "policies",
     "prompt_packs": "packs",
     "escalation_policies": "policies",
-    "tools": "tools",
-    "integration_endpoints": "endpoints",
     "workflow_states": "states",
     "workflow_transitions": "rules",
     "prompts": "prompts",
-    "n8n_workflows": "workflows",
     "interaction_channels": "channels",
     "attribute_resolution_profiles": "profiles",
+    "capabilities": "capabilities",
+    "mcp_environments": "environments",
+    "capability_bindings": "bindings",
 }
 
 

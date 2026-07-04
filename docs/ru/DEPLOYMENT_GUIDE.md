@@ -27,10 +27,10 @@ KAFKA_PORT=19092
 KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
 KAFKA_API_VERSION=2.3
 ORCHESTRATOR_KAFKA_API_VERSION=2.3
-TOOL_COMMAND_TOPIC=tool.commands
+MCP_COMMAND_TOPIC=mcp.commands
 EXTERNAL_EVENT_TOPIC=external.events
 AGENT_TASK_TOPIC=agent.tasks
-N8N_PORT=5678
+MCP_PROVIDER_OPS_BASE_URL=http://hostmachine:9000/mcp
 ORCHESTRATOR_PORT=18088
 ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088
 CMDBUILD_BASE_URL=http://hostmachine:8090/cmdbuild
@@ -45,20 +45,19 @@ METRICS_ALLOWED_IPS=127.0.0.1,::1
 Секреты задаются через `.env` или внешнее хранилище секретов:
 
 - `POSTGRES_PASSWORD`;
-- `N8N_DB_PASSWORD`;
 - `OPENAI_API_KEY`;
 - `LITELLM_MASTER_KEY`;
-- `N8N_ENCRYPTION_KEY`;
-- `N8N_WEBHOOK_TOKEN` для вызовов `orchestrator` / `async-tool-worker` -> n8n webhook через `X-ServiceDesk-Token`;
-- `INTEGRATION_CALLBACK_TOKEN` для local/dev или `INTEGRATION_CALLBACK_TOKEN__<SOURCE>` для shared/staging/production.
+- `MCP_PROVIDER_OPS_TOKEN` для dev Bearer token внешнего provider-ops MCP окружения; production должен использовать настроенный OIDC/token exchange для этого MCP окружения;
+- `INTEGRATION_CALLBACK_TOKEN` или `INTEGRATION_CALLBACK_TOKEN__<SOURCE>` только для local/dev callback token mode;
+- `SECURITY_CALLBACK_AUTH_MODE=oidc_jwks`, `CALLBACK_OIDC_ISSUER`, `CALLBACK_OIDC_AUDIENCE`, `CALLBACK_OIDC_ALLOWED_CLIENT_IDS`, `CALLBACK_OIDC_JWKS_URL` для shared/staging/production callbacks. `oidc_proxy_jwt` допустим только за trusted gateway/proxy и требует `CALLBACK_OIDC_PROXY_TRUSTED_IPS` или `CALLBACK_OIDC_PROXY_TRUST_HEADER` / `CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE`.
 
-Не коммитьте `.env` в git. Docker Compose не подставляет dev-пароли по умолчанию: если обязательный секрет не задан, `docker compose config` завершится ошибкой. Значения `change_me_*` из `.env.example` предназначены только как подсказки и должны быть заменены перед запуском общего стенда или production.
+Не коммитьте `.env` в git. Docker Compose не подставляет dev-пароли по умолчанию: если обязательный секрет не задан, `docker compose config --quiet` завершится ошибкой. Значения `change_me_*` из `.env.example` предназначены только как подсказки и должны быть заменены перед запуском общего стенда или production.
 
 Текущий MVP рассчитан на локальный single-node режим. Для общих стендов используйте `APP_ENV=shared`, `APP_ENV=staging`, `APP_ENV=uat` или `APP_ENV=preprod`; для промышленного запуска - `APP_ENV=production`. Во всех non-local окружениях замените dev-секреты, не используйте `SECURITY_AUTH_MODE=dev_header` и задайте второй log sink через `LOG_SINKS=jsonl` или `LOG_SINKS=syslog`.
 
 Экран моделей в Admin UI может записывать секреты в `.env` только в локальном/dev режиме. При `APP_ENV=production` такая запись запрещена: ключи должны поступать из переменных окружения, контейнерного secret store или внешнего Vault.
 
-PostgreSQL init script создает пользователя и базу n8n из `N8N_DB_NAME`, `N8N_DB_USER` и `N8N_DB_PASSWORD`. Эти значения должны совпадать с настройками сервиса `n8n`; hardcoded пароль в init-скриптах не используется.
+ServiceDeskAgents не запускает n8n и не хранит его credentials. Если конкретное внешнее MCP окружение реализовано через n8n, его переменные и секреты настраиваются в отдельном проекте/контуре этого окружения.
 
 ## Сервисы Docker Compose
 
@@ -67,7 +66,6 @@ PostgreSQL init script создает пользователя и базу n8n �
 - `postgres` - PostgreSQL с pgvector;
 - `redis` - cache, locks и временное состояние;
 - `redpanda` - Kafka-compatible broker для асинхронных событий;
-- `n8n` - интеграционные workflows и webhooks.
 - `litellm` - общий локальный OpenAI-compatible gateway, доступный на `http://127.0.0.1:4000/v1`.
 
 Опциональный LLM-профиль:
@@ -79,13 +77,13 @@ PostgreSQL init script создает пользователя и базу n8n �
 Проверить конфигурацию:
 
 ```bash
-docker compose config
+docker compose config --quiet
 ```
 
 Запустить базовые сервисы:
 
 ```bash
-docker compose up -d postgres redis redpanda n8n
+docker compose up -d postgres redis redpanda litellm
 ```
 
 Запустить полный runtime стенд с FastAPI и async workers:
@@ -101,7 +99,7 @@ make runtime-check
 docker compose ps
 ```
 
-Для workflow `Contracts: OpenAPI discovery` n8n должен разрешать Code node читать переменные окружения. В local/dev задайте `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` и `N8N_OPENAPI_DEFAULT_LOCALE=ru`; иначе `GET /webhook/contracts/openapi.json` может вернуть пустой ответ из-за ошибки доступа к env.
+Внешние MCP окружения должны быть доступны по настроенным URL из `mcp_environments`. В local/dev используется Bearer token, в production - OIDC/token exchange или эквивалентная авторизация выбранного MCP окружения.
 
 ## Запуск LLM gateway и локальной CPU-модели
 
@@ -137,7 +135,7 @@ python3 -m venv .venv
   --port ${ORCHESTRATOR_PORT:-18088}
 ```
 
-Такой запуск подходит для разработки API/UI. Для async n8n-вызовов нужен полный runtime: `async-outbox-publisher`, `async-tool-worker`, `async-external-event-worker` и `async-agent-task-worker`. В штатном локальном стенде запускайте их через `make runtime-up`.
+Такой запуск подходит для разработки API/UI. Для async MCP capability вызовов нужен полный runtime: `async-outbox-publisher`, `async-mcp-worker`, `async-external-event-worker` и `async-agent-task-worker`. В штатном локальном стенде запускайте их через `make runtime-up`.
 
 URL интерфейсов:
 
@@ -151,13 +149,13 @@ http://127.0.0.1:18088/operator  # alias консоли отладки для л
 
 ```text
 http://127.0.0.1:18088/healthz  # простой liveness
-http://127.0.0.1:18088/readyz   # readiness по state DB, конфигурации, моделям, Kafka, n8n и async runtime
+http://127.0.0.1:18088/readyz   # readiness по state DB, конфигурации, моделям, Kafka, MCP workers и async runtime
 http://127.0.0.1:18088/metrics  # Prometheus-совместимые технические метрики MVP
 ```
 
 ## Запуск async Kafka runtime
 
-Для долгих n8n workflow оркестратор не держит HTTP-запрос открытым. Он пишет команду в outbox, publisher отправляет ее в Kafka, а отдельный worker вызывает n8n webhook.
+Для долгого внешнего исполнения оркестратор не держит HTTP-запрос открытым. Он пишет capability-команду в outbox, publisher отправляет ее в Kafka, а отдельный worker вызывает внешнее MCP окружение.
 
 Рекомендуемый запуск в Docker Compose:
 
@@ -166,12 +164,12 @@ make runtime-up
 make runtime-check
 ```
 
-`runtime-check` проверяет публичный LiteLLM endpoint и `/readyz`; readiness считается ошибочной, если Kafka, n8n или model gateway недоступны, если не обновляется heartbeat `async-outbox-publisher`, `async-tool-worker`, `async-external-event-worker` или `async-agent-task-worker`, либо если `tool.commands` остается в pending дольше допустимого порога.
+`runtime-check` проверяет публичный LiteLLM endpoint и `/readyz`; readiness считается ошибочной, если Kafka или model gateway недоступны, если не обновляется heartbeat `async-outbox-publisher`, `async-mcp-worker`, `async-external-event-worker` или `async-agent-task-worker`, либо если `mcp.commands` остается в pending дольше допустимого порога.
 
-Запустить постоянный publisher outbox в Kafka. Для рабочего стенда это обязательный процесс: без него async-команды останутся в `processing_outbox`, а фактический n8n webhook не будет вызван.
+Запустить постоянный publisher outbox в Kafka. Для рабочего стенда это обязательный процесс: без него async-команды останутся в `processing_outbox`, а MCP capabilities не будут вызваны.
 
 ```bash
-.venv/bin/python -m apps.orchestrator.app.kafka_runtime publisher --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime publisher
 # или
 PYTHON=.venv/bin/python make async-outbox-publisher
 ```
@@ -184,12 +182,12 @@ PYTHON=.venv/bin/python make async-outbox-publisher
 PYTHON=.venv/bin/python make async-outbox-publish-once
 ```
 
-Запустить постоянный worker команд инструментов:
+Запустить постоянный worker команд MCP capabilities:
 
 ```bash
-.venv/bin/python -m apps.orchestrator.app.kafka_runtime worker --topic ${TOOL_COMMAND_TOPIC:-tool.commands}
+.venv/bin/python -m apps.orchestrator.app.kafka_runtime mcp-worker --topic ${MCP_COMMAND_TOPIC:-mcp.commands}
 # или
-PYTHON=.venv/bin/python make async-tool-worker
+PYTHON=.venv/bin/python make async-mcp-worker
 ```
 
 Запустить постоянный inbound worker результатов из Kafka:
@@ -208,23 +206,9 @@ PYTHON=.venv/bin/python make async-external-event-worker
 PYTHON=.venv/bin/python make async-agent-task-worker
 ```
 
-Для локального стенда default topic исходящих команд n8n runbook: `tool.commands`; default topic входящих external events: `external.events`; default topic задач продолжения агента: `agent.tasks`. Доступ к Kafka с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
+Для локального стенда default topic исходящих MCP capability команд: `mcp.commands`; default topic входящих external events: `external.events`; default topic задач продолжения агента: `agent.tasks`. Доступ к Kafka с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
 
-`N8N_WEBHOOK_TOKEN` должен быть доступен и вызывающей стороне (`orchestrator` / `async-tool-worker`), и контейнеру n8n: orchestrator добавляет его в заголовок `X-ServiceDesk-Token`, а n8n проверяет входящий webhook. Контейнер n8n также должен получать параметры обратной доставки результатов: `ORCHESTRATOR_PUBLIC_URL`, `INTEGRATION_CALLBACK_TOKEN`, `INTEGRATION_CALLBACK_TOKEN__N8N`, `N8N_KAFKA_BOOTSTRAP_SERVERS`, Kafka security переменные и `EXTERNAL_EVENT_TOPIC`. В локальном compose `N8N_KAFKA_BOOTSTRAP_SERVERS=redpanda:9092`, потому что n8n обращается к Kafka из docker network.
-
-Email workflow n8n получают SMTP `from` и `replyTo` как обязательные параметры вызова ранбука. Для сценариев ожидания ответа провайдера `replyTo` должен указывать на ящик, который индексирует IMAP collector; поиск ответа фильтруется по этому адресу.
-
-Zabbix runbooks используют registry `origin -> API URL/token` в окружении n8n. Origin берется из пользовательского `problemUrl`, например для `http://localhost:8081/tr_events.php?...` origin равен `http://localhost:8081`. Для локального Zabbix в отдельном Docker Compose проекте используйте:
-
-```text
-COMPOSE_FILE=docker-compose.yml:docker-compose.zabbix.yml
-ZABBIX_DOCKER_NETWORK=zabbix_zabbix_internal
-ZABBIX_RUNBOOK_REQUIRED_ORIGINS=http://localhost:8081
-ZABBIX_API_URLS_BY_ORIGIN={"http://localhost:8081":"http://zabbix-web:8080/api_jsonrpc.php"}
-ZABBIX_API_TOKENS_BY_ORIGIN={"http://localhost:8081":"<zabbix-api-token>"}
-```
-
-`make runtime-check` проверяет, что registry заполнен, n8n видит Zabbix API из контейнера и не печатает значения токенов.
+Внешнее MCP окружение получает только canonical capability input и async context. Если оно внутри себя использует n8n, Zabbix, SMTP или другие системы, их registry, секреты и сетевые подключения настраиваются в проекте этого MCP окружения, а не в ServiceDeskAgents.
 
 Kafka transport security настраивается администратором через env. Local/dev default:
 
@@ -282,10 +266,9 @@ DEBUG_LOGGING_LEVEL=Basic  # Basic или Verbose
 
 | Компонент | Host port | Назначение |
 | --- | ---: | --- |
-| PostgreSQL | `15432` | Хранилище приложения, n8n и pgvector |
+| PostgreSQL | `15432` | Хранилище приложения и pgvector |
 | Redis | `16379` | Cache, locks и временное состояние |
 | Redpanda/Kafka | `19092` | Транспорт команд и событий |
-| n8n | `5678` | Integration workflows и webhooks |
 | LiteLLM | `4000` | OpenAI-compatible LLM gateway |
 | vLLM CPU | `8000` | Local CPU inference backend |
 | FastAPI orchestrator | `18088` | API, Admin UI и консоль отладки |
@@ -313,7 +296,7 @@ make docs-check
 Compose:
 
 ```bash
-docker compose config
+docker compose config --quiet
 ```
 
 ## Kafka topics
@@ -324,28 +307,36 @@ Runtime использует Kafka-ready outbox и следующие topics:
 - `case.events`;
 - `agent.tasks`;
 - `agent.results`;
-- `tool.commands`;
-- `tool.results`;
+- `mcp.commands`;
 - `timer.commands`;
 - `timer.events`;
-- `integration.events`;
 - `external.events`;
 - `audit.events`;
 - `dead-letter`.
 
 Topics должны управляться инфраструктурой. Сервисы приложения не должны создавать topics на старте.
 
-`tool.commands` является default topic для исходящих async ReAct-вызовов и n8n runbook команд. Producer читает `processing_outbox`, публикует envelope-сообщение в этот topic и помечает outbox запись как `published` только после успешной отправки в Kafka. Worker подтверждает Kafka offset только после успешной обработки команды или после durable записи poison message в `dead-letter`.
+`mcp.commands` является default topic для исходящих внешних MCP capability команд. Producer читает `processing_outbox`, публикует envelope-сообщение в topic сообщения и помечает outbox запись как `published` только после успешной отправки в Kafka. Workers подтверждают Kafka offset только после успешной обработки команды или после durable записи poison message в `dead-letter`.
 
 `external.events` является default topic для входящих результатов внешних асинхронных операций. `ExternalEvent` consumer подтверждает Kafka offset только после durable записи результата, duplicate receipt или `dead-letter`. Для него используются отдельные переменные `EXTERNAL_EVENT_TOPIC`, `EXTERNAL_EVENT_WORKER_GROUP_ID` и `EXTERNAL_EVENT_WORKER_OFFSET_RESET`.
 
-`agent.tasks` является default topic для durable продолжения обработки после terminal ExternalEvent. `async-agent-task-worker` берет queued `langgraph_resume` задачи из state DB, связывает их с receipt внешнего события и переводит run в финальный статус. Без этого worker-а callback n8n будет принят, но сценарий останется в ожидании продолжения.
+`agent.tasks` является default topic для durable продолжения обработки после terminal ExternalEvent. `async-agent-task-worker` берет queued `langgraph_resume` задачи из state DB, связывает их с receipt внешнего события и переводит run в финальный статус. Без этого worker-а внешний результат будет принят, но сценарий останется в ожидании продолжения.
+
+## Восстановление после падения runtime
+
+Текущий целевой режим отказоустойчивости - single-node durability. Контейнеры могут перезапускаться без потери уже зафиксированного контекста, если `ORCHESTRATOR_STATE_DB=/app/state/orchestrator.sqlite` расположен на persistent volume `./state:/app/state`, а Kafka сохраняет topics.
+
+После restart сохраняются `case`, `processing_runs`, заполненные слоты в снимках обработки, `wait_states`, `processing_outbox`, `tool_command_receipts`, `external_event_receipts` и `agent_tasks`. Pending outbox-сообщения будут опубликованы повторно; stale `publishing` outbox lease и stale `agent_tasks` переарендуются после истечения lease.
+
+Для `ExternalEvent` действует идемпотентное восстановление: если сервис упал с receipt в `processing`, повторная доставка того же события с тем же payload после `ASYNC_RECOVERY_RECEIPT_STALE_SECONDS` продолжит обработку или дозавершит receipt по уже закрытому wait. Для `tool_command_receipts.status=processing` автоматический повтор не выполняется: сначала проверьте, принял ли внешний MCP/n8n исполнитель команду. Поэтому каждый async runbook обязан хранить `async_context.idempotency_key_base`, `correlation_id` и `wait_id` и делать запуск идемпотентным.
+
+`/readyz` включает recovery-диагностику. Зависшие receipts переводят async runtime в `degraded`; это не снимает инстанс с балансировщика при `READYZ_STRICT=false`, но требует операторской проверки.
 
 ## Длительные действия и external events
 
-Платформа владеет жизненным циклом длительных ожиданий. Для сценариев вроде «написали провайдеру, проверить через час» или «n8n выполняет долгий workflow» создается `wait_state` с `case_id`, `wait_id`, `correlation_id`, ожидаемым `event_type`, `deadline_at` и `origin`.
+Платформа владеет жизненным циклом длительных ожиданий. Для сценариев вроде «написали провайдеру, проверить через час» или «внешнее MCP окружение выполняет долгий workflow» создается `wait_state` с `case_id`, `wait_id`, `correlation_id`, ожидаемым `event_type`, `deadline_at` и `origin`.
 
-Если ожидание открыто ReAct-вызовом, `origin.kind` равен `react_call` и содержит ReAct-вызов, launch, endpoint, endpoint-операцию и параметры без секретов. Вопросы клиенту, согласования и технические таймеры используют тот же `wait_state`, но другой `origin.kind`.
+Если ожидание открыто capability-вызовом, `origin.kind` равен `capability` и содержит `capability_id`, `mcp_environment_id`, `mcp_tool_name`, launch и параметры без секретов. Вопросы клиенту, согласования и технические таймеры используют тот же `wait_state`, но другой `origin.kind`.
 
 Внешний исполнитель получает эти идентификаторы вместе с callback URL:
 
@@ -354,23 +345,23 @@ POST http://127.0.0.1:18088/external-events/{source}
 Header: X-ServiceDesk-Callback-Token: ${INTEGRATION_CALLBACK_TOKEN}
 ```
 
-Для local/dev, где n8n запущен в Docker, callback URL и CMDBuild URL должны быть достижимы из контейнера n8n. По умолчанию используйте `ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088` и `CMDBUILD_BASE_URL=http://hostmachine:8090/cmdbuild`; compose добавляет alias `hostmachine:host-gateway`, а orchestrator нужно запускать с bind `0.0.0.0`. В shared/staging/production задайте `ORCHESTRATOR_PUBLIC_URL=https://...` и production URL CMDBuild; n8n webhook base для исходящих вызовов задается через `N8N_WEBHOOK_BASE_URL=https://...`.
+Для local/dev callback URL должен быть достижим из внешнего MCP окружения. По умолчанию используйте `ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088` для соседних локальных Docker-проектов; compose добавляет alias `hostmachine:host-gateway`, а orchestrator нужно запускать с bind `0.0.0.0`. В shared/staging/production задайте `ORCHESTRATOR_PUBLIC_URL=https://...`.
 
-В local/dev допустим общий `INTEGRATION_CALLBACK_TOKEN`. В shared/staging/production используйте source-specific переменные, например `INTEGRATION_CALLBACK_TOKEN__N8N` для `POST /external-events/n8n`.
+В local/dev допустим `SECURITY_CALLBACK_AUTH_MODE=source_token` с общим `INTEGRATION_CALLBACK_TOKEN` или source-specific `INTEGRATION_CALLBACK_TOKEN__<SOURCE>`.
 
-Для долгого n8n runbook worker передает в webhook `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic` и бизнес-параметры операции. n8n не закрывает и не эскалирует заявку напрямую: результат возвращается через разрешенный транспорт результата.
+В shared/staging/production задайте `SECURITY_CALLBACK_AUTH_MODE=oidc_jwks`. `ServiceDeskAgents` проверяет JWT подпись по `CALLBACK_OIDC_JWKS_URL` и затем валидирует claims `iss`, `aud`, `exp`, `nbf`, `sub` или `client_id`, `CALLBACK_OIDC_ALLOWED_CLIENT_IDS` и scope `CALLBACK_OIDC_REQUIRED_SCOPE` (по умолчанию `servicedesk.external_events.write`). `SECURITY_CALLBACK_AUTH_MODE=oidc_proxy_jwt` допустим только если подпись JWT уже проверена trusted gateway/proxy; задайте `CALLBACK_OIDC_PROXY_TRUSTED_IPS` или `CALLBACK_OIDC_PROXY_TRUST_HEADER` / `CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE`.
+
+Для долгой capability-операции worker передает внешнему MCP окружению `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic` и бизнес-параметры операции. Внешний исполнитель не закрывает и не эскалирует заявку напрямую: результат возвращается через разрешенный транспорт результата.
 
 Тело события должно соответствовать envelope-контракту `contracts/integrations/external-event.schema.json`. Обязательные поля: `event_id`, `case_id`, `correlation_id`, `source`, `event_type`, `status`, `received_at`, `idempotency_key`. Допустимые статусы: `progress`, `success`, `error`, `timeout`, `cancelled`.
 
-Envelope проверяет общую форму события. Содержимое `result` или `error` дополнительно проверяется по snapshot `async_event_contracts` endpoint-операции, которая открыла ожидание. Для старых ожиданий без snapshot допускается fallback на активную конфигурацию по `wait_state.origin.endpoint_id`, `wait_state.origin.operation_id` и `event_type`.
+Envelope проверяет общую форму события. Содержимое `result` или `error` дополнительно проверяется по async result contract capability binding, который открыл ожидание. Для старых ожиданий без snapshot требуется повторный запуск после миграции на capability binding; legacy endpoint fallback удален.
 
 Внешняя система не закрывает и не эскалирует заявку напрямую. Она возвращает только результат, ошибку или progress. `idempotency_key_base` является ключом команды; каждый `ExternalEvent` должен иметь собственный стабильный `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Платформа дедуплицирует событие по `idempotency_key`; повтор с тем же ключом, но другим `event_id`, `source`, `case_id`, `correlation_id`, `wait_id`, `event_type`, `status` или payload hash, отклоняется как `external_event_idempotency_conflict`. Payload события перед записью в timeline, outbox и receipt маскируется и компактируется.
 
 `result_transport` является runtime-правилом, а не подсказкой. HTTP callback принимается только для ожиданий `http_callback` или `both`; Kafka event принимается только для `kafka_event` или `both` и только из ожидаемого `result_topic`. Для shared/staging/production Kafka producer identity должен ограничиваться ACL/SASL/mTLS или равноценным механизмом инфраструктуры.
 
-Не смешивайте `result_transport` и `transport_security`. `result_transport` находится в async command package (`invocation.extensions.async_callback.result_transport`) и выбирает delivery mode конкретного запуска: `http_callback`, `kafka_event` или `both`. `transport_security` публикуется в OpenAPI/каталоге endpoint/workflow как machine-readable metadata защиты выбранных транспортов: HTTP использует administrator-selected HTTPS URL и token auth, Kafka не является HTTPS и защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем. Значение `policy=admin_configured` означает настройку защиты администратором платформы, `policy=credential_configured` - что credentials задаются через конфигурацию credentials и не передаются в business payload.
-
-Язык OpenAPI-контракта n8n выбирается только при загрузке/импорте контракта: UI передает `contract_source.lang=ru` и backend добавляет `lang=ru` к contract URL. Этот параметр локализует только человекочитаемые metadata и не передается в runtime command package.
+Не смешивайте `result_transport` и transport auth. `result_transport` находится в async command package (`invocation.extensions.async_callback.result_transport`) и выбирает delivery mode конкретного запуска: `http_callback`, `kafka_event` или `both`. Авторизация HTTP callback задается через `SECURITY_CALLBACK_AUTH_MODE`; Kafka защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем.
 
 ## Production hardening backlog
 
@@ -391,7 +382,7 @@ Envelope проверяет общую форму события. Содержи
 
 1. Получите новую версию кода.
 2. Проверьте `.env` и новые переменные.
-3. Выполните `docker compose config`.
+3. Выполните `docker compose config --quiet`.
 4. Перезапустите измененные сервисы.
 5. Перезапустите FastAPI orchestrator.
 6. Выполните smoke checks.
@@ -401,6 +392,6 @@ Envelope проверяет общую форму события. Содержи
 - Если Admin UI не показывает новые разделы, перезапустите FastAPI и обновите страницу без cache.
 - Если LiteLLM не отвечает, проверьте контейнер `litellm`, `LITELLM_MASTER_KEY`, `OPENAI_API_KEY`, `LITELLM_PUBLIC_BASE_URL` и `COMPOSE_LITELLM_BASE_URL`.
 - Если Kafka недоступна, проверьте контейнер `redpanda` и порт `19092`.
-- Если n8n webhook возвращает `auth_token_missing`, проверьте, что `N8N_WEBHOOK_TOKEN` задан в runtime `orchestrator` и `async-tool-worker`.
-- Если n8n возвращает `zabbix_status_failed`, вызовите `make runtime-check`: чаще всего не задан `ZABBIX_API_TOKENS_BY_ORIGIN`, отсутствует origin из `problemUrl` или контейнер n8n не подключен к Docker-сети Zabbix.
-- Если n8n callback отклоняется, проверьте `INTEGRATION_CALLBACK_TOKEN` и endpoint id.
+- Если MCP capability не вызывается, проверьте `mcp_environments`, `capability_bindings`, `MCP_COMMAND_TOPIC`, heartbeat `async-mcp-worker` и авторизацию внешнего MCP окружения.
+- Если внешний исполнитель возвращает доменную ошибку, диагностируйте его собственный runtime/секреты/сети в проекте этого MCP окружения.
+- Если callback отклоняется, проверьте `SECURITY_CALLBACK_AUTH_MODE`, callback source id, local/dev token или OIDC proxy JWT claims.

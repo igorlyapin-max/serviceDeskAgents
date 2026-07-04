@@ -38,10 +38,10 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "requires_tool_success"
+              "requires_capability_success"
             ],
             "properties": {
-              "requires_tool_success": {
+              "requires_capability_success": {
                 "type": "boolean"
               }
             }
@@ -51,7 +51,7 @@
             "items": {
               "type": "string",
               "enum": [
-                "two_tool_errors",
+                "two_capability_errors",
                 "iteration_limit",
                 "confidence_below_050",
                 "policy_blocked"
@@ -65,8 +65,8 @@
               "type": "string",
               "enum": [
                 "slots",
-                "react_history",
-                "tool_results",
+                "capability_history",
+                "capability_results",
                 "agent_hypothesis",
                 "sla_remaining",
                 "user_notification"

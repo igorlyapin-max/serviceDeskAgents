@@ -15,6 +15,10 @@ const state = {
   promptPackOperation: 'modify',
   interactionChannelId: 'debug',
   interactionChannelOperation: 'modify',
+  mcpEnvironmentId: 'mcp.provider_ops',
+  mcpEnvironmentOperation: 'modify',
+  capabilityBindingId: 'binding.provider_channel_repair_monitor.primary',
+  capabilityBindingOperation: 'modify',
   resolutionProfileId: '',
   resolutionOperation: 'modify',
   resolutionSlotScenarioId: '',
@@ -25,15 +29,6 @@ const state = {
   legacyCleanupRequest: null,
   orphanRepairPreview: null,
   orphanRepairRequest: null,
-  integrationEndpointId: 'mock',
-  integrationEndpointOperation: 'modify',
-  toolCatalogName: 'start_systemcenter_runbook',
-  toolCatalogOperation: 'modify',
-  operationBindingToolName: 'start_systemcenter_runbook',
-  operationBindingLastToolName: '',
-  operationBindingMode: 'bind',
-  operationBindingEndpointId: 'mock',
-  operationBindingOperationId: 'start_systemcenter_runbook',
   orchestrationGraphView: 'scenario',
   orchestrationGraphScenarioId: '',
   orchestrationGraphSelectedNodeId: 'slot_filling',
@@ -44,6 +39,7 @@ const state = {
   modelRoutingBaseVersionId: '',
   configSubmitAction: null,
   configDrafts: {},
+  mcpDiscovery: {},
   referenceAutocomplete: {
     textarea: null,
     start: -1,
@@ -55,7 +51,6 @@ const state = {
   lastData: {
     toolCatalog: [],
     integrationEndpoints: [],
-    n8nWorkflows: [],
     openApiImportPreview: null,
     editorReferenceHints: null,
   },
@@ -78,12 +73,10 @@ const configDraftFormDomains = {
   'policy-editor': 'orchestrator_policy',
   'prompt-pack-delete': 'prompt_packs',
   'prompt-pack-editor': 'prompt_packs',
-  'integration-endpoint-delete': 'integration_endpoints',
-  'integration-endpoint-editor': 'integration_endpoints',
-  'tool-catalog-delete': 'tools',
-  'tool-catalog-editor': 'tools',
-  'operation-binding-editor': 'tools',
-  'operation-binding-create-editor': 'tools',
+  'mcp-environment-delete': 'mcp_environments',
+  'mcp-environment-editor': 'mcp_environments',
+  'capability-binding-delete': 'capability_bindings',
+  'capability-binding-editor': 'capability_bindings',
   'model-routing-editor': 'model_routing',
   'system-prompts-editor': 'model_routing',
 };
@@ -96,8 +89,9 @@ const configDraftCollectionMeta = {
   orchestrator_policy: { collectionKey: 'policies', idKey: 'policy_id' },
   prompt_packs: { collectionKey: 'packs', idKey: 'prompt_pack_id' },
   interaction_channels: { collectionKey: 'channels', idKey: 'channel_id' },
-  integration_endpoints: { collectionKey: 'endpoints', idKey: 'endpoint_id' },
-  tools: { collectionKey: 'tools', idKey: 'tool_name' },
+  capabilities: { collectionKey: 'capabilities', idKey: 'capability_id' },
+  mcp_environments: { collectionKey: 'environments', idKey: 'environment_id' },
+  capability_bindings: { collectionKey: 'bindings', idKey: 'binding_id' },
 };
 
 const configDraftDeleteForms = new Set([
@@ -108,8 +102,8 @@ const configDraftDeleteForms = new Set([
   'route-delete',
   'policy-delete',
   'prompt-pack-delete',
-  'integration-endpoint-delete',
-  'tool-catalog-delete',
+  'mcp-environment-delete',
+  'capability-binding-delete',
 ]);
 
 const configDraftActions = new Set(['save', 'validate', 'activate', 'activate_bundle']);
@@ -121,7 +115,7 @@ const viewTitles = {
   orchestrationGraph: 'Граф оркестрации',
   scenarioSlots: 'Слоты',
   scenarioClassification: 'Классификация и маршрут',
-  scenarioReact: '3. ReAct-планирование',
+  scenarioOrchestration: '3. Планирование действий',
   scenarioPrompts: 'Промпты',
   interactionChannels: 'Каналы взаимодействия',
   resolution: 'Профили разрешения',
@@ -129,10 +123,10 @@ const viewTitles = {
   configMaintenance: 'Обслуживание конфигурации',
   editorReferenceHints: 'Подсказки редактора',
   systemPrompts: 'Системные промпты',
-  integrations: 'Интеграции',
-  reactCalls: 'ReAct-вызовы ИИ',
-  operationBindings: 'Привязка операций',
-  tools: 'Интеграции',
+  integrations: 'MCP окружения',
+  capabilityCatalog: 'Capabilities',
+  operationBindings: 'Capability bindings',
+  tools: 'MCP окружения',
   workflow: 'Рабочий процесс',
   models: 'Модели',
   quality: 'Контроль качества',
@@ -141,21 +135,21 @@ const viewTitles = {
 };
 
 const defaultEditorReferenceHiddenFields = [
-  ['accepted_at', ['react_output', 'step_output', 'wait'], 'Accepted at', 'Техническое время принятия async-команды или ожидания.'],
-  ['action_id', ['react_output', 'step_output'], 'Action ID', 'Технический идентификатор команды исполнения.'],
-  ['async_delivery', ['react_output', 'step_output'], 'Async delivery', 'Служебная metadata доставки async-результата.'],
-  ['correlation_id', ['react_output', 'step_output', 'wait', 'channel'], 'Correlation ID', 'Технический идентификатор корреляции сообщений и callback.'],
-  ['has_callback_url', ['react_output', 'step_output'], 'Has callback URL', 'Служебный признак наличия callback URL.'],
-  ['invocation_id', ['react_output', 'step_output'], 'Invocation ID', 'Технический идентификатор вызова endpoint.'],
-  ['message', ['react_output', 'step_output'], 'Message', 'Служебное сообщение транспорта; бизнес-текст лучше брать из явных полей контракта.'],
-  ['result_topic', ['react_output', 'step_output', 'wait', 'channel'], 'Result topic', 'Технический Kafka topic доставки результата.'],
-  ['result_transport', ['react_output', 'step_output', 'wait'], 'Result transport', 'Технический способ доставки результата async-вызова.'],
-  ['runbook_status', ['react_output', 'step_output'], 'Runbook status', 'Транспортный статус запуска runbook, не итоговое бизнес-решение сценария.'],
-  ['wait_id', ['react_output', 'step_output', 'wait'], 'Wait ID', 'Технический идентификатор состояния ожидания.'],
-  ['idempotency_key', ['react_output', 'step_output', 'wait', 'channel'], 'Idempotency key', 'Технический ключ идемпотентности доставки команды.'],
-  ['callback_url', ['react_output', 'step_output', 'wait', 'channel'], 'Callback URL', 'Технический URL callback для async-результата.'],
-  ['event_type', ['react_output', 'step_output', 'wait'], 'Event type', 'Технический тип события во внешнем callback.'],
-  ['source', ['react_output', 'step_output', 'wait', 'channel'], 'Source', 'Служебный источник события или параметра.'],
+  ['accepted_at', ['capability_output', 'step_output', 'wait'], 'Accepted at', 'Техническое время принятия async-команды или ожидания.'],
+  ['action_id', ['capability_output', 'step_output'], 'Action ID', 'Технический идентификатор команды исполнения.'],
+  ['async_delivery', ['capability_output', 'step_output'], 'Async delivery', 'Служебная metadata доставки async-результата.'],
+  ['correlation_id', ['capability_output', 'step_output', 'wait', 'channel'], 'Correlation ID', 'Технический идентификатор корреляции сообщений и callback.'],
+  ['has_callback_url', ['capability_output', 'step_output'], 'Has callback URL', 'Служебный признак наличия callback URL.'],
+  ['invocation_id', ['capability_output', 'step_output'], 'Invocation ID', 'Технический идентификатор вызова endpoint.'],
+  ['message', ['capability_output', 'step_output'], 'Message', 'Служебное сообщение транспорта; бизнес-текст лучше брать из явных полей контракта.'],
+  ['result_topic', ['capability_output', 'step_output', 'wait', 'channel'], 'Result topic', 'Технический Kafka topic доставки результата.'],
+  ['result_transport', ['capability_output', 'step_output', 'wait'], 'Result transport', 'Технический способ доставки результата async-вызова.'],
+  ['runbook_status', ['capability_output', 'step_output'], 'Runbook status', 'Транспортный статус запуска runbook, не итоговое бизнес-решение сценария.'],
+  ['wait_id', ['capability_output', 'step_output', 'wait'], 'Wait ID', 'Технический идентификатор состояния ожидания.'],
+  ['idempotency_key', ['capability_output', 'step_output', 'wait', 'channel'], 'Idempotency key', 'Технический ключ идемпотентности доставки команды.'],
+  ['callback_url', ['capability_output', 'step_output', 'wait', 'channel'], 'Callback URL', 'Технический URL callback для async-результата.'],
+  ['event_type', ['capability_output', 'step_output', 'wait'], 'Event type', 'Технический тип события во внешнем callback.'],
+  ['source', ['capability_output', 'step_output', 'wait', 'channel'], 'Source', 'Служебный источник события или параметра.'],
 ].map(([field, contexts, displayName, description]) => ({
   field,
   contexts,
@@ -165,7 +159,7 @@ const defaultEditorReferenceHiddenFields = [
 }));
 
 const editorReferenceContextLabels = {
-  react_output: 'Результат ReAct-вызова',
+  capability_output: 'Результат capability',
   step_output: 'Результат шага',
   wait: 'Ожидание',
   channel: 'Канал',
@@ -245,7 +239,7 @@ const visibleLabels = {
   llm_extract: 'извлечение из текста моделью',
   rag_search: 'поиск в базе знаний',
   case_read: 'чтение из данных обращения',
-  tool_call: 'ReAct-вызов ИИ',
+  tool_call: 'Capability-вызов',
   ticket_history_search: 'поиск по истории заявок',
   condition: 'условие',
   clarification: 'уточнение у клиента',
@@ -257,12 +251,12 @@ const visibleLabels = {
   step: 'на шаг',
   clarification_required: 'нужно уточнение у клиента',
   all_required_slots_filled: 'все обязательные слоты заполнены',
-  tool_success: 'успешный результат ReAct-вызова',
+  capability_success: 'успешный результат capability',
   handoff_required: 'требуется эскалация оператору',
   iteration_limit: 'лимит итераций',
-  consecutive_tool_errors: 'ошибки ReAct-вызовов подряд',
+  consecutive_capability_errors: 'ошибки capability подряд',
   slot: 'слот',
-  react: 'параметр ReAct-вызова',
+  capability_parameter: 'параметр capability',
   constant: 'константа',
   secret: 'секрет',
   context: 'контекст',
@@ -281,7 +275,6 @@ const visibleLabels = {
   p3: 'P3',
   p4: 'P4',
   mock: 'mock',
-  n8n_webhook: 'n8n webhook',
   direct_http: 'direct http',
   queue: 'queue',
   header_token: 'токен в заголовке',
@@ -311,7 +304,7 @@ const visibleLabels = {
   client_wait: 'ожидание клиента',
   external_wait: 'ожидание внешнего события',
   operator_approval: 'согласование оператора',
-  react_call: 'ReAct-вызов ИИ',
+  capability_call: 'capability call',
   client_question: 'вопрос клиенту',
   approval: 'согласование',
   timer: 'таймер',
@@ -324,12 +317,12 @@ const visibleLabels = {
   escalate_operator: 'эскалировать оператору',
   mark_failed: 'завершить ошибкой',
   langgraph_run: 'LangGraph run',
-  tool_use: 'ReAct-вызовы',
+  capability_use: 'capability calls',
   decision: 'решение',
 };
 
-const activeResolverSourceTypes = ['react_call', 'disabled'];
-const activeEndpointAdapterTypes = ['mock', 'n8n_webhook'];
+const activeResolverSourceTypes = ['disabled'];
+const activeEndpointAdapterTypes = ['mock'];
 const operationContractTypes = ['string', 'integer', 'number', 'boolean', 'array', 'object'];
 const operationArrayItemTypes = ['string', 'integer', 'number', 'boolean', 'object'];
 const operationContractTypeLabels = {
@@ -341,7 +334,7 @@ const operationContractTypeLabels = {
   object: 'объект',
 };
 
-const reactActionGroupChoices = [
+const orchestrationActionGroupChoices = [
   {
     value: 'read_diagnostics',
     label: 'Чтение и диагностика',
@@ -374,16 +367,16 @@ const reactActionGroupChoices = [
   },
 ];
 
-const reactStopConditionChoices = [
+const orchestrationStopConditionChoices = [
   {
     value: 'all_required_slots_filled',
     label: 'Все обязательные слоты заполнены',
-    help: 'ReAct может стартовать или завершить сбор данных, когда нет недостающих обязательных слотов.',
+    help: 'Оркестрация может стартовать или завершить сбор данных, когда нет недостающих обязательных слотов.',
   },
   {
-    value: 'tool_success',
-    label: 'Получен успешный результат ReAct-вызова',
-    help: 'Цель итерации достигнута после успешного ответа ReAct-вызова ИИ.',
+    value: 'capability_success',
+    label: 'Получен успешный результат capability',
+    help: 'Цель итерации достигнута после успешного ответа capability.',
   },
   {
     value: 'clarification_required',
@@ -401,14 +394,14 @@ const reactStopConditionChoices = [
     help: 'Срабатывает при достижении поля "Максимум итераций" в этом блоке.',
   },
   {
-    value: 'consecutive_tool_errors',
-    label: 'Ошибки ReAct-вызовов подряд',
-    help: 'Срабатывает при достижении поля "Ошибок ReAct-вызовов подряд до эскалации оператору".',
+    value: 'consecutive_capability_errors',
+    label: 'Ошибки capability подряд',
+    help: 'Срабатывает при достижении поля "Ошибок capability подряд до эскалации оператору".',
   },
 ];
 
-const defaultReactStopConditions = reactStopConditionChoices.map((choice) => choice.value);
-const defaultReactActionGroups = reactActionGroupChoices.map((choice) => choice.value);
+const defaultOrchestrationStopConditions = orchestrationStopConditionChoices.map((choice) => choice.value);
+const defaultOrchestrationActionGroups = orchestrationActionGroupChoices.map((choice) => choice.value);
 
 const DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE = [
   'Проанализируй входные слоты и результаты шагов обогащения.',
@@ -417,6 +410,17 @@ const DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE = [
   'Если результат однозначный, верни decision=fill и filled_slots.',
   'Если данных недостаточно или кандидатов несколько, верни decision=ask_clarification и один уточняющий вопрос.',
   'Если уверенно решить нельзя после попыток, верни decision=handoff.',
+].join(' ');
+
+const DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE = [
+  'Ты помощник настройки capability step для AI ServiceDesk.',
+  'Верни только JSON без markdown. Не исполняй capability и не используй MCP/n8n/tool детали.',
+  'Выбери одну capability из списка и заполни mapping только из доступных slot/case/step refs или constants.',
+  'Явные refs и selected_capability_id из запроса являются constraints и имеют приоритет над догадками.',
+  'Если constraints.requires_output_mapping=true, заполняй output_mapping только в selected_output_slots.',
+  'Если constraints.requires_output_mapping=false, верни output_mapping={} и не подбирай выходы.',
+  'Используй descriptions слотов и полей capability как основной источник смысла.',
+  'Не выдумывай слоты, capability, input/output поля.',
 ].join(' ');
 
 const elements = {
@@ -602,7 +606,18 @@ function configMutationActionText(operation) {
 function configValidationErrors(validation) {
   const errors = validation?.errors || [];
   if (!errors.length) return 'ошибки не указаны';
-  return errors.join('; ');
+  return Array.from(new Set(errors.map(humanizeConfigValidationError))).join('; ');
+}
+
+function humanizeConfigValidationError(error) {
+  const text = String(error || '');
+  const completionPolicyMatch = text.match(
+    /^(profiles\.\d+\.enrichment_steps\.\d+\.completion_policy): '([^']+)' is a required property$/,
+  );
+  if (completionPolicyMatch) {
+    return `${completionPolicyMatch[1]} неполный: отсутствует ${completionPolicyMatch[2]}. Пересформируйте шаг или выберите capability и режим завершения.`;
+  }
+  return text;
 }
 
 function configValidationMessage(domain, validation) {
@@ -670,7 +685,7 @@ function enhanceConfigDraftForms() {
     if (!domain || form.dataset.configDraftEnhanced === 'true') {
       return;
     }
-    const actions = form.querySelector('.scenario-editor-actions');
+    const actions = form.querySelector('[data-config-draft-actions]') || form.querySelector('.scenario-editor-actions');
     if (!actions) {
       return;
     }
@@ -687,20 +702,30 @@ function enhanceConfigDraftForms() {
           button.dataset.configDraftAction = 'activate';
         }
       });
+      const existingActions = new Set(
+        Array.from(actions.querySelectorAll('button[type="submit"]'))
+          .map((button) => button.dataset.configDraftAction)
+          .filter(Boolean),
+      );
+      if (!existingActions.has('save')) {
+        actions.insertAdjacentHTML(
+          'afterbegin',
+          createConfigDraftButton('save', isDeleteForm ? 'Сохранить черновик удаления' : 'Сохранить черновик'),
+        );
+      }
+      if (!existingActions.has('validate')) {
+        actions.insertAdjacentHTML('beforeend', createConfigDraftButton('validate', 'Валидировать'));
+      }
+    }
+    if (hasSinglePlainSubmit) {
       actions.insertAdjacentHTML(
-        'afterbegin',
-        createConfigDraftButton('save', isDeleteForm ? 'Сохранить черновик удаления' : 'Сохранить черновик'),
+        'beforeend',
+        [
+          createConfigDraftButton('validate', 'Валидировать'),
+          createConfigDraftButton('activate', isDeleteForm ? 'Активировать удаление' : 'Активировать', isDeleteForm ? 'danger' : 'primary'),
+        ].join(''),
       );
     }
-    actions.insertAdjacentHTML(
-      'beforeend',
-      [
-        createConfigDraftButton('validate', 'Валидировать'),
-        hasSinglePlainSubmit
-          ? createConfigDraftButton('activate', isDeleteForm ? 'Активировать удаление' : 'Активировать', isDeleteForm ? 'danger' : 'primary')
-          : '',
-      ].join(''),
-    );
     actions.insertAdjacentHTML(
       'afterend',
       `<div class="config-draft-status" data-config-draft-domain="${escapeHtml(domain)}" data-type="muted">Черновик еще не сохранялся.</div>`,
@@ -776,8 +801,8 @@ async function renderView(view) {
     await renderScenarioSlots();
   } else if (view === 'scenarioClassification') {
     await renderScenarioClassification();
-  } else if (view === 'scenarioReact') {
-    await renderScenarioReact();
+  } else if (view === 'scenarioOrchestration') {
+    await renderScenarioOrchestration();
   } else if (view === 'scenarioPrompts') {
     await renderScenarioPrompts();
   } else if (view === 'interactionChannels') {
@@ -794,8 +819,8 @@ async function renderView(view) {
     await renderSystemPrompts();
   } else if (view === 'integrations' || view === 'tools') {
     await renderIntegrations();
-  } else if (view === 'reactCalls') {
-    await renderReactCalls();
+  } else if (view === 'capabilityCatalog') {
+    await renderCapabilityCatalogView();
   } else if (view === 'operationBindings') {
     await renderOperationBindings();
   } else if (view === 'workflow') {
@@ -1232,8 +1257,6 @@ async function loadScenarioContext() {
     promptPacksConfig,
     interactionChannelsConfig,
     resolutionProfilesConfig,
-    toolsConfig,
-    endpointsConfig,
   ] = await Promise.all([
     api('/admin/scenarios'),
     loadDraftAwareCollection('service_scenarios'),
@@ -1243,8 +1266,6 @@ async function loadScenarioContext() {
     loadDraftAwareCollection('prompt_packs'),
     loadDraftAwareCollection('interaction_channels'),
     loadDraftAwareCollection('attribute_resolution_profiles'),
-    loadDraftAwareCollection('tools'),
-    loadDraftAwareCollection('integration_endpoints'),
   ]);
   void overview;
   const scenarios = serviceScenariosConfig.items || [];
@@ -1264,8 +1285,8 @@ async function loadScenarioContext() {
     }
     : null;
   state.lastData.resolutionProfiles = resolutionProfilesConfig.items || [];
-  state.lastData.toolCatalog = toolsConfig.items || [];
-  state.lastData.integrationEndpoints = endpointsConfig.items || [];
+  state.lastData.toolCatalog = [];
+  state.lastData.integrationEndpoints = [];
   state.lastData.interactionChannels = interactionChannelsConfig.items || [];
   state.lastData.editorReferenceHints = normalizeEditorReferenceHintsForUi(policiesConfig.payload?.editor_reference_hints);
   state.lastData.serviceScenarios = scenarios;
@@ -1280,8 +1301,8 @@ async function loadScenarioContext() {
     promptPacks: promptPacksConfig.items || [],
     interactionChannels: interactionChannelsConfig.items || [],
     resolutionProfiles: resolutionProfilesConfig.items || [],
-    tools: toolsConfig.items || [],
-    endpoints: endpointsConfig.items || [],
+    tools: [],
+    endpoints: [],
   };
 }
 
@@ -1414,7 +1435,7 @@ async function renderScenarioClassification() {
   attachCatalogSelect('routeSelect', 'routeId', renderScenarioClassification);
 }
 
-async function renderScenarioReact() {
+async function renderScenarioOrchestration() {
   const [active, scenariosConfig] = await Promise.all([
     loadDraftAwareCollection('orchestrator_policy'),
     loadDraftAwareCollection('service_scenarios'),
@@ -1427,7 +1448,7 @@ async function renderScenarioReact() {
   const selected = policies.find((policy) => policy.policy_id === state.policyId) || null;
   elements.viewContent.innerHTML = [
     section(
-      '3. ReAct-планирование',
+      '3. Оркестрация',
       `${blockCatalogControls({
         selectId: 'policySelect',
         label: 'Политика',
@@ -1441,7 +1462,7 @@ async function renderScenarioReact() {
       ${renderPolicyEditor({ policy: selected, policies, scenarios })}`,
     ),
   ].join('');
-  attachCatalogSelect('policySelect', 'policyId', renderScenarioReact);
+  attachCatalogSelect('policySelect', 'policyId', renderScenarioOrchestration);
 }
 
 function renderSystemConfidenceDefaults(confidenceDefaults, { collapsed = false } = {}) {
@@ -1487,8 +1508,8 @@ function systemConfidenceSummary(thresholds = {}) {
 async function renderScenarioTools() {
   elements.viewContent.innerHTML = [
     section(
-      'ReAct-вызовы',
-      '<div class="empty">Матрица запуска удалена из сценариев. ReAct-вызовы настраиваются в профилях разрешения и каталоге интеграций.</div>',
+      'Capabilities',
+      '<div class="empty">Матрица запуска удалена из сценариев. Capabilities настраиваются в профилях разрешения и каталоге MCP исполнения.</div>',
     ),
   ].join('');
 }
@@ -1951,7 +1972,7 @@ function renderScenarioEditor({
   if (!scenario) {
     return '<div class="empty">Нет выбранного сценария для редактирования</div>';
   }
-  const reactPolicy = policyForScenario(scenario, policies);
+  const orchestrationPolicy = policyForScenario(scenario, policies);
   const statusOptions = ['active', 'draft', 'planned', 'disabled']
     .map((status) => `<option value="${status}" ${scenario.status === status ? 'selected' : ''}>${escapeHtml(visibleLabels[status] || status)}</option>`)
     .join('');
@@ -1960,7 +1981,7 @@ function renderScenarioEditor({
       ${draftInfoPanel(scenario)}
       <input type="hidden" name="scenario_id" value="${escapeHtml(scenario.scenario_id || '')}">
       <input type="hidden" name="existing_tags" value="${escapeHtml(JSON.stringify(scenario.tags || []))}">
-      <input type="hidden" name="orchestrator_policy_id" value="${escapeHtml(scenario.orchestrator_policy_id || reactPolicy.policy_id || '')}">
+      <input type="hidden" name="orchestrator_policy_id" value="${escapeHtml(scenario.orchestrator_policy_id || orchestrationPolicy.policy_id || '')}">
       <input type="hidden" name="escalation_policy_id" value="${escapeHtml(scenario.escalation_policy_id || defaultEscalationPolicyId(scenario.scenario_id))}">
       <div class="grid two">
         <label>Статус<select name="status">${statusOptions}</select></label>
@@ -1983,19 +2004,19 @@ function renderScenarioEditor({
           <span class="field-help">Сценарий можно запускать только в выбранных каналах. Канал по умолчанию должен входить в этот список.</span>
         </label>
         <label>Лимит итераций
-          <input name="react_max_iterations" type="number" min="1" max="20" value="${escapeHtml(reactPolicy.max_iterations || 6)}">
-          <span class="field-help">Максимум шагов ReAct-loop для этого сценария.</span>
+          <input name="orchestration_max_iterations" type="number" min="1" max="20" value="${escapeHtml(orchestrationPolicy.max_iterations || 6)}">
+          <span class="field-help">Максимум шагов цикла оркестрации для этого сценария.</span>
         </label>
-        <label>Ошибок ReAct-вызовов подряд до эскалации
-          <input name="react_consecutive_tool_errors_to_escalate" type="number" min="1" max="10" value="${escapeHtml(reactPolicy.consecutive_tool_errors_to_escalate || 2)}">
+        <label>Ошибок capability подряд до эскалации
+          <input name="orchestration_consecutive_capability_errors_to_escalate" type="number" min="1" max="10" value="${escapeHtml(orchestrationPolicy.consecutive_capability_errors_to_escalate || 2)}">
           <span class="field-help">После этого порога автообработка передает кейс оператору.</span>
         </label>
       </div>
       <details class="launch-editor">
         <summary>Технические параметры сценария</summary>
         <label>Политика оркестратора
-          <select name="orchestrator_policy_select">${referenceOptionsWithExtra(policies, 'policy_id', scenario.orchestrator_policy_id || reactPolicy.policy_id, 'display_name')}</select>
-          <span class="field-help">Техническая связь. Обычные ReAct-лимиты редактируются полями выше.</span>
+          <select name="orchestrator_policy_select">${referenceOptionsWithExtra(policies, 'policy_id', scenario.orchestrator_policy_id || orchestrationPolicy.policy_id, 'display_name')}</select>
+          <span class="field-help">Техническая связь. Обычные лимиты оркестрации редактируются полями выше.</span>
         </label>
         <div class="grid two">
           <label class="checkbox-line">
@@ -2007,13 +2028,7 @@ function renderScenarioEditor({
             <span>Логирование включено</span>
           </label>
         </div>
-        <div class="meta">Настройка применяется ко всем ReAct-вызовам, профилям разрешения атрибутов и эскалациям внутри сценария.</div>
-      </details>
-      <details class="launch-editor">
-        <summary>Разрешенные ReAct-вызовы</summary>
-        <div class="meta">Выберите типы endpoint, чтобы быстро отметить ReAct-вызовы ниже. Итоговый список сохраняется в сценарии.</div>
-        ${reactCallEndpointTypeCheckboxes(endpoints)}
-        ${reactCallScopeCheckboxes(tools, scenario.allowed_react_call_names || [], endpoints)}
+        <div class="meta">Настройка применяется ко всем профилям разрешения атрибутов и эскалациям внутри сценария.</div>
       </details>
       <div class="scenario-editor-actions">
         <button class="primary" type="submit">${state.scenarioOperation === 'create' ? 'Создать сценарий' : 'Сохранить изменения'}</button>
@@ -2027,33 +2042,34 @@ async function renderResolutionProfiles() {
     active,
     slotSchemasConfig,
     scenariosConfig,
-    toolsConfig,
-    endpointsConfig,
     modelRoutingConfig,
     profileUsageConfig,
+    capabilitiesConfig,
+    capabilityBindingsConfig,
   ] = await Promise.all([
     loadDraftAwareCollection('attribute_resolution_profiles'),
     loadDraftAwareCollection('slot_schemas'),
     loadDraftAwareCollection('service_scenarios'),
-    loadDraftAwareCollection('tools'),
-    loadDraftAwareCollection('integration_endpoints'),
     loadConfigEditPayload('model_routing'),
     api('/admin/config/resolution-profiles/usage'),
+    loadDraftAwareCollection('capabilities'),
+    loadDraftAwareCollection('capability_bindings'),
   ]);
   const profiles = active.items || [];
   const activeSlotSchemas = slotSchemasConfig.activePayload?.slot_schemas || [];
   const slotSchemaDraftContext = { slotSchemas: slotSchemasConfig.items || [], draft: slotSchemasConfig.draft };
   const slotSchemas = slotSchemaDraftContext.slotSchemas;
   const scenarios = scenariosConfig.items || [];
-  const tools = toolsConfig.items || [];
-  const endpoints = endpointsConfig.items || [];
+  const tools = [];
+  const endpoints = [];
   state.lastData.resolutionProfiles = profiles;
   state.lastData.slotSchemas = slotSchemas;
   state.lastData.activeSlotSchemas = activeSlotSchemas;
   state.lastData.slotSchemaDraft = slotSchemaDraftContext.draft;
   state.lastData.serviceScenarios = scenarios;
-  state.lastData.toolCatalog = tools;
   state.lastData.integrationEndpoints = endpoints;
+  state.lastData.capabilities = capabilitiesConfig.items || [];
+  state.lastData.capabilityBindings = capabilityBindingsConfig.items || [];
   state.lastData.modelConfig = normalizeModelConfig(modelRoutingConfig.payload || {});
   state.lastData.resolutionProfileUsage = profileUsageConfig;
   if (!profiles.some((profile) => profile.profile_id === state.resolutionProfileId)) {
@@ -2817,34 +2833,31 @@ function resolutionTargetSlotField(slotContext, selectedSlotId) {
 
 function toolsForScenario(tools = [], scenarios = [], scenario = null, referencedToolNames = []) {
   void scenarios;
-  const allowed = new Set((scenario?.allowed_react_call_names || []).filter(Boolean));
+  void scenario;
   const referenced = new Set((referencedToolNames || []).filter(Boolean));
   return (tools || []).filter((tool) => {
     const toolName = tool.tool_name;
     if (!toolName) return false;
     if (referenced.has(toolName)) return true;
     if (tool.status === 'disabled') return false;
-    if (!allowed.size) return true;
-    return allowed.has(toolName);
+    return true;
   });
 }
 
-function outOfScopeReactCallNames(steps = [], scenario = null) {
-  const allowed = new Set((scenario?.allowed_react_call_names || []).filter(Boolean));
-  if (!allowed.size) return [];
-  return Array.from(new Set((steps || [])
-    .map((step) => step.react_call)
-    .filter((reactCall) => reactCall && !allowed.has(reactCall))));
+function outOfScopeCapabilityNames(steps = [], scenario = null) {
+  void steps;
+  void scenario;
+  return [];
 }
 
-function reactScopeWarningPanel(steps = [], scenario = null) {
-  const outOfScope = outOfScopeReactCallNames(steps, scenario);
+function capabilityScopeWarningPanel(steps = [], scenario = null) {
+  const outOfScope = outOfScopeCapabilityNames(steps, scenario);
   if (!outOfScope.length) return '';
   const scenarioName = scenario?.display_name || scenario?.scenario_id || 'выбранном сценарии';
   return `
     <div class="slot-schema-derived warning-panel">
-      <div class="metric-label">ReAct-вызовы вне списка сценария</div>
-      <div class="meta">${escapeHtml(`В профиле уже используются вызовы, которые не выбраны в сценарии "${scenarioName}": ${outOfScope.join(', ')}. Они оставлены в форме для исправления или осознанного добавления в сценарий.`)}</div>
+      <div class="metric-label">Capabilities вне списка сценария</div>
+      <div class="meta">${escapeHtml(`В профиле уже используются capabilities, которые не выбраны в сценарии "${scenarioName}": ${outOfScope.join(', ')}. Они оставлены в форме для исправления или осознанного добавления в сценарий.`)}</div>
     </div>
   `;
 }
@@ -2915,12 +2928,7 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
   const llmScript = current.llm_resolution_script || {};
   const useLlmAfterSteps = current.use_llm_after_steps !== false;
   const fillsOutputSlots = Boolean((outputRules || []).length || current.target_slot_id);
-  const contextTools = toolsForScenario(
-    tools,
-    scenarios,
-    slotContext.selectedScenario,
-    enrichmentSteps.map((step) => step.react_call),
-  );
+  const contextTools = [];
 	  return `
     <form class="scenario-editor panel" data-form="resolution-profile-editor">
 	      ${draftInfoPanel(current)}
@@ -2956,12 +2964,20 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
           ${resolutionTargetSlotField(slotContext, current.target_slot_id || '')}
         </div>
       </details>
-      ${reactScopeWarningPanel(enrichmentSteps, slotContext.selectedScenario)}
+      ${capabilityScopeWarningPanel(enrichmentSteps, slotContext.selectedScenario)}
       <fieldset class="launch-editor enrichment-builder">
         <legend>Обогащение контекста</legend>
-        <div class="meta">Шаги выполняются сверху вниз. Результат каждого ReAct-вызова доступен следующим шагам и LLM-правилу через ссылку вида step.</div>
+        <div class="meta">Шаги выполняются сверху вниз. Результат каждой capability доступен следующим шагам и LLM-правилу через ссылку вида step.</div>
         <div data-enrichment-step-list>
-          ${renderEnrichmentStepCards(enrichmentSteps, slotContext, outputRules, contextTools, endpoints)}
+          ${renderEnrichmentStepCards(
+            enrichmentSteps,
+            slotContext,
+            outputRules,
+            contextTools,
+            endpoints,
+            state.lastData.capabilities || [],
+            state.lastData.capabilityBindings || [],
+          )}
         </div>
         <button type="button" data-action="enrichment-step-add">Добавить шаг обогащения</button>
       </fieldset>
@@ -3014,16 +3030,18 @@ function renderResolutionProfileEditor({ profile, profiles, slotSchemas = [], sc
         </label>
       </fieldset>
       ${resolutionProfileUsagePanel(slotSchemas, scenarios, current.profile_id)}
-      <div class="scenario-editor-actions">
-        <button class="primary" type="submit" data-config-draft-action="activate">${state.resolutionOperation === 'create' ? 'Активировать профиль' : 'Активировать профиль'}</button>
-        <button class="primary" type="submit" data-config-draft-action="activate_bundle">Активировать пакет</button>
+      <div class="scenario-editor-actions" data-config-draft-actions>
+        <button type="submit" data-config-draft-action="save">Сохранить черновик</button>
+        <button type="submit" data-config-draft-action="validate">Проверить</button>
+        <button class="primary" type="submit" data-config-draft-action="activate">Активировать профиль</button>
+        <button type="submit" data-config-draft-action="activate_bundle">Активировать пакет</button>
       </div>
     </form>
   `;
 }
 
 const resolutionSourceTypeLabels = {
-  react_call: 'endpoint-операция чтения',
+  capability_call: 'capability',
   ticket_history: 'история заявок',
   case_data: 'данные обращения',
   disabled: 'отключено',
@@ -3047,7 +3065,7 @@ function profileOutputSlotIds(profile = {}) {
 function normalizeResolutionOutputSourceHint(value = '') {
   const hint = String(value || '').trim();
   if (!hint) return '';
-  if (/^(paramReAct|step)\./.test(hint)) {
+  if (/^(paramCapability|step)\./.test(hint)) {
     return `\${${hint}}`;
   }
   return hint;
@@ -3144,11 +3162,7 @@ function operationTerminalResultSchema(operation = {}) {
 function enrichmentCompletionPolicyState(step = {}, endpoints = [], bindingValue = '') {
   const completionPolicy = step.completion_policy || {};
   const binding = parseCandidateBindingValue(
-    bindingValue || selectedCandidateBinding({
-      tool_name: step.react_call,
-      endpoint_id: step.endpoint_id,
-      operation_id: step.operation_id,
-    }),
+    bindingValue || '',
   );
   const operation = endpointOperationById(endpoints, binding.endpoint_id, binding.operation_id);
   const eventTypes = operationAsyncEventTypes(operation);
@@ -3175,6 +3189,36 @@ function enrichmentCompletionModeOptions(completionState) {
   ].join('');
 }
 
+function hasMeaningfulCompletionPolicy(policy) {
+  return Boolean(policy && typeof policy === 'object' && Object.keys(policy).length);
+}
+
+function enrichmentStepCompletionPolicy(step = {}, capability = null) {
+  if (hasMeaningfulCompletionPolicy(step.completion_policy)) {
+    return step.completion_policy;
+  }
+  return capability?.default_completion_policy || {};
+}
+
+function enrichmentCapabilityCompletionPolicyState(step = {}, capability = null) {
+  const policy = enrichmentStepCompletionPolicy(step, capability);
+  const eventTypes = Object.keys(capability?.async_event_contracts || {});
+  const requestedMode = policy.mode || capability?.default_completion_policy?.mode || (eventTypes.length ? 'external_event' : 'sync');
+  const mode = requestedMode === 'external_event' && eventTypes.length ? 'external_event' : 'sync';
+  const expectedEventType = eventTypes.includes(policy.expected_event_type)
+    ? policy.expected_event_type
+    : capability?.default_completion_policy?.expected_event_type || eventTypes[0] || '';
+  return {
+    binding: { endpoint_id: capability?.capability_id || '', operation_id: capability?.capability_id || '' },
+    operation: capability,
+    eventTypes,
+    requestedMode,
+    mode,
+    expectedEventType,
+    capabilityMode: true,
+  };
+}
+
 function renderEnrichmentExpectedEventTypeControl(completionState) {
   const options = selectOptions(
     completionState.eventTypes.map((eventType) => ({ value: eventType, label: eventType })),
@@ -3185,6 +3229,15 @@ function renderEnrichmentExpectedEventTypeControl(completionState) {
 }
 
 function enrichmentCompletionHelp(completionState) {
+  if (completionState.capabilityMode) {
+    if (!completionState.binding.endpoint_id) {
+      return 'Выберите capability, чтобы включить ожидание внешнего результата.';
+    }
+    if (!completionState.eventTypes.length) {
+      return 'У capability нет async_event_contracts; external_event недоступен.';
+    }
+    return `Доступные события capability: ${completionState.eventTypes.join(', ')}.`;
+  }
   const { binding, operation, eventTypes } = completionState;
   if (!binding.endpoint_id || !binding.operation_id) {
     return 'Выберите binding операции, чтобы включить ожидание внешнего результата.';
@@ -3294,26 +3347,16 @@ function defaultResolverParameterSource(parameterName, slotContext) {
 }
 
 function profileEnrichmentSteps(profile = {}, tools = [], endpoints = []) {
+  void tools;
+  void endpoints;
   if (Array.isArray(profile.enrichment_steps)) {
     return profile.enrichment_steps;
   }
-  const source = profileResolverOperation(profile);
-  if (source.source_type !== 'react_call' || !source.tool_name) {
-    return [];
-  }
-  const { operation } = selectedCandidateOperation(profile, tools, endpoints);
-  return [{
-    step_id: 'step1',
-    step_name: `Получить ${source.tool_name}`,
-    react_call: source.tool_name,
-    parameter_mapping: source.parameter_mapping || {},
-    result_fields: inferResultFieldsFromOperation(operation),
-    on_error: 'continue_to_llm',
-  }];
+  return [];
 }
 
-function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpoints = []) {
-  const normalizedSteps = (steps || []).map((step, index) => normalizeEnrichmentStep(step, index, tools, endpoints));
+function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpoints = [], capabilities = [], bindings = []) {
+  const normalizedSteps = (steps || []).map((step, index) => normalizeEnrichmentStep(step, index, tools, endpoints, capabilities, bindings));
   if (!normalizedSteps.length) {
     state.resolutionEnrichmentEditIndex = 0;
     return '<div class="empty">Шаги обогащения не настроены. Добавьте шаг обогащения или оставьте профиль как черновик без внешних данных.</div>';
@@ -3325,7 +3368,7 @@ function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpo
       <div class="enrichment-step-header">
         <span>Порядок</span>
         <span>Шаг</span>
-        <span>ReAct-вызов</span>
+        <span>Вызов</span>
         <span>При ошибке</span>
         <span>Действия</span>
       </div>
@@ -3337,32 +3380,48 @@ function renderEnrichmentStepCards(steps, slotContext, outputRules, tools, endpo
         outputRules,
         tools,
         endpoints,
+        capabilities,
+        bindings,
         index === activeIndex,
       )).join('')}
     </div>
   `;
 }
 
-function normalizeEnrichmentStep(step = {}, index = 0, tools = [], endpoints = []) {
-  const tool = findToolInCatalog(tools, step.react_call) || (step.react_call ? null : tools[0]) || null;
-  const reactCall = step.react_call || tool?.tool_name || '';
-  const binding = currentToolBinding(tool);
-  const endpointId = step.endpoint_id || binding?.endpoint_id || '';
-  const operationId = step.operation_id || binding?.operation_id || '';
-  const operation = endpointOperationById(endpoints, endpointId, operationId);
-  return {
+function normalizeEnrichmentStep(step = {}, index = 0, tools = [], endpoints = [], capabilities = [], bindings = []) {
+  const capability = (capabilities || []).find((item) => item.capability_id === step.capability_id) || null;
+  const completionPolicy = enrichmentStepCompletionPolicy(step, capability);
+  const requestedExecutionMode = capabilityExecutionModeForCompletionMode(
+    completionPolicy.mode || capability?.default_completion_policy?.mode || 'sync',
+  );
+  const capabilityBindingCandidates = (bindings || []).filter((item) =>
+    item.capability_id === step.capability_id && item.status === 'active'
+  );
+  const capabilityBinding = capabilityBindingCandidates.find((item) =>
+    item.execution_mode === requestedExecutionMode
+    && (!step.mcp_environment_id || item.environment_id === step.mcp_environment_id)
+  )
+    || capabilityBindingCandidates.find((item) => item.execution_mode === requestedExecutionMode)
+    || capabilityBindingCandidates.find((item) => !step.mcp_environment_id || item.environment_id === step.mcp_environment_id)
+    || null;
+  const normalized = {
     step_id: normalizeEnrichmentStepId(step.step_id, index),
     step_name: step.step_name || '',
-    react_call: reactCall,
-    endpoint_id: step.endpoint_id || '',
-    operation_id: step.operation_id || '',
-    completion_policy: step.completion_policy || {},
-    parameter_mapping: step.parameter_mapping || {},
-    result_fields: step.result_fields?.length ? step.result_fields : (operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool)),
+    capability_id: step.capability_id || capability?.capability_id || '',
+    mcp_environment_id: step.mcp_environment_id || capabilityBinding?.environment_id || '',
+    input_mapping: step.input_mapping || {},
+    output_mapping: step.output_mapping || {},
+    result_fields: step.result_fields?.length ? step.result_fields : (
+      capability ? resultFieldsFromSchema(capability.output_schema || {}) : []
+    ),
     on_error: step.on_error || 'continue_to_llm',
     configuration_instruction: step.configuration_instruction || '',
     generated_structure_metadata: step.generated_structure_metadata || {},
   };
+  if (hasMeaningfulCompletionPolicy(completionPolicy)) {
+    normalized.completion_policy = { ...completionPolicy };
+  }
+  return normalized;
 }
 
 function normalizeEnrichmentStepId(stepId, index = 0) {
@@ -3373,9 +3432,9 @@ function normalizeEnrichmentStepId(stepId, index = 0) {
   return `step${index + 1}`;
 }
 
-function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = [], active = false) {
-  const tool = findToolInCatalog(tools, step.react_call) || null;
-  const stepTitle = step.step_name || tool?.description || step.react_call || 'новый ReAct-вызов';
+function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = [], capabilities = [], bindings = [], active = false) {
+  const capability = (capabilities || []).find((item) => item.capability_id === step.capability_id) || null;
+  const stepTitle = step.step_name || capability?.display_name || step.capability_id || 'новая capability';
   const stepId = normalizeEnrichmentStepId(step.step_id, index);
   return `
     <div class="enrichment-step-card ${active ? 'active' : ''}" data-enrichment-step-card data-enrichment-step-index="${index}">
@@ -3396,45 +3455,41 @@ function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slot
           <strong>${escapeHtml(stepTitle)}</strong>
           <small>${escapeHtml(`Ссылка: ${stepId}`)}</small>
         </span>
-        <span>${escapeHtml(tool?.description || step.react_call || 'не выбран')}</span>
+        <span>${escapeHtml(capability?.display_name || step.capability_id || 'не выбрана')}</span>
         <span>${escapeHtml(enrichmentOnErrorLabel(step.on_error))}</span>
         <span class="row-actions">
           <button type="button" data-action="enrichment-step-edit" data-step-index="${index}" ${active ? 'disabled' : ''}>Изменить</button>
           <button class="danger" type="button" data-action="enrichment-step-remove">Удалить</button>
         </span>
       </div>
-      ${active ? renderEnrichmentStepEditor(step, index, previousSteps, slotContext, outputRules, tools, endpoints) : ''}
+      ${active ? renderEnrichmentStepEditor(step, index, previousSteps, slotContext, outputRules, tools, endpoints, capabilities, bindings) : ''}
     </div>
   `;
 }
 
-function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = []) {
-  const tool = findToolInCatalog(tools, step.react_call) || tools[0] || null;
-  const reactCall = step.react_call || tool?.tool_name || '';
+function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = [], capabilities = [], bindings = []) {
+  const capability = (capabilities || []).find((item) => item.capability_id === step.capability_id) || capabilities[0] || null;
   const stepId = normalizeEnrichmentStepId(step.step_id, index);
-  const completionPolicy = step.completion_policy || {};
-  const bindingValue = selectedCandidateBinding({ tool_name: reactCall, endpoint_id: step.endpoint_id, operation_id: step.operation_id });
-  const completionState = enrichmentCompletionPolicyState(step, endpoints, bindingValue);
+  const completionPolicy = enrichmentStepCompletionPolicy(step, capability);
+  const completionState = enrichmentCapabilityCompletionPolicyState(step, capability);
   const completionMode = completionState.mode;
-  const completionMaxWaitSeconds = completionMode === 'external_event'
-    ? completionPolicy.max_wait_seconds ?? 3600
-    : 0;
-  const completionTimeoutAction = completionMode === 'external_event'
-    ? completionPolicy.timeout_action || 'escalate_operator'
-    : 'resume_agent';
+  const completionMaxWaitSeconds = completionPolicy.max_wait_seconds ?? (completionMode === 'external_event' ? 3600 : 0);
+  const completionTimeoutAction = completionPolicy.timeout_action || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent');
+  const configurationInstructionPlaceholder = 'Вызови ${Capability.provider_channel_repair_monitor}. В параметр problem_url передай ${paramCapability.provider_channel_repair_monitor.input.problem_url} <- ${slot.zabbix_url}.';
   return `
     <div class="enrichment-step-editor" data-enrichment-step-editor>
       <input type="hidden" data-enrichment-step-id value="${escapeHtml(stepId)}">
       <fieldset class="launch-editor">
         <legend>Инструкция настройки шага</legend>
         <label>Что должен сделать шаг
-          <textarea data-enrichment-configuration-instruction rows="5" placeholder="Вызови get_user_login. В параметр user_fio передай слот &quot;Фамилия Имя Отчество&quot;. Если результат не найден, эскалируй оператору.">${escapeHtml(step.configuration_instruction || '')}</textarea>
-          <span class="field-help">Помощник настройки сформирует структуру шага. Для входов ReAct-вызова используйте ${escapeHtml('${paramReAct.<вызов>.input.<параметр>}')}; подсказка появляется после набора ${escapeHtml('${')}.</span>
+          <textarea data-enrichment-configuration-instruction rows="5" placeholder="${escapeHtml(configurationInstructionPlaceholder)}">${escapeHtml(step.configuration_instruction || '')}</textarea>
+          <span class="field-help">Помощник настройки сформирует структуру шага по capability contract. Для входов используйте ${escapeHtml('${paramCapability.<capability_id>.input.<parameter>}')}.</span>
         </label>
         <input type="hidden" data-enrichment-generated-metadata value="${escapeHtml(jsonPretty(step.generated_structure_metadata || {}))}">
+        <textarea hidden data-enrichment-output-mapping>${escapeHtml(jsonPretty(step.output_mapping || {}))}</textarea>
         <div class="scenario-editor-actions">
           <button type="button" data-action="resolution-step-compile">Сформировать структуру шага</button>
-          <span class="meta" data-resolution-step-compile-status>Будут обновлены ReAct-вызов и входные параметры активного шага.</span>
+          <span class="meta" data-resolution-step-compile-status>Будут обновлены capability, входные параметры и запись результата в выходные слоты.</span>
         </div>
       </fieldset>
       <details class="launch-editor">
@@ -3443,17 +3498,14 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
           <label>Название шага
             <input data-enrichment-step-name value="${escapeHtml(step.step_name || '')}" autocomplete="off" placeholder="Поиск получателя">
           </label>
-          <label>ReAct-вызов
-            <select data-enrichment-react-call>${toolCatalogOptions(tools, reactCall)}</select>
-            <span class="field-help">ReAct-вызов выбирает бизнес-действие, binding ниже фиксирует endpoint-операцию для запуска.</span>
+          <label>Capability
+            <select data-enrichment-capability-id>${capabilityOptions(capabilities, step.capability_id || capability?.capability_id || '')}</select>
+            <span class="field-help">Capability скрывает внутреннюю реализацию внешнего MCP окружения и задает canonical input/output contract.</span>
           </label>
-          <label>Привязка операции
-            <select data-enrichment-binding>${candidateBindingOptions(tools, { tool_name: reactCall, endpoint_id: step.endpoint_id, operation_id: step.operation_id })}</select>
-            <span class="field-help">Для long-running n8n выбирайте binding n8n / start_systemcenter_runbook.</span>
-          </label>
+          <input type="hidden" data-enrichment-mcp-environment-id value="${escapeHtml(step.mcp_environment_id || '')}">
           <label>Действие при ошибке
             <select data-enrichment-on-error>${enrichmentOnErrorOptions(step.on_error || 'continue_to_llm')}</select>
-            <span class="field-help">Результат шага доступен ниже по ссылке ${escapeHtml(`\${step.${stepId}.react.${reactCall || '<react_call>'}.output.<field>}`)}.</span>
+            <span class="field-help">Результат шага доступен ниже по ссылке ${escapeHtml(`\${step.${stepId}.capability.${step.capability_id || capability?.capability_id || '<capability>'}.output.<field>}`)}.</span>
           </label>
         </div>
         <div class="grid two">
@@ -3483,7 +3535,7 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
             </select>
           </label>
         </div>
-        ${renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, index)}
+        ${renderEnrichmentParameterRows(step, null, slotContext, outputRules, previousSteps, index, capability)}
       </details>
     </div>
   `;
@@ -3509,16 +3561,17 @@ function enrichmentOnErrorLabel(value) {
   return labels[value] || value || 'не задано';
 }
 
-function renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, stepIndex) {
-  const mapping = step.parameter_mapping || {};
-  const names = tool ? parameterNamesForTool(tool, mapping) : Object.keys(mapping);
+function renderEnrichmentParameterRows(step, tool, slotContext, outputRules, previousSteps, stepIndex, capability = null) {
+  const mapping = step.input_mapping || {};
+  const capabilityProperties = schemaProperties(capability?.input_schema || {});
+  const names = Array.from(new Set([...(capability?.input_schema?.required || []), ...Object.keys(capabilityProperties), ...Object.keys(mapping)]));
   if (!names.length) {
-    return '<div class="empty">У выбранного ReAct-вызова нет описанных параметров.</div>';
+    return '<div class="empty">У выбранной capability нет описанных параметров.</div>';
   }
   return `
     <div class="parameter-binding-list enrichment-param-table" data-enrichment-param-list>
       <div class="parameter-binding-header compact-three">
-        <span>Параметр ReAct-вызова</span>
+        <span>Параметр capability</span>
         <span>Тип</span>
         <span>Заполняется из</span>
       </div>
@@ -3526,11 +3579,11 @@ function renderEnrichmentParameterRows(step, tool, slotContext, outputRules, pre
         <div class="parameter-binding-row compact-three" data-enrichment-param-row>
           <input type="hidden" data-enrichment-param-name value="${escapeHtml(name)}">
           <div class="parameter-binding-meta">
-            <strong>${escapeHtml(schemaDisplayName(name, parameterSchemaProperties(tool)[name]))}</strong>
+            <strong>${escapeHtml(schemaDisplayName(name, capability ? capabilityProperties[name] : parameterSchemaProperties(tool)[name]))}</strong>
             <span>${escapeHtml(name)}</span>
           </div>
           <div class="parameter-binding-meta">
-            ${escapeHtml(tool ? schemaMetaLine(name, parameterSchemaProperties(tool)[name], schemaRequired(tool.parameters_schema || {}).includes(name)) : 'параметр ReAct-вызова')}
+            ${escapeHtml(schemaMetaLine(name, capabilityProperties[name], schemaRequired(capability?.input_schema || {}).includes(name), 'параметр capability'))}
           </div>
           <div class="enrichment-param-source">
             ${renderEnrichmentSourceControl(
@@ -3599,22 +3652,23 @@ function enrichmentSourceOptionObjects(slotContext, outputRules, previousSteps, 
   }
   for (const step of previousSteps || []) {
     const stepId = normalizeEnrichmentStepId(step.step_id, (previousSteps || []).indexOf(step));
-    const reactCall = step.react_call || '';
-    const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
-    if (reactCall) {
-      for (const parameter of reactParameterNames(tool || {})) {
+    const capabilityId = step.capability_id || '';
+    const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId) || null;
+    if (capabilityId) {
+      for (const parameter of Object.keys(schemaProperties(capability?.input_schema || {}))) {
         add(
-          `step:${stepId}.react.${reactCall}.input.${parameter}`,
-          `Шаг ${stepId.replace('step', '')}: вход ${reactCall}.${parameter}`,
+          `step:${stepId}.capability.${capabilityId}.input.${parameter}`,
+          `Шаг ${stepId.replace('step', '')}: вход ${capabilityId}.${parameter}`,
         );
       }
-    }
-    for (const field of stepResultFields(step, tool)) {
-      if (!field.field_id) continue;
-      if (reactCall) {
+      const fields = step.result_fields?.length
+        ? step.result_fields
+        : resultFieldsFromSchema(capability?.output_schema || {});
+      for (const field of fields) {
+        if (!field.field_id) continue;
         add(
-          `step:${stepId}.react.${reactCall}.output.${field.field_id}`,
-          `Шаг ${stepId.replace('step', '')}: результат ${reactCall}.${field.display_name || field.field_id}`,
+          `step:${stepId}.capability.${capabilityId}.output.${field.field_id}`,
+          `Шаг ${stepId.replace('step', '')}: результат ${capabilityId}.${field.display_name || field.field_id}`,
         );
       }
     }
@@ -3639,10 +3693,10 @@ function enrichmentSourceLabel(sourceRef, slotContext, outputRules, previousStep
     return `${known ? 'Выходной слот' : 'Выходной слот вне списка'}: ${slot?.display_name || value}`;
   }
   if (source === 'step') {
-    const match = value.match(/^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$/);
+    const match = value.match(/^(step[1-9][0-9]*)\.capability\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$/);
     if (match) {
-      const [, stepId, reactCall, kind, field] = match;
-      return `Шаг ${stepId.replace('step', '')}: ${kind === 'input' ? 'вход' : 'результат'} ${reactCall}.${field}`;
+      const [, stepId, capabilityId, kind, field] = match;
+      return `Шаг ${stepId.replace('step', '')}: ${kind === 'input' ? 'вход' : 'результат'} ${capabilityId}.${field}`;
     }
   }
   if (source === 'constant') return `Константа: ${value}`;
@@ -3697,7 +3751,7 @@ function renderOperationResultFieldRow(field = {}) {
 }
 
 function resultFieldsFromTool(tool) {
-  const names = reactResultFieldNames(tool || {});
+  const names = legacyResultFieldNames(tool || {});
   if (!names.length) {
     return [{ field_id: 'value', display_name: 'Значение', field_type: 'unknown', description: '' }];
   }
@@ -3708,6 +3762,22 @@ function resultFieldsFromTool(tool) {
       display_name: schema.title || humanizeTechnicalKey(name),
       field_type: schema.type === 'integer' ? 'number' : (schema.type || 'unknown'),
       description: schema.description || '',
+    };
+  });
+}
+
+function resultFieldsFromSchema(schema = {}) {
+  const names = Object.keys(schemaProperties(schema || {}));
+  if (!names.length) {
+    return [{ field_id: 'value', display_name: 'Значение', field_type: 'unknown', description: '' }];
+  }
+  return names.map((name) => {
+    const fieldSchema = schemaAtPath(schema || {}, name) || {};
+    return {
+      field_id: name,
+      display_name: fieldSchema.title || humanizeTechnicalKey(name),
+      field_type: fieldSchema.type === 'integer' ? 'number' : (fieldSchema.type || 'unknown'),
+      description: fieldSchema.description || '',
     };
   });
 }
@@ -3784,8 +3854,8 @@ function renderResolutionOutputRow(rule = {}, slotContext = { slots: [] }, optio
         <select data-resolution-output-required>${booleanOptions(rule.required_for_success ?? false)}</select>
       </label>
       <label>Источник значения
-        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="${escapeHtml('${step.step1.react.get_user.output.login}')}">
-        <span class="field-help">Для многошаговых профилей используйте ${escapeHtml('${step.<step_id>.react.<вызов>.output.<поле>}')}. Голое имя поля, например subject, читается из последнего шага.</span>
+        <input data-resolution-output-source value="${escapeHtml(rule.source_hint || rule.slot_id || '')}" autocomplete="off" placeholder="${escapeHtml('${step.step1.capability.get_user.output.login}')}">
+        <span class="field-help">Для многошаговых профилей используйте ${escapeHtml('${step.<step_id>.capability.<capability>.output.<field>}')}. Голое имя поля, например subject, читается из последнего шага.</span>
       </label>
       <label>Если не заполнен
         <select data-resolution-output-fallback>${fallbackOptions}</select>
@@ -3810,15 +3880,20 @@ function slotResolutionPromptTemplate(config = state.lastData.modelConfig || {})
   return String(value || DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE).trim() || DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE;
 }
 
+function capabilityStepAssistPromptTemplate(config = state.lastData.modelConfig || {}) {
+  const value = config.settings?.system_prompts?.capability_step_assist;
+  return String(value || DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE).trim() || DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE;
+}
+
 function renderSlotResolutionPromptTemplate(template, profile = {}) {
   const outputSlots = profileOutputSlotIds(profile).join(', ') || profile.target_slot_id || 'слот результата';
   const stepRefs = profileEnrichmentSteps(profile)
     .map((step, index) => {
       const stepId = normalizeEnrichmentStepId(step.step_id, index);
-      const reactCall = step.react_call || 'react_call';
-      return `${stepId}.react.${reactCall}.output.<field>`;
+      const capabilityId = step.capability_id || 'capability_id';
+      return `${stepId}.capability.${capabilityId}.output.<field>`;
     })
-    .join(', ') || 'нет результатов ReAct-вызовов';
+    .join(', ') || 'нет результатов capability';
   return String(template || DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE)
     .replace(/\{\{step_refs\}\}/g, stepRefs)
     .replace(/\{\{output_slots\}\}/g, outputSlots)
@@ -3956,7 +4031,7 @@ function multiReferenceOptions(items, idKey, selectedValues, labelKey) {
     .join('');
 }
 
-function reactCallBindingSummary(tool) {
+function legacyCallBindingSummary(tool) {
   const bindings = tool?.endpoint_bindings || [];
   if (!bindings.length) {
     return 'привязка к endpoint не настроена';
@@ -3967,105 +4042,18 @@ function reactCallBindingSummary(tool) {
 }
 
 function endpointTypeLabel(adapterType) {
-  if (adapterType === 'n8n_webhook') return 'n8n';
   if (adapterType === 'mock') return 'mock';
   return adapterType || 'unknown';
 }
 
 function endpointTypeDescription(adapterType) {
-  if (adapterType === 'n8n_webhook') return 'Интеграционные endpoint n8n';
   if (adapterType === 'mock') return 'Тестовые mock endpoint';
   return 'Endpoint type';
 }
 
-function scenarioReactEndpointTypes(endpoints = []) {
-  const supported = ['mock', 'n8n_webhook'];
-  const available = new Set((endpoints || [])
-    .map((endpoint) => endpoint.adapter_type)
-    .filter((adapterType) => supported.includes(adapterType)));
-  return supported.filter((adapterType) => available.has(adapterType));
-}
-
-function endpointAdapterTypeById(endpoints = []) {
-  return Object.fromEntries((endpoints || []).map((endpoint) => [endpoint.endpoint_id, endpoint.adapter_type]));
-}
-
-function reactCallAdapterTypes(tool, endpoints = []) {
-  const byEndpointId = endpointAdapterTypeById(endpoints);
-  return Array.from(new Set((tool?.endpoint_bindings || [])
-    .map((binding) => byEndpointId[binding.endpoint_id])
-    .filter(Boolean)));
-}
-
-function reactCallEndpointTypeCheckboxes(endpoints = []) {
-  const types = scenarioReactEndpointTypes(endpoints);
-  if (!types.length) {
-    return '<div class="empty">Нет endpoint типов для предфильтра.</div>';
-  }
-  return `
-    <div class="choice-grid" data-scenario-react-endpoint-types>
-      ${types.map((adapterType) => {
-        const inputId = `scenario_endpoint_type_${adapterType}`;
-        return `
-          <label class="choice-card" for="${escapeHtml(inputId)}">
-            <input id="${escapeHtml(inputId)}" name="scenario_react_endpoint_type" type="checkbox" value="${escapeHtml(adapterType)}" data-scenario-react-endpoint-type checked>
-            <span>
-              <strong>${escapeHtml(endpointTypeLabel(adapterType))}</strong>
-              <small>${escapeHtml(endpointTypeDescription(adapterType))}</small>
-            </span>
-          </label>
-        `;
-      }).join('')}
-    </div>
-  `;
-}
-
-function reactCallScopeCheckboxes(tools, selectedValues, endpoints = []) {
-  const allToolNames = (tools || []).map((tool) => tool?.tool_name).filter(Boolean);
-  const selected = new Set((selectedValues || []).length ? selectedValues : allToolNames);
-  const cards = (tools || [])
-    .filter((tool) => tool?.tool_name)
-    .map((tool) => {
-      const value = tool.tool_name;
-      const title = tool.display_name || tool.description || tool.tool_name;
-      const inputId = `scenario_react_call_${value}`;
-      const adapterTypes = reactCallAdapterTypes(tool, endpoints);
-      return `
-        <label class="choice-card" for="${escapeHtml(inputId)}">
-          <input id="${escapeHtml(inputId)}" name="allowed_react_call_names" type="checkbox" value="${escapeHtml(value)}" data-scenario-react-call data-endpoint-adapter-types="${escapeHtml(adapterTypes.join(' '))}" ${selected.has(value) ? 'checked' : ''}>
-          <span>
-            <strong>${escapeHtml(title)} (${escapeHtml(tool.tool_name)})</strong>
-            <small>${escapeHtml(`${reactCallBindingSummary(tool)}${adapterTypes.length ? `; типы: ${adapterTypes.map(endpointTypeLabel).join(', ')}` : ''}`)}</small>
-          </span>
-        </label>
-      `;
-    })
-    .join('');
-  return cards
-    ? `<div class="choice-grid">${cards}</div>`
-    : '<div class="empty">Каталог ReAct-вызовов пуст</div>';
-}
-
-function syncScenarioReactCallsByEndpointTypes(form) {
-  const typeControls = Array.from(form?.querySelectorAll('[data-scenario-react-endpoint-type]') || []);
-  const reactControls = Array.from(form?.querySelectorAll('[data-scenario-react-call]') || []);
-  if (!typeControls.length || !reactControls.length) return;
-  let selectedTypes = typeControls
-    .filter((control) => control.checked)
-    .map((control) => control.value);
-  if (!selectedTypes.length) {
-    typeControls.forEach((control) => {
-      control.checked = true;
-    });
-    selectedTypes = typeControls.map((control) => control.value);
-  }
-  const selectedTypeSet = new Set(selectedTypes);
-  reactControls.forEach((control) => {
-    const adapterTypes = String(control.dataset.endpointAdapterTypes || '')
-      .split(/\s+/)
-      .filter(Boolean);
-    control.checked = adapterTypes.some((adapterType) => selectedTypeSet.has(adapterType));
-  });
+function scenarioOrchestrationEndpointTypes(endpoints = []) {
+  void endpoints;
+  return [];
 }
 
 function scenarioDisplayName(scenarios, scenarioId) {
@@ -4093,8 +4081,8 @@ function defaultPromptBlocks() {
     behavior_principles: 'Опишите принципы поведения агента.',
     slot_schemas: 'Опишите, как агент должен работать со слотами сценария.',
     classification_confidence: 'Опишите правила классификации и пороги confidence.',
-    react_planning: 'Опишите правила ReAct-планирования и стоп-условия.',
-    tool_rules: 'Опишите правила выбора и выполнения ReAct-вызовов ИИ.',
+    orchestration: 'Опишите правила оркестрации и стоп-условия.',
+    capability_rules: 'Опишите правила выбора и выполнения capabilities.',
     escalation_response: 'Опишите условия эскалации и формат ответа клиенту.',
   };
 }
@@ -4130,18 +4118,18 @@ function defaultEscalationPolicyForScenario(scenario, policyId = '') {
     policy_id: resolvedPolicyId,
     display_name: `Решение и эскалация: ${scenario.display_name || scenario.scenario_id || 'сценарий'}`,
     auto_close: {
-      requires_tool_success: true,
+      requires_capability_success: true,
     },
     handoff_conditions: [
-      'two_tool_errors',
+      'two_capability_errors',
       'iteration_limit',
       'confidence_below_050',
       'policy_blocked',
     ],
     handoff_package: [
       'slots',
-      'react_history',
-      'tool_results',
+      'capability_history',
+      'capability_results',
       'agent_hypothesis',
       'sla_remaining',
       'user_notification',
@@ -4165,7 +4153,6 @@ function scenarioCreateTemplate(source, serviceScenarios, policies = []) {
     escalation_policy_id: defaultEscalationPolicyId(scenarioId),
     default_channel_id: template.default_channel_id || 'debug',
     allowed_channel_ids: template.allowed_channel_ids || ['messenger_bot', 'service_desk', 'debug'],
-    allowed_react_call_names: template.allowed_react_call_names || [],
     audit_required: template.audit_required ?? true,
     log_required: template.log_required ?? true,
     tags: template.tags || [],
@@ -4176,11 +4163,11 @@ function policyForScenario(scenario = {}, policies = []) {
   const policy = (policies || []).find((item) => item.policy_id === scenario.orchestrator_policy_id) || {};
   return {
     policy_id: policy.policy_id || scenario.orchestrator_policy_id || `policy.${scenario.scenario_id || 'custom'}`,
-    display_name: policy.display_name || `ReAct-политика: ${scenario.display_name || scenario.scenario_id || 'сценарий'}`,
+    display_name: policy.display_name || `Политика оркестрации: ${scenario.display_name || scenario.scenario_id || 'сценарий'}`,
     max_iterations: policy.max_iterations || 6,
-    consecutive_tool_errors_to_escalate: policy.consecutive_tool_errors_to_escalate || 2,
-    stop_conditions: policy.stop_conditions?.length ? policy.stop_conditions : defaultReactStopConditions,
-    allowed_react_action_groups: policy.allowed_react_action_groups?.length ? policy.allowed_react_action_groups : defaultReactActionGroups,
+    consecutive_capability_errors_to_escalate: policy.consecutive_capability_errors_to_escalate || 2,
+    stop_conditions: policy.stop_conditions?.length ? policy.stop_conditions : defaultOrchestrationStopConditions,
+    allowed_orchestration_action_groups: policy.allowed_orchestration_action_groups?.length ? policy.allowed_orchestration_action_groups : defaultOrchestrationActionGroups,
   };
 }
 
@@ -4534,7 +4521,7 @@ function fillMethodHelpText(method) {
     user_question: 'Платформа задает вопрос клиенту или показывает его оператору канала для ввода ответа клиента.',
     case: 'Значение уже есть в текущем обращении: канал, карточка заявки, сохраненный контекст или системные поля. Внешние системы здесь не вызываются.',
     llm_extraction: 'Модель извлекает значение из текста обращения и уже собранного контекста без вызова внешних систем.',
-    resolution_profile: 'Используется профиль разрешения: шаги ReAct-вызовов, прямой маппинг результата или LLM-правило после шагов, уточняющие вопросы и эскалация.',
+    resolution_profile: 'Используется профиль разрешения: шаги capability, прямой маппинг результата или LLM-правило после шагов, уточняющие вопросы и эскалация.',
     operator_manual: 'Значение вносит оператор вручную; агент не пытается получить его автоматически.',
   };
   return help[method] || 'Выберите способ получения значения слота.';
@@ -4761,25 +4748,25 @@ function policyCreateTemplate(source, policies) {
     policy_id: nextConfigItemId(template.policy_id || 'policy.custom', policies, 'policy_id'),
     display_name: '',
     max_iterations: template.max_iterations || 6,
-    consecutive_tool_errors_to_escalate: template.consecutive_tool_errors_to_escalate || 2,
-    stop_conditions: template.stop_conditions || defaultReactStopConditions,
-    allowed_react_action_groups: template.allowed_react_action_groups || defaultReactActionGroups,
+    consecutive_capability_errors_to_escalate: template.consecutive_capability_errors_to_escalate || 2,
+    stop_conditions: template.stop_conditions || defaultOrchestrationStopConditions,
+    allowed_orchestration_action_groups: template.allowed_orchestration_action_groups || defaultOrchestrationActionGroups,
   };
 }
 
 function renderPolicyEditor({ policy, policies, scenarios }) {
   if (state.policyOperation === 'delete') {
     if (!policy?.policy_id) {
-      return '<div class="empty">Нет выбранной ReAct-политики для удаления</div>';
+      return '<div class="empty">Нет выбранной политики оркестрации для удаления</div>';
     }
     return `
       <form class="scenario-editor panel" data-form="policy-delete">
         <div>
-          <div class="metric-label">Удаляемая ReAct-политика</div>
+          <div class="metric-label">Удаляемая политика оркестрации</div>
           <div class="scenario-title">${escapeHtml(policy.display_name)}</div>
         </div>
         ${usagePanel(scenarios, 'orchestrator_policy_id', policy.policy_id)}
-        <button class="danger" type="submit">Удалить ReAct-политику</button>
+        <button class="danger" type="submit">Удалить политику оркестрации</button>
       </form>
     `;
   }
@@ -4796,21 +4783,21 @@ function renderPolicyEditor({ policy, policies, scenarios }) {
       <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
       <div class="grid two">
         <label>Лимит итераций<input name="max_iterations" type="number" min="1" max="20" value="${escapeHtml(current.max_iterations || 6)}"></label>
-        <label>Ошибок ReAct-вызовов подряд до эскалации<input name="consecutive_tool_errors_to_escalate" type="number" min="1" max="10" value="${escapeHtml(current.consecutive_tool_errors_to_escalate || 2)}"></label>
+        <label>Ошибок capability подряд до эскалации<input name="consecutive_capability_errors_to_escalate" type="number" min="1" max="10" value="${escapeHtml(current.consecutive_capability_errors_to_escalate || 2)}"></label>
       </div>
       <fieldset class="launch-editor">
-        <legend>Разрешенные группы действий ReAct</legend>
-        <div class="meta">Верхнеуровневые рамки планирования. Конкретные ReAct-вызовы ИИ задаются в профилях разрешения и каталоге интеграций.</div>
-        ${renderChoiceChecklist('allowed_react_action_groups', reactActionGroupChoices, current.allowed_react_action_groups || [])}
+        <legend>Разрешенные группы действий оркестрации</legend>
+        <div class="meta">Верхнеуровневые рамки планирования. Конкретные capabilities задаются в профилях разрешения и каталоге MCP исполнения.</div>
+        ${renderChoiceChecklist('allowed_orchestration_action_groups', orchestrationActionGroupChoices, current.allowed_orchestration_action_groups || [])}
       </fieldset>
       <fieldset class="launch-editor">
         <legend>Стоп-условия</legend>
-        <div class="meta">Когда ReAct-loop должен остановиться и перейти к уточнению у клиента, результату или эскалации оператору.</div>
-        ${renderChoiceChecklist('stop_conditions', reactStopConditionChoices, current.stop_conditions || [])}
+        <div class="meta">Когда цикл оркестрации должен остановиться и перейти к уточнению у клиента, результату или эскалации оператору.</div>
+        ${renderChoiceChecklist('stop_conditions', orchestrationStopConditionChoices, current.stop_conditions || [])}
       </fieldset>
       ${usagePanel(scenarios, 'orchestrator_policy_id', current.policy_id)}
       <div class="scenario-editor-actions">
-        <button class="primary" type="submit">${state.policyOperation === 'create' ? 'Создать ReAct-политику' : 'Сохранить ReAct-политику'}</button>
+        <button class="primary" type="submit">${state.policyOperation === 'create' ? 'Создать политику оркестрации' : 'Сохранить политику оркестрации'}</button>
       </div>
     </form>
   `;
@@ -4979,7 +4966,22 @@ function toolCatalogOptions(tools, selectedToolName) {
       label: labelWithDraftState(tool, tool.description ? `${tool.tool_name} — ${tool.description}` : tool.tool_name),
     })),
     selected,
-    'Каталог ReAct-вызовов пуст',
+    'Каталог capabilities пуст',
+  );
+}
+
+function capabilityOptions(capabilities = [], selectedCapabilityId = '') {
+  const selected = (capabilities || []).find((capability) => capability.capability_id === selectedCapabilityId)?.capability_id
+    || selectedCapabilityId
+    || (capabilities || [])[0]?.capability_id
+    || '';
+  return selectOptions(
+    (capabilities || []).map((capability) => ({
+      value: capability.capability_id,
+      label: labelWithDraftState(capability, capability.display_name ? `${capability.capability_id} — ${capability.display_name}` : capability.capability_id),
+    })),
+    selected,
+    'Каталог capabilities пуст',
   );
 }
 
@@ -5044,41 +5046,27 @@ function referenceHelperChannelItems(channels = []) {
   return items;
 }
 
-function referenceHelperReactItems(tools = []) {
-  return (tools || []).map((tool) => ({
-    token: `\${ReAct.${tool.tool_name}}`,
-    label: tool.description ? `${tool.tool_name} — ${tool.description}` : tool.tool_name,
-    detail: tool.display_name || tool.description || tool.tool_name,
+function referenceHelperCapabilityItems(capabilities = []) {
+  return (capabilities || []).map((capability) => ({
+    token: `\${Capability.${capability.capability_id}}`,
+    label: capability.description ? `${capability.capability_id} — ${capability.description}` : capability.capability_id,
+    detail: capability.display_name || capability.description || capability.capability_id,
   }));
 }
 
-function referenceHelperParameterItems(tool, kind) {
-  if (!tool?.tool_name) return [];
-  const names = (kind === 'input' ? reactParameterNames(tool) : reactResultFieldNames(tool))
-    .filter((name) => kind !== 'output' || editorReferenceFieldVisible('react_output', name));
-  const properties = kind === 'input' ? schemaProperties(tool.parameters_schema || {}) : schemaProperties(tool.result_schema || {});
-  return names.map((name) => {
-    const schema = kind === 'input' ? (properties[name] || {}) : (schemaAtPath(tool.result_schema || {}, name) || {});
-    const prefix = `paramReAct.${tool.tool_name}.${kind}`;
+function referenceHelperCapabilityParameterItems(capability, kind) {
+  if (!capability?.capability_id) return [];
+  const schema = kind === 'input' ? capability.input_schema : capability.output_schema;
+  const properties = schemaProperties(schema || {});
+  return Object.keys(properties).map((name) => {
+    const fieldSchema = schemaAtPath(schema || {}, name) || properties[name] || {};
+    const prefix = `paramCapability.${capability.capability_id}.${kind}`;
     return {
       token: `\${${prefix}.${name}}`,
-      label: schema.title ? `${schema.title} (${name})` : name,
-      detail: `${tool.tool_name}: ${schema.description || schema.title || name}`,
+      label: fieldSchema.title ? `${fieldSchema.title} (${name})` : name,
+      detail: `${capability.capability_id}: ${fieldSchema.description || fieldSchema.title || name}`,
     };
   });
-}
-
-function referenceTokenReactCallName(token) {
-  const value = String(token || '').replace(/^\$\{|\}$/g, '');
-  if (value.startsWith('ReAct.')) {
-    return value.slice('ReAct.'.length);
-  }
-  if (!value.startsWith('paramReAct.')) {
-    return '';
-  }
-  const parts = value.slice('paramReAct.'.length).split('.');
-  const boundary = parts.findIndex((part) => part === 'input' || part === 'output');
-  return (boundary > 0 ? parts.slice(0, boundary) : parts).join('.');
 }
 
 function referenceTokensFromTextarea(textarea, fragment = null) {
@@ -5095,31 +5083,27 @@ function referenceTokensFromTextarea(textarea, fragment = null) {
   return tokens;
 }
 
-function referencedReactToolsFromTextarea(textarea, tools = [], fragment = null) {
-  const byName = new Map((tools || []).map((tool) => [tool.tool_name, tool]));
+function referencedCapabilitiesFromTextarea(textarea, capabilities = [], fragment = null) {
+  const byId = new Map((capabilities || []).map((capability) => [capability.capability_id, capability]));
   const result = [];
   const seen = new Set();
   for (const token of referenceTokensFromTextarea(textarea, fragment)) {
-    const toolName = referenceTokenReactCallName(token);
-    const tool = byName.get(toolName);
-    if (tool && !seen.has(tool.tool_name)) {
-      seen.add(tool.tool_name);
-      result.push(tool);
+    const value = String(token || '').replace(/^\$\{|\}$/g, '');
+    let capabilityId = '';
+    if (value.startsWith('Capability.')) {
+      capabilityId = value.slice('Capability.'.length);
+    } else if (value.startsWith('paramCapability.')) {
+      const parts = value.slice('paramCapability.'.length).split('.');
+      const boundary = parts.findIndex((part) => part === 'input' || part === 'output');
+      capabilityId = (boundary > 0 ? parts.slice(0, boundary) : parts).join('.');
+    }
+    const capability = byId.get(capabilityId);
+    if (capability && !seen.has(capability.capability_id)) {
+      seen.add(capability.capability_id);
+      result.push(capability);
     }
   }
   return result;
-}
-
-function referenceParameterTools(tools = [], selectedTool = null, referencedTools = []) {
-  const result = [];
-  const seen = new Set();
-  for (const tool of [...(referencedTools || []), selectedTool].filter(Boolean)) {
-    if (tool?.tool_name && !seen.has(tool.tool_name)) {
-      seen.add(tool.tool_name);
-      result.push(tool);
-    }
-  }
-  return result.length ? result : (tools || []);
 }
 
 function referenceHelperCaseItems() {
@@ -5177,23 +5161,24 @@ function referenceHelperStepItems(previousSteps = []) {
   const items = [];
   for (const [index, step] of (previousSteps || []).entries()) {
     const stepId = normalizeEnrichmentStepId(step.step_id, index);
-    const reactCall = step.react_call || '';
-    if (!reactCall) continue;
-    const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
-    for (const parameter of reactParameterNames(tool || {})) {
-      items.push({
-        token: `\${step.${stepId}.react.${reactCall}.input.${parameter}}`,
-        label: `Шаг ${index + 1}: вход ${reactCall}.${parameter}`,
-        detail: step.step_name || reactCall,
-      });
-    }
-    for (const field of stepResultFields(step, tool).filter((item) => editorReferenceFieldVisible('step_output', item.field_id))) {
-      if (!field.field_id) continue;
-      items.push({
-        token: `\${step.${stepId}.react.${reactCall}.output.${field.field_id}}`,
-        label: `Шаг ${index + 1}: результат ${reactCall}.${field.field_id}`,
-        detail: field.description || field.display_name || step.step_name || reactCall,
-      });
+    const capabilityId = step.capability_id || '';
+    if (capabilityId) {
+      const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId);
+      for (const parameter of Object.keys(schemaProperties(capability?.input_schema || {}))) {
+        items.push({
+          token: `\${step.${stepId}.capability.${capabilityId}.input.${parameter}}`,
+          label: `Шаг ${index + 1}: вход ${capabilityId}.${parameter}`,
+          detail: step.step_name || capabilityId,
+        });
+      }
+      for (const field of Object.keys(schemaProperties(capability?.output_schema || {}))) {
+        items.push({
+          token: `\${step.${stepId}.capability.${capabilityId}.output.${field}}`,
+          label: `Шаг ${index + 1}: результат ${capabilityId}.${field}`,
+          detail: step.step_name || capabilityId,
+        });
+      }
+      continue;
     }
   }
   return items;
@@ -5225,18 +5210,20 @@ function referenceAutocompleteGroup(title, items) {
   return (items || []).map((item) => ({ ...item, group: title }));
 }
 
-function referenceAutocompleteItems({ slots = [], channels = [], tools = [], selectedTool = null, parameterTools = null, previousSteps = [] } = {}) {
-  const selected = selectedTool?.tool_name ? selectedTool : null;
-  const scopedParameterTools = parameterTools?.length ? parameterTools : (selected ? [selected] : (tools || []));
+function referenceAutocompleteItems({ slots = [], channels = [], capabilities = [], selectedCapability = null, parameterCapabilities = null, previousSteps = [] } = {}) {
+  const selectedCap = selectedCapability?.capability_id ? selectedCapability : null;
+  const scopedParameterCapabilities = parameterCapabilities?.length
+    ? parameterCapabilities
+    : (selectedCap ? [selectedCap] : (capabilities || []));
   return [
     ...referenceAutocompleteGroup('Данные обращения', referenceHelperCaseItems()),
     ...referenceAutocompleteGroup('Ожидание', referenceHelperWaitItems()),
     ...referenceAutocompleteGroup('Этапы', referenceHelperStageItems()),
     ...referenceAutocompleteGroup('Слоты', referenceHelperSlotItems(slots)),
     ...referenceAutocompleteGroup('Параметры каналов', referenceHelperChannelItems(channels)),
-    ...referenceAutocompleteGroup('ReAct-вызовы', referenceHelperReactItems(tools)),
-    ...referenceAutocompleteGroup('Входные параметры', scopedParameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'input'))),
-    ...referenceAutocompleteGroup('Поля результата', scopedParameterTools.flatMap((tool) => referenceHelperParameterItems(tool, 'output'))),
+    ...referenceAutocompleteGroup('Capabilities', referenceHelperCapabilityItems(capabilities)),
+    ...referenceAutocompleteGroup('Входные параметры capability', scopedParameterCapabilities.flatMap((capability) => referenceHelperCapabilityParameterItems(capability, 'input'))),
+    ...referenceAutocompleteGroup('Поля результата capability', scopedParameterCapabilities.flatMap((capability) => referenceHelperCapabilityParameterItems(capability, 'output'))),
     ...referenceAutocompleteGroup('Параметры шагов', referenceHelperStepItems(previousSteps)),
   ];
 }
@@ -5249,11 +5236,11 @@ function safeEnrichmentStepFromCard(card, index = 0) {
       return {};
     }
   }
-  const reactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
+  const capabilityId = card.querySelector('[data-enrichment-capability-id]')?.value?.trim() || '';
   return {
     step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
-    react_call: reactCall,
+    capability_id: capabilityId,
   };
 }
 
@@ -5261,7 +5248,7 @@ function safeEnrichmentStepsFromForm(form, limit = Infinity) {
   return Array.from(form?.querySelectorAll('[data-enrichment-step-card]') || [])
     .slice(0, limit)
     .map((card, index) => safeEnrichmentStepFromCard(card, index))
-    .filter((step) => step && (step.react_call || step.result_fields?.length));
+    .filter((step) => step && (step.capability_id || step.result_fields?.length));
 }
 
 function allKnownSlotsForReferences() {
@@ -5314,9 +5301,9 @@ function genericReferenceAutocompleteContext() {
   return {
     slots: allKnownSlotsForReferences(),
     channels: allKnownChannelsForReferences(),
-    tools: state.lastData.toolCatalog || [],
-    selectedTool: null,
-    parameterTools: null,
+    capabilities: state.lastData.capabilities || [],
+    selectedCapability: null,
+    parameterCapabilities: null,
     previousSteps: [],
   };
 }
@@ -5331,9 +5318,9 @@ function referenceAutocompleteContextForTextarea(textarea, fragment = null) {
     return {
       slots: currentSlotSchemaSlotsFromForm(form),
       channels: allKnownChannelsForReferences(),
-      tools: [],
-      selectedTool: null,
-      parameterTools: [],
+      capabilities: state.lastData.capabilities || [],
+      selectedCapability: null,
+      parameterCapabilities: [],
       previousSteps: [],
     };
   }
@@ -5342,58 +5329,57 @@ function referenceAutocompleteContextForTextarea(textarea, fragment = null) {
     const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
     const index = Math.max(0, cards.indexOf(card));
     const slotContext = currentResolutionSlotContextFromForm(form);
-    const steps = safeEnrichmentStepsFromForm(form);
-    const tools = currentResolutionToolsFromForm(form, steps);
-    const selectedToolName = card?.querySelector('[data-enrichment-react-call]')?.value || '';
-    const selectedTool = findToolInCatalog(tools, selectedToolName) || null;
-    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
+    const capabilities = state.lastData.capabilities || [];
+    const selectedCapabilityId = card?.querySelector('[data-enrichment-capability-id]')?.value || '';
+    const selectedCapability = capabilities.find((capability) => capability.capability_id === selectedCapabilityId) || null;
+    const referencedCapabilities = referencedCapabilitiesFromTextarea(textarea, capabilities, fragment);
     return {
       slots: slotContext.slots || [],
       channels: allKnownChannelsForReferences(),
-      tools,
-      selectedTool,
-      parameterTools: referenceParameterTools(tools, selectedTool, referencedTools),
+      capabilities,
+      selectedCapability,
+      parameterCapabilities: referencedCapabilities.length ? referencedCapabilities : (selectedCapability ? [selectedCapability] : capabilities),
       previousSteps: safeEnrichmentStepsFromForm(form, index),
     };
   }
   if (textarea.matches('[name="llm_resolution_script_text"]')) {
     const slotContext = currentResolutionSlotContextFromForm(form);
     const steps = safeEnrichmentStepsFromForm(form);
-    const tools = currentResolutionToolsFromForm(form, steps);
-    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
+    const capabilities = state.lastData.capabilities || [];
+    const referencedCapabilities = referencedCapabilitiesFromTextarea(textarea, capabilities, fragment);
     return {
       slots: slotContext.slots || [],
       channels: allKnownChannelsForReferences(),
-      tools,
-      selectedTool: null,
-      parameterTools: referenceParameterTools(tools, null, referencedTools),
+      capabilities,
+      selectedCapability: null,
+      parameterCapabilities: referencedCapabilities.length ? referencedCapabilities : capabilities,
       previousSteps: steps,
     };
   }
   if (textarea.matches('[name="human_resolution_message_template"]')) {
     const slotContext = currentResolutionSlotContextFromForm(form);
     const steps = safeEnrichmentStepsFromForm(form);
-    const tools = currentResolutionToolsFromForm(form, steps);
-    const referencedTools = referencedReactToolsFromTextarea(textarea, tools, fragment);
+    const capabilities = state.lastData.capabilities || [];
+    const referencedCapabilities = referencedCapabilitiesFromTextarea(textarea, capabilities, fragment);
     return {
       slots: slotContext.slots || [],
       channels: allKnownChannelsForReferences(),
-      tools,
-      selectedTool: null,
-      parameterTools: referenceParameterTools(tools, null, referencedTools),
+      capabilities,
+      selectedCapability: null,
+      parameterCapabilities: referencedCapabilities.length ? referencedCapabilities : capabilities,
       previousSteps: steps,
     };
   }
   if (textarea.matches('[data-resolution-output-source]')) {
     const slotContext = currentResolutionSlotContextFromForm(form);
     const steps = safeEnrichmentStepsFromForm(form);
-    const tools = currentResolutionToolsFromForm(form, steps);
+    const capabilities = state.lastData.capabilities || [];
     return {
       slots: slotContext.slots || [],
       channels: allKnownChannelsForReferences(),
-      tools,
-      selectedTool: null,
-      parameterTools: [],
+      capabilities,
+      selectedCapability: null,
+      parameterCapabilities: [],
       previousSteps: steps,
     };
   }
@@ -5526,8 +5512,8 @@ function renderPromptPackEditor({ promptPack, packs, scenarios }) {
     behavior_principles: '2. Принципы поведения',
     slot_schemas: '3. Схемы слотов',
     classification_confidence: '4. Классификация и confidence',
-    react_planning: '5. ReAct и планирование',
-    tool_rules: '6. Правила ReAct-вызовов',
+    orchestration: '5. Оркестрация',
+    capability_rules: '6. Правила capability',
     escalation_response: '7. Эскалация и формат ответа',
   };
   const blockFields = Object.entries(blockLabels).map(([key, label]) => `
@@ -5736,7 +5722,7 @@ async function renderDashboard() {
       'Ресурсы',
       `<div class="grid">
         ${metric('Обратная связь', String(dashboard.feedback?.total ?? 0))}
-        ${metric('ReAct-вызовы ИИ', String(dashboard.tools?.count ?? 0))}
+        ${metric('Capabilities', String(dashboard.capabilities?.count ?? dashboard.tools?.count ?? 0))}
         ${metric('Алиас модели', escapeHtml(dashboard.models?.default_model_alias || 'н/д'))}
       </div>`,
     ),
@@ -5757,8 +5743,8 @@ function renderDashboardRuntime(dashboard) {
   const runtime = processing.runtime || {};
   const kafka = processing.kafka || {};
   const components = runtime.required_components || [];
-  const toolUnpublished = (kafka.outbox_by_topic || [])
-    .filter((item) => item.topic === 'tool.commands' && ['pending', 'publishing'].includes(item.status))
+  const mcpUnpublished = (kafka.outbox_by_topic || [])
+    .filter((item) => item.topic === 'mcp.commands' && ['pending', 'publishing'].includes(item.status))
     .reduce((total, item) => total + Number(item.count || 0), 0);
   const rows = components.map((item) => {
     const heartbeat = item.heartbeat || {};
@@ -5776,13 +5762,13 @@ function renderDashboardRuntime(dashboard) {
     : '';
   return statusStrip([
     { label: 'Runtime', value: badge(runtime.status || 'unknown'), risk: runtime.status && runtime.status !== 'ok' },
-    { label: 'tool.commands не опубликовано', value: escapeHtml(toolUnpublished), risk: toolUnpublished > 0 },
+    { label: 'mcp.commands не опубликовано', value: escapeHtml(mcpUnpublished), risk: mcpUnpublished > 0 },
     { label: 'Outbox pending всего', value: escapeHtml(kafka.outbox_pending ?? 0) },
     { label: 'Kafka bootstrap', value: escapeHtml(kafka.bootstrap_servers || 'н/д') },
     {
-      label: 'Зависший tool.commands',
-      value: escapeHtml(runtime.stale_tool_outbox?.oldest_age_seconds ?? 'нет'),
-      risk: Boolean(runtime.stale_tool_outbox),
+      label: 'Зависший mcp.commands',
+      value: escapeHtml(runtime.stale_mcp_outbox?.oldest_age_seconds ?? 'нет'),
+      risk: Boolean(runtime.stale_mcp_outbox),
     },
   ]) + `
     ${issues}
@@ -6019,11 +6005,9 @@ function renderProcessingWaits(detail, fallbackWaits) {
 function waitOriginSummary(origin = {}) {
   if (!origin || !origin.kind) return 'н/д';
   const kind = visibleLabels[origin.kind] || origin.kind;
-  if (origin.kind === 'react_call') {
-    const call = origin.react_call || origin.tool_name || 'ReAct-вызов';
-    const endpoint = origin.endpoint_id || 'endpoint н/д';
-    const operation = origin.operation_id || 'операция н/д';
-    return escapeHtml(`${kind}: ${call} -> ${endpoint}/${operation}`);
+  if (origin.kind === 'capability_call') {
+    const capability = origin.capability_id || origin.tool_name || 'capability';
+    return escapeHtml(`${kind}: ${capability}`);
   }
   if (origin.kind === 'client_question') {
     return escapeHtml(`${kind}: ${formatList(origin.slot_ids || origin.expected_slots || [])}`);
@@ -6068,7 +6052,7 @@ function processingRuntimeGraph(baseGraph, detail) {
   const activeWait = (detail?.waits || []).find((wait) => ['open', 'reminded'].includes(wait.status));
   const activeStep = activeWait ? 'waiting' : run?.current_step;
   const runStatus = run?.status || 'unknown';
-  const order = ['slot_filling', 'classification', 'react_planning', 'tool_use', 'decision', 'waiting'];
+  const order = ['slot_filling', 'classification', 'orchestration', 'tool_use', 'decision', 'waiting'];
   const activeIndex = Math.max(order.indexOf(activeStep), 0);
   graph.title = 'Runtime-граф обработки';
   graph.nodes = graph.nodes.map((node) => {
@@ -6158,76 +6142,47 @@ async function renderKnowledge() {
 
 async function loadExecutionCatalogContext({ includeAudit = false } = {}) {
   const requests = [
-    loadDraftAwareCollection('tools'),
-    loadDraftAwareCollection('integration_endpoints'),
-    api('/admin/config/active/n8n_workflows'),
     loadDraftAwareCollection('attribute_resolution_profiles'),
     loadDraftAwareCollection('interaction_channels'),
+    loadDraftAwareCollection('capabilities'),
+    loadDraftAwareCollection('mcp_environments'),
+    loadDraftAwareCollection('capability_bindings'),
   ];
   if (includeAudit) {
     requests.push(api('/admin/security/audit?limit=30'));
   }
-  const [toolsActive, endpointsActive, n8nActive, resolutionActive, channelsActive, audit] = await Promise.all(requests);
+  const [
+    resolutionActive,
+    channelsActive,
+    capabilitiesActive,
+    mcpEnvironmentsActive,
+    capabilityBindingsActive,
+    audit,
+  ] = await Promise.all(requests);
   const context = {
-    tools: toolsActive.items || [],
-    endpoints: endpointsActive.items || [],
-    workflows: n8nActive.payload?.workflows || [],
+    tools: [],
+    endpoints: [],
+    workflows: [],
     matrices: [],
     resolutionProfiles: resolutionActive.items || [],
     channels: channelsActive.items || [],
+    capabilities: capabilitiesActive.items || [],
+    mcpEnvironments: mcpEnvironmentsActive.items || [],
+    capabilityBindings: capabilityBindingsActive.items || [],
     audit: audit || { events: [] },
   };
   state.lastData.toolCatalog = context.tools;
   state.lastData.integrationEndpoints = context.endpoints;
-  state.lastData.n8nWorkflows = context.workflows;
-  if (!context.endpoints.some((endpoint) => endpoint.endpoint_id === state.integrationEndpointId)) {
-    state.integrationEndpointId = context.endpoints[0]?.endpoint_id || '';
-  }
-  if (!context.tools.some((tool) => tool.tool_name === state.toolCatalogName)) {
-    state.toolCatalogName = context.tools[0]?.tool_name || '';
-  }
-  if (!context.tools.some((tool) => tool.tool_name === state.operationBindingToolName)) {
-    state.operationBindingToolName = state.toolCatalogName || context.tools[0]?.tool_name || '';
-  }
-  const selectedBindingTool = context.tools.find((tool) => tool.tool_name === state.operationBindingToolName);
-  const currentBinding = currentToolBinding(selectedBindingTool);
-  const bindingToolChanged = state.operationBindingLastToolName !== state.operationBindingToolName;
-  if (bindingToolChanged) {
-    state.operationBindingLastToolName = state.operationBindingToolName;
-    state.operationBindingEndpointId = currentBinding?.endpoint_id || context.endpoints[0]?.endpoint_id || '';
-    state.operationBindingOperationId = currentBinding?.operation_id || '';
-  } else if (!context.endpoints.some((endpoint) => endpoint.endpoint_id === state.operationBindingEndpointId)) {
-    state.operationBindingEndpointId = currentBinding?.endpoint_id || context.endpoints[0]?.endpoint_id || '';
-  }
-  const selectedEndpoint = context.endpoints.find((endpoint) => endpoint.endpoint_id === state.operationBindingEndpointId);
-  const operationIds = Object.keys(selectedEndpoint?.operations || {});
-  if (!operationIds.includes(state.operationBindingOperationId)) {
-    state.operationBindingOperationId = currentBinding?.endpoint_id === state.operationBindingEndpointId
-      && currentBinding?.operation_id
-      && operationIds.includes(currentBinding.operation_id)
-      ? currentBinding.operation_id
-      : operationIds[0] || '';
-  }
+  state.lastData.capabilities = context.capabilities;
+  state.lastData.mcpEnvironments = context.mcpEnvironments;
+  state.lastData.capabilityBindings = context.capabilityBindings;
   return context;
 }
 
 async function renderIntegrations() {
-  const { tools, endpoints, workflows, audit } = await loadExecutionCatalogContext({ includeAudit: true });
-  const selectedEndpoint = endpoints.find((endpoint) => endpoint.endpoint_id === state.integrationEndpointId) || null;
-  const endpointById = Object.fromEntries((endpoints || []).map((endpoint) => [endpoint.endpoint_id, endpoint]));
-  const n8nRows = workflows.map((workflow) => {
-    const endpoint = endpointById[workflow.endpoint_id] || {};
-    return [
-      badge(workflow.enabled ? 'enabled' : 'disabled'),
-      escapeHtml(workflow.business_scenario),
-      escapeHtml(workflow.endpoint_id),
-      escapeHtml((workflow.operations || []).join(', ')),
-      escapeHtml(endpointContractUrl(endpoint)),
-      escapeHtml(workflowExecutionUrls(workflow, endpoint)),
-    ];
-  });
+  const { capabilities, mcpEnvironments, capabilityBindings, audit } = await loadExecutionCatalogContext({ includeAudit: true });
   const auditRows = (audit.events || [])
-    .filter((event) => ['tools.dispatch', 'callbacks.receive'].includes(event.action))
+    .filter((event) => ['mcp.dispatch', 'callbacks.receive', 'external_events.receive'].includes(event.action))
     .map((event) => [
       escapeHtml(event.created_at),
       escapeHtml(event.action),
@@ -6236,107 +6191,598 @@ async function renderIntegrations() {
       escapeHtml(event.actor_id),
     ]);
   elements.viewContent.innerHTML = [
-    section('Подключения по типу адаптера', renderEndpointConnectionGroups(endpoints)),
     section(
-      'Подключение и операции',
-      `${endpointConnectionControls(endpoints)}
-      ${renderEndpointConnectionEditor({
-        endpoint: selectedEndpoint,
-        endpoints,
-        tools,
-        workflows,
-      })}`,
+      'MCP окружения',
+      renderMcpEnvironmentSettings({
+        capabilities,
+        mcpEnvironments,
+        capabilityBindings,
+      }),
     ),
-    section('Рабочие процессы n8n', table(['Статус', 'Сценарий', 'Точка интеграции', 'Операции', 'Contract URL', 'Execution URL'], n8nRows)),
+    section(
+      'Discovery',
+      renderMcpCapabilityDiscovery({ capabilities, mcpEnvironments, capabilityBindings }),
+    ),
     section('История вызовов и callbacks', table(['Время', 'Действие', 'Результат', 'Ресурс', 'Инициатор'], auditRows)),
   ].join('');
-  attachCatalogSelect('integrationEndpointSelect', 'integrationEndpointId', renderIntegrations);
 }
 
-async function renderReactCalls() {
-  const { tools, matrices, resolutionProfiles, channels } = await loadExecutionCatalogContext();
-  const selectedTool = tools.find((tool) => tool.tool_name === state.toolCatalogName) || null;
+async function renderCapabilityCatalogView() {
+  const { capabilities, mcpEnvironments, capabilityBindings } = await loadExecutionCatalogContext();
   elements.viewContent.innerHTML = [
     section(
-      'ReAct-вызовы ИИ',
-      `${toolCatalogControls(tools)}
-      ${renderToolCatalogEditor({
-        tool: selectedTool,
-        tools,
-        matrices,
-        resolutionProfiles,
-        channels,
-      })}`,
+      'Capabilities',
+      renderCapabilityCatalog({
+        capabilities,
+        mcpEnvironments,
+        capabilityBindings,
+      }),
     ),
   ].join('');
-  attachCatalogSelect('toolCatalogSelect', 'toolCatalogName', renderReactCalls);
 }
 
 async function renderOperationBindings() {
-  const { tools, endpoints, matrices, resolutionProfiles, channels } = await loadExecutionCatalogContext();
-  const selectedTool = state.operationBindingMode === 'create'
-    ? null
-    : tools.find((tool) => tool.tool_name === state.operationBindingToolName) || null;
+  const {
+    capabilities,
+    mcpEnvironments,
+    capabilityBindings,
+  } = await loadExecutionCatalogContext();
   elements.viewContent.innerHTML = [
     section(
-      'Привязка операций',
-      `${operationBindingControls(tools)}
-      ${state.operationBindingMode === 'create'
-        ? renderOperationBindingCreateEditor({ tools, endpoints })
-        : renderOperationBindingEditor({
-          tool: selectedTool,
-          tools,
-          endpoints,
-          matrices,
-          resolutionProfiles,
-          channels,
-        })}`,
+      'Capability bindings',
+      renderCapabilityBindingSettings({
+        capabilities,
+        mcpEnvironments,
+        capabilityBindings,
+      }),
+    ),
+    section(
+      'Discovery',
+      renderMcpCapabilityDiscovery({ capabilities, mcpEnvironments, capabilityBindings }),
     ),
   ].join('');
-  attachCatalogSelect('operationBindingToolSelect', 'operationBindingToolName', renderOperationBindings);
+}
+
+function mcpEnvironmentLabel(environment = {}) {
+  const environmentId = environment.environment_id || '';
+  const displayName = environment.display_name || environmentId;
+  return displayName && environmentId && displayName !== environmentId
+    ? `${displayName} (${environmentId})`
+    : displayName || environmentId || 'окружение не выбрано';
+}
+
+function capabilityLabel(capability = {}) {
+  const capabilityId = capability.capability_id || '';
+  const displayName = capability.display_name || capabilityId;
+  return displayName && capabilityId && displayName !== capabilityId
+    ? `${displayName} (${capabilityId})`
+    : displayName || capabilityId || 'capability не выбрана';
+}
+
+function capabilityBindingLabel(binding = {}) {
+  const bindingId = binding.binding_id || '';
+  const target = [
+    binding.capability_id || 'capability не выбрана',
+    binding.environment_id || 'окружение не выбрано',
+    binding.execution_mode || '',
+  ].filter(Boolean).join(' / ');
+  return bindingId ? `${bindingId} (${target})` : target;
+}
+
+function capabilityById(capabilities = [], capabilityId = '') {
+  return (capabilities || []).find((capability) => capability.capability_id === capabilityId) || null;
+}
+
+function environmentById(mcpEnvironments = [], environmentId = '') {
+  return (mcpEnvironments || []).find((environment) => environment.environment_id === environmentId) || null;
+}
+
+function bindingById(capabilityBindings = [], bindingId = '') {
+  return (capabilityBindings || []).find((binding) => binding.binding_id === bindingId) || null;
+}
+
+function selectedMcpEnvironment(mcpEnvironments = []) {
+  if (!mcpEnvironments.length) return null;
+  if (!state.mcpEnvironmentId || !mcpEnvironments.some((environment) => environment.environment_id === state.mcpEnvironmentId)) {
+    state.mcpEnvironmentId = mcpEnvironments[0].environment_id || '';
+  }
+  return environmentById(mcpEnvironments, state.mcpEnvironmentId);
+}
+
+function selectedCapabilityBinding(capabilityBindings = []) {
+  if (!capabilityBindings.length) return null;
+  if (!state.capabilityBindingId || !capabilityBindings.some((binding) => binding.binding_id === state.capabilityBindingId)) {
+    state.capabilityBindingId = capabilityBindings[0].binding_id || '';
+  }
+  return bindingById(capabilityBindings, state.capabilityBindingId);
+}
+
+function renderMcpEnvironmentSettings({ capabilities = [], mcpEnvironments = [], capabilityBindings = [] } = {}) {
+  const current = selectedMcpEnvironment(mcpEnvironments);
+  const rows = (mcpEnvironments || []).map((environment) => {
+    const environmentId = environment.environment_id || '';
+    const bindingCount = (capabilityBindings || []).filter((binding) => binding.environment_id === environmentId).length;
+    return [
+      badge(environment.status || 'н/д'),
+      `<strong>${escapeHtml(labelWithDraftState(environment, mcpEnvironmentLabel(environment)))}</strong>`,
+      escapeHtml(environment.base_url || 'н/д'),
+      escapeHtml([
+        environment.environment_tier ? `tier ${environment.environment_tier}` : '',
+        environment.transport ? `transport ${environment.transport}` : '',
+        environment.auth_mode ? `auth ${environment.auth_mode}` : '',
+      ].filter(Boolean).join('; ') || 'н/д'),
+      escapeHtml((environment.allowed_capabilities || []).join(', ') || 'нет ограничений'),
+      escapeHtml(String(bindingCount)),
+    ];
+  });
+  return [
+    mcpEnvironmentControls(mcpEnvironments),
+    rows.length
+      ? table(['Статус', 'Окружение', 'Base URL', 'Transport/auth', 'Allowed capabilities', 'Bindings'], rows)
+      : '<div class="empty">MCP окружения не настроены.</div>',
+    renderMcpEnvironmentEditor({
+      environment: current,
+      mcpEnvironments,
+      capabilities,
+    }),
+  ].join('');
+}
+
+function mcpEnvironmentControls(mcpEnvironments = []) {
+  return `
+    <div class="toolbar compact">
+      <label>MCP environment
+        <select id="mcpEnvironmentSelect" ${mcpEnvironments.length ? '' : 'disabled'}>
+          ${mcpEnvironments.length
+            ? referenceOptions(mcpEnvironments, 'environment_id', state.mcpEnvironmentId, mcpEnvironmentLabel)
+            : '<option value="">Нет окружений</option>'}
+        </select>
+      </label>
+    </div>
+    <div class="scenario-menu">
+      <button type="button" class="${state.mcpEnvironmentOperation === 'create' ? 'primary' : ''}" data-action="mcp-environment-operation" data-operation="create">Создать</button>
+      <button type="button" class="${state.mcpEnvironmentOperation === 'modify' ? 'primary' : ''}" data-action="mcp-environment-operation" data-operation="modify" ${mcpEnvironments.length ? '' : 'disabled'}>Модифицировать</button>
+      <button type="button" class="${state.mcpEnvironmentOperation === 'delete' ? 'primary' : ''}" data-action="mcp-environment-operation" data-operation="delete" ${mcpEnvironments.length ? '' : 'disabled'}>Удалить</button>
+    </div>
+  `;
+}
+
+function mcpEnvironmentCreateTemplate(source, mcpEnvironments = []) {
+  const template = source || {};
+  return {
+    environment_id: nextConfigItemId(template.environment_id || 'mcp.environment', mcpEnvironments, 'environment_id'),
+    display_name: '',
+    status: 'draft',
+    environment_tier: template.environment_tier || 'dev',
+    transport: template.transport || 'streamable_http',
+    base_url: template.base_url || 'http://127.0.0.1:9000/mcp',
+    auth_mode: template.auth_mode || 'dev_bearer_token',
+    auth_ref: template.auth_ref || 'env:MCP_PROVIDER_OPS_TOKEN',
+    allowed_capabilities: template.allowed_capabilities || [],
+    health_check: {
+      mode: template.health_check?.mode || 'http_get',
+      path: template.health_check?.path || '/health',
+      timeout_seconds: template.health_check?.timeout_seconds || 5,
+    },
+    discovery_policy: {
+      mode: template.discovery_policy?.mode || 'manual',
+      refresh_interval_seconds: template.discovery_policy?.refresh_interval_seconds || '',
+    },
+  };
+}
+
+function renderMcpEnvironmentEditor({ environment, mcpEnvironments = [], capabilities = [] } = {}) {
+  if (state.mcpEnvironmentOperation === 'delete') {
+    if (!environment?.environment_id) {
+      return '<div class="empty">Нет выбранного MCP окружения для удаления.</div>';
+    }
+    return `
+      <form class="scenario-editor panel" data-form="mcp-environment-delete">
+        <div>
+          <div class="metric-label">Удаляемое MCP окружение</div>
+          <div class="scenario-title">${escapeHtml(mcpEnvironmentLabel(environment))}</div>
+        </div>
+        <div class="scenario-editor-actions">
+          <button class="danger" type="submit">Удалить MCP окружение</button>
+        </div>
+      </form>
+    `;
+  }
+  const current = state.mcpEnvironmentOperation === 'create'
+    ? mcpEnvironmentCreateTemplate(environment, mcpEnvironments)
+    : environment;
+  if (!current?.environment_id) {
+    return '<div class="empty">MCP окружение не выбрано.</div>';
+  }
+  const healthCheck = current.health_check || {};
+  const discoveryPolicy = current.discovery_policy || {};
+  return `
+    <form class="scenario-editor panel" data-form="mcp-environment-editor">
+      ${draftInfoPanel(current)}
+      <div class="grid two">
+        <label>Environment ID
+          <input name="environment_id" value="${escapeHtml(current.environment_id)}" autocomplete="off" ${state.mcpEnvironmentOperation === 'modify' ? 'readonly' : ''}>
+          <span class="field-help">Стабильный ключ внешнего MCP окружения.</span>
+        </label>
+        <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
+        <label>Статус<select name="status">${optionList(['draft', 'active', 'planned', 'disabled'], current.status || 'draft')}</select></label>
+        <label>Tier<select name="environment_tier">${optionList(['dev', 'test', 'staging', 'prod'], current.environment_tier || 'dev')}</select></label>
+        <label>Transport<select name="transport">${optionList(['streamable_http', 'http_sse', 'stdio'], current.transport || 'streamable_http')}</select></label>
+        <label>Base URL<input name="base_url" value="${escapeHtml(current.base_url || '')}" autocomplete="off" placeholder="http://127.0.0.1:9000/mcp"></label>
+        <label>Auth mode<select name="auth_mode">${optionList(['dev_bearer_token', 'oidc_client_credentials', 'oidc_workload_identity', 'signed_event'], current.auth_mode || 'dev_bearer_token')}</select></label>
+        <label>Auth ref<input name="auth_ref" value="${escapeHtml(current.auth_ref || '')}" autocomplete="off" placeholder="env:MCP_PROVIDER_OPS_TOKEN"></label>
+        <label>OIDC audience<input name="oidc_audience" value="${escapeHtml(current.oidc_audience || '')}" autocomplete="off" placeholder="api://servicedesk-mcp"></label>
+        <label>Health mode<select name="health_check_mode">${optionList(['mcp_ping', 'http_get', 'disabled'], healthCheck.mode || 'http_get')}</select></label>
+        <label>Health path<input name="health_check_path" value="${escapeHtml(healthCheck.path || '')}" autocomplete="off" placeholder="/health"></label>
+        <label>Health timeout, sec<input name="health_check_timeout_seconds" type="number" min="1" max="120" value="${escapeHtml(healthCheck.timeout_seconds || 5)}"></label>
+        <label>Discovery mode<select name="discovery_policy_mode">${optionList(['disabled', 'manual', 'mcp_tools'], discoveryPolicy.mode || 'manual')}</select></label>
+        <label>Discovery refresh, sec<input name="discovery_policy_refresh_interval_seconds" type="number" min="60" max="604800" value="${escapeHtml(discoveryPolicy.refresh_interval_seconds || '')}"></label>
+      </div>
+      <label>Allowed capabilities
+        <select name="allowed_capabilities" multiple size="${Math.min(Math.max(capabilities.length, 3), 8)}">
+          ${multiReferenceOptions(capabilities, 'capability_id', current.allowed_capabilities || [], capabilityLabel)}
+        </select>
+        <span class="field-help">Пустой список означает отсутствие ограничения на уровне окружения.</span>
+      </label>
+      <div class="scenario-editor-actions">
+        <button class="primary" type="submit">${state.mcpEnvironmentOperation === 'create' ? 'Создать MCP окружение' : 'Сохранить MCP окружение'}</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderCapabilityCatalog({ capabilities = [], mcpEnvironments = [], capabilityBindings = [] } = {}) {
+  const bindingCounts = (capabilityBindings || []).reduce((accumulator, binding) => {
+    const capabilityId = binding.capability_id || '';
+    accumulator[capabilityId] = (accumulator[capabilityId] || 0) + 1;
+    return accumulator;
+  }, {});
+  const environmentNamesById = Object.fromEntries((mcpEnvironments || []).map((environment) => [
+    environment.environment_id,
+    environment.display_name || environment.environment_id,
+  ]));
+  const rows = (capabilities || []).map((capability) => {
+    const capabilityId = capability.capability_id || '';
+    const activeBindings = (capabilityBindings || []).filter((binding) => binding.capability_id === capabilityId && binding.status === 'active');
+    return [
+      badge(capability.status || 'н/д'),
+      `<strong>${escapeHtml(labelWithDraftState(capability, capabilityLabel(capability)))}</strong><div class="meta">${escapeHtml(capability.description || '')}</div>`,
+      escapeHtml((capability.execution_modes || []).join(', ') || 'н/д'),
+      escapeHtml(Object.keys(capability.async_event_contracts || {}).join(', ') || 'н/д'),
+      escapeHtml(activeBindings.map((binding) => `${binding.environment_id || 'н/д'}:${binding.execution_mode || 'н/д'}`).join(', ') || 'нет активных'),
+      escapeHtml(String(bindingCounts[capabilityId] || 0)),
+    ];
+  });
+  if (!rows.length) {
+    return '<div class="empty">Capability catalog пуст. Импортируйте capabilities через MCP discovery или добавьте их в config catalog.</div>';
+  }
+  return [
+    table(['Статус', 'Capability', 'Modes', 'Async events', 'Active bindings', 'Всего bindings'], rows),
+    `<div class="meta">MCP окружения: ${escapeHtml(Object.values(environmentNamesById).join(', ') || 'не настроены')}.</div>`,
+  ].join('');
+}
+
+function renderCapabilityBindingSettings({ capabilities = [], mcpEnvironments = [], capabilityBindings = [] } = {}) {
+  const current = selectedCapabilityBinding(capabilityBindings);
+  const rows = (capabilityBindings || []).map((binding) => [
+    badge(binding.status || 'н/д'),
+    `<strong>${escapeHtml(labelWithDraftState(binding, binding.binding_id || 'н/д'))}</strong>`,
+    escapeHtml(capabilityLabel(capabilityById(capabilities, binding.capability_id) || { capability_id: binding.capability_id })),
+    escapeHtml(mcpEnvironmentLabel(environmentById(mcpEnvironments, binding.environment_id) || { environment_id: binding.environment_id })),
+    escapeHtml(binding.mcp_tool_name || 'н/д'),
+    badge(binding.execution_mode || 'н/д'),
+  ]);
+  return [
+    capabilityBindingControls(capabilityBindings),
+    rows.length
+      ? table(['Статус', 'Binding', 'Capability', 'MCP environment', 'MCP tool', 'Mode'], rows)
+      : '<div class="empty">Capability bindings не настроены.</div>',
+    renderCapabilityBindingEditor({
+      binding: current,
+      capabilityBindings,
+      capabilities,
+      mcpEnvironments,
+    }),
+  ].join('');
+}
+
+function capabilityBindingControls(capabilityBindings = []) {
+  return `
+    <div class="toolbar compact">
+      <label>Capability binding
+        <select id="capabilityBindingSelect" ${capabilityBindings.length ? '' : 'disabled'}>
+          ${capabilityBindings.length
+            ? referenceOptions(capabilityBindings, 'binding_id', state.capabilityBindingId, capabilityBindingLabel)
+            : '<option value="">Нет bindings</option>'}
+        </select>
+      </label>
+    </div>
+    <div class="scenario-menu">
+      <button type="button" class="${state.capabilityBindingOperation === 'create' ? 'primary' : ''}" data-action="capability-binding-operation" data-operation="create">Создать</button>
+      <button type="button" class="${state.capabilityBindingOperation === 'modify' ? 'primary' : ''}" data-action="capability-binding-operation" data-operation="modify" ${capabilityBindings.length ? '' : 'disabled'}>Модифицировать</button>
+      <button type="button" class="${state.capabilityBindingOperation === 'delete' ? 'primary' : ''}" data-action="capability-binding-operation" data-operation="delete" ${capabilityBindings.length ? '' : 'disabled'}>Удалить</button>
+    </div>
+  `;
+}
+
+function defaultAsyncContextMapping() {
+  return {
+    case_id: 'async_context.case_id',
+    run_id: 'async_context.run_id',
+    wait_id: 'async_context.wait_id',
+    correlation_id: 'async_context.correlation_id',
+    capability_id: 'async_context.capability_id',
+    contract_version: 'async_context.contract_version',
+    expected_event_type: 'async_context.expected_event_type',
+    idempotency_key_base: 'async_context.idempotency_key_base',
+  };
+}
+
+function capabilityBindingCreateTemplate(source, capabilityBindings = [], capabilities = [], mcpEnvironments = []) {
+  const capabilityId = source?.capability_id || capabilities[0]?.capability_id || '';
+  const capability = capabilityById(capabilities, capabilityId) || {};
+  const environmentId = source?.environment_id || mcpEnvironments[0]?.environment_id || '';
+  const executionMode = source?.execution_mode || (capability.execution_modes || [])[0] || 'sync';
+  return {
+    binding_id: nextConfigItemId(`binding.${capabilityId || 'capability'}.primary`, capabilityBindings, 'binding_id'),
+    capability_id: capabilityId,
+    environment_id: environmentId,
+    mcp_tool_name: source?.mcp_tool_name || capabilityId,
+    execution_mode: executionMode,
+    status: 'draft',
+    input_mapping: source?.input_mapping || {},
+    output_mapping: source?.output_mapping || {},
+    async_context_mapping: executionMode === 'async'
+      ? (source?.async_context_mapping || defaultAsyncContextMapping())
+      : (source?.async_context_mapping || {}),
+  };
+}
+
+function renderCapabilityBindingEditor({ binding, capabilityBindings = [], capabilities = [], mcpEnvironments = [] } = {}) {
+  if (state.capabilityBindingOperation === 'delete') {
+    if (!binding?.binding_id) {
+      return '<div class="empty">Нет выбранного capability binding для удаления.</div>';
+    }
+    return `
+      <form class="scenario-editor panel" data-form="capability-binding-delete">
+        <div>
+          <div class="metric-label">Удаляемый capability binding</div>
+          <div class="scenario-title">${escapeHtml(capabilityBindingLabel(binding))}</div>
+        </div>
+        <div class="scenario-editor-actions">
+          <button class="danger" type="submit">Удалить capability binding</button>
+        </div>
+      </form>
+    `;
+  }
+  const current = state.capabilityBindingOperation === 'create'
+    ? capabilityBindingCreateTemplate(binding, capabilityBindings, capabilities, mcpEnvironments)
+    : binding;
+  if (!current?.binding_id) {
+    return '<div class="empty">Capability binding не выбран.</div>';
+  }
+  return `
+    <form class="scenario-editor panel" data-form="capability-binding-editor">
+      ${draftInfoPanel(current)}
+      <div class="grid two">
+        <label>Binding ID
+          <input name="binding_id" value="${escapeHtml(current.binding_id)}" autocomplete="off" ${state.capabilityBindingOperation === 'modify' ? 'readonly' : ''}>
+          <span class="field-help">Стабильный ключ привязки capability к внешнему MCP окружению.</span>
+        </label>
+        <label>Статус<select name="status">${optionList(['draft', 'active', 'planned', 'disabled'], current.status || 'draft')}</select></label>
+        <label>Capability
+          <select name="capability_id">${referenceOptions(capabilities, 'capability_id', current.capability_id || '', capabilityLabel)}</select>
+        </label>
+        <label>MCP environment
+          <select name="environment_id">${referenceOptions(mcpEnvironments, 'environment_id', current.environment_id || '', mcpEnvironmentLabel)}</select>
+        </label>
+        <label>MCP tool name<input name="mcp_tool_name" value="${escapeHtml(current.mcp_tool_name || '')}" autocomplete="off"></label>
+        <label>Execution mode<select name="execution_mode">${optionList(['sync', 'async'], current.execution_mode || 'sync')}</select></label>
+      </div>
+      <label>Input mapping
+        <textarea name="input_mapping" rows="6">${escapeHtml(jsonPretty(current.input_mapping || {}))}</textarea>
+      </label>
+      <label>Output mapping
+        <textarea name="output_mapping" rows="6">${escapeHtml(jsonPretty(current.output_mapping || {}))}</textarea>
+      </label>
+      <label>Async context mapping
+        <textarea name="async_context_mapping" rows="6">${escapeHtml(jsonPretty(current.async_context_mapping || {}))}</textarea>
+      </label>
+      <div class="scenario-editor-actions">
+        <button class="primary" type="submit">${state.capabilityBindingOperation === 'create' ? 'Создать capability binding' : 'Сохранить capability binding'}</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderMcpCapabilityDiscovery({ capabilities = [], mcpEnvironments = [], capabilityBindings = [] } = {}) {
+  if (!mcpEnvironments.length) {
+    return '<div class="empty">MCP environments не настроены. Добавьте внешний MCP environment в config catalog.</div>';
+  }
+  const bindingsByEnvironment = mcpBindingsByEnvironment(capabilityBindings);
+  const rows = mcpEnvironments.map((environment) => {
+    const environmentId = environment.environment_id || '';
+    const discovery = state.mcpDiscovery[environmentId] || {};
+    const discoveryResult = discovery.result || null;
+    const importResult = discovery.importResult || null;
+    const candidates = discoveryResult?.capability_candidates || [];
+    const mode = environment.discovery_policy?.mode || 'disabled';
+    const canDiscover = mode === 'mcp_tools';
+    const canImport = canDiscover && candidates.length > 0;
+    const canActivate = canImport && importResult?.validation?.status === 'valid' && (importResult.draft_ids || []).length > 0;
+    const boundCount = (bindingsByEnvironment[environmentId] || []).length;
+    const allowedCount = (environment.allowed_capabilities || []).length;
+    return [
+      badge(environment.status || 'н/д'),
+      `<strong>${escapeHtml(labelWithDraftState(environment, environment.display_name || environmentId))}</strong><div class="meta">${escapeHtml(environmentId)}</div>`,
+      escapeHtml([
+        environment.environment_tier ? `tier ${environment.environment_tier}` : '',
+        environment.transport ? `transport ${environment.transport}` : '',
+        environment.auth_mode ? `auth ${environment.auth_mode}` : '',
+      ].filter(Boolean).join('; ') || 'н/д'),
+      `${badge(mode)}<div class="meta">allowed ${allowedCount} · bindings ${boundCount}</div>`,
+      escapeHtml(`${candidates.length} candidates / ${discoveryResult?.ignored_tools?.length || 0} ignored`),
+      [
+        `<button type="button" data-action="mcp-discover" data-environment-id="${escapeHtml(environmentId)}" ${canDiscover ? '' : 'disabled'}>Discovery</button>`,
+        `<button type="button" data-action="mcp-import-drafts" data-environment-id="${escapeHtml(environmentId)}" ${canImport ? '' : 'disabled'}>Import drafts</button>`,
+        `<button class="primary" type="button" data-action="mcp-activate-import-bundle" data-environment-id="${escapeHtml(environmentId)}" ${canActivate ? '' : 'disabled'}>Активировать пакет</button>`,
+      ].join(' '),
+    ];
+  });
+  return [
+    table(['Статус', 'Environment', 'Transport/auth', 'Discovery', 'Результат', 'Действия'], rows),
+    renderMcpDiscoveryResultDetails({ capabilities, capabilityBindings, mcpEnvironments }),
+  ].join('');
+}
+
+function mcpBindingsByEnvironment(capabilityBindings = []) {
+  return (capabilityBindings || []).reduce((accumulator, binding) => {
+    const environmentId = binding.environment_id || '';
+    if (!environmentId) return accumulator;
+    if (!accumulator[environmentId]) {
+      accumulator[environmentId] = [];
+    }
+    accumulator[environmentId].push(binding);
+    return accumulator;
+  }, {});
+}
+
+function renderMcpDiscoveryResultDetails({ mcpEnvironments = [] } = {}) {
+  const environmentById = Object.fromEntries((mcpEnvironments || []).map((environment) => [environment.environment_id, environment]));
+  const visibleResults = Object.entries(state.mcpDiscovery || {})
+    .filter(([, discovery]) => discovery?.result || discovery?.importResult || discovery?.activatedResult);
+  if (!visibleResults.length) {
+    return '<div class="empty">Discovery в текущей сессии еще не запускался.</div>';
+  }
+  return visibleResults.map(([environmentId, discovery]) => {
+    const environment = environmentById[environmentId] || {};
+    const result = discovery.result || {};
+    const candidates = result.capability_candidates || [];
+    const ignoredTools = result.ignored_tools || [];
+    const importResult = discovery.importResult || null;
+    const activatedResult = discovery.activatedResult || null;
+    const candidateRows = candidates.map((candidate) => {
+      const capability = candidate.capability || {};
+      const binding = candidate.binding || {};
+      return [
+        escapeHtml(capability.capability_id || 'н/д'),
+        escapeHtml(capability.display_name || 'н/д'),
+        escapeHtml((capability.execution_modes || []).join(', ') || 'н/д'),
+        escapeHtml(Object.keys(capability.async_event_contracts || {}).join(', ') || 'н/д'),
+        escapeHtml(binding.mcp_tool_name || 'н/д'),
+        badge(binding.execution_mode || 'н/д'),
+      ];
+    });
+    const ignoredRows = ignoredTools.map((item) => [
+      escapeHtml(item.tool_name || 'н/д'),
+      escapeHtml(item.reason || 'н/д'),
+    ]);
+    return `
+      <div class="panel">
+        <div class="metric-label">${escapeHtml(environment.display_name || environmentId)}</div>
+        <div class="meta">tools checked: ${escapeHtml(result.tools_checked ?? 'н/д')} · candidates: ${candidates.length} · ignored: ${ignoredTools.length}</div>
+        ${renderMcpImportStatus(importResult, activatedResult)}
+        ${table(['Capability', 'Название', 'Mode', 'Events', 'MCP tool', 'Binding mode'], candidateRows)}
+        ${ignoredRows.length ? table(['Ignored tool', 'Причина'], ignoredRows) : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function renderMcpImportStatus(importResult = null, activatedResult = null) {
+  if (activatedResult) {
+    return `<div class="config-draft-status" data-type="success">Пакет активирован. Версии: ${escapeHtml(configBundleVersionText(activatedResult))}.</div>`;
+  }
+  if (!importResult) {
+    return '';
+  }
+  const validationStatus = importResult.validation?.status || 'н/д';
+  const draftIds = importResult.draft_ids || [];
+  const imported = importResult.import?.imported_capability_ids || [];
+  const details = validationStatus === 'valid'
+    ? `Пакет валиден. Можно активировать.`
+    : escapeHtml(configBundleValidationMessage(importResult.validation || {}));
+  return `
+    <div class="config-draft-status" data-type="${validationStatus === 'valid' ? 'success' : 'error'}">
+      Import drafts: ${escapeHtml(draftIds.join(', ') || 'н/д')} · validation ${escapeHtml(validationStatus)} · capabilities ${escapeHtml(imported.join(', ') || 'н/д')}. ${details}
+    </div>
+  `;
+}
+
+async function discoverMcpEnvironmentCapabilities(environmentId) {
+  const result = await api(`/admin/config/mcp-environments/${encodeURIComponent(environmentId)}/discover`, {
+    method: 'POST',
+    body: JSON.stringify({ operator_id: state.actorId }),
+  });
+  state.mcpDiscovery[environmentId] = {
+    ...(state.mcpDiscovery[environmentId] || {}),
+    result,
+    importResult: null,
+    activatedResult: null,
+  };
+  setNotice(
+    `MCP discovery завершен для ${environmentId}: candidates ${result.capability_candidates?.length || 0}, ignored ${result.ignored_tools?.length || 0}.`,
+    'success',
+  );
+  await renderOperationBindings();
+}
+
+async function importMcpEnvironmentDiscoveryDrafts(environmentId) {
+  const discovery = state.mcpDiscovery[environmentId] || {};
+  const capabilityIds = (discovery.result?.capability_candidates || [])
+    .map((candidate) => candidate.capability?.capability_id)
+    .filter(Boolean);
+  const result = await api(`/admin/config/mcp-environments/${encodeURIComponent(environmentId)}/discover/import-drafts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      operator_id: state.actorId,
+      capability_ids: capabilityIds.length ? capabilityIds : null,
+    }),
+  });
+  state.mcpDiscovery[environmentId] = {
+    ...discovery,
+    importResult: result,
+    activatedResult: null,
+  };
+  const validationStatus = result.validation?.status || 'н/д';
+  setNotice(
+    `MCP import drafts создан для ${environmentId}: ${result.draft_ids?.join(', ') || 'н/д'}; validation ${validationStatus}.`,
+    validationStatus === 'valid' ? 'success' : 'warning',
+  );
+  await renderOperationBindings();
+}
+
+async function activateMcpDiscoveryImportBundle(environmentId) {
+  const discovery = state.mcpDiscovery[environmentId] || {};
+  const draftIds = discovery.importResult?.draft_ids || [];
+  if (!draftIds.length) {
+    throw new Error('Нет draft IDs для активации MCP discovery import.');
+  }
+  const result = await activateConfigDraftBundle(draftIds);
+  state.mcpDiscovery[environmentId] = {
+    ...discovery,
+    activatedResult: result,
+  };
+  setNotice(`MCP capability package активирован для ${environmentId}. Версии: ${configBundleVersionText(result)}.`, 'success');
+  await renderOperationBindings();
 }
 
 function endpointConnectionControls(endpoints) {
-  return `
-    <div class="toolbar compact">
-      <label>Подключение<select id="integrationEndpointSelect">${endpointGroupedOptions(endpoints, state.integrationEndpointId)}</select></label>
-    </div>
-    <div class="scenario-menu">
-      <button type="button" class="${state.integrationEndpointOperation === 'create' ? 'primary' : ''}" data-action="endpoint-connection-operation" data-operation="create">Создать</button>
-      <button type="button" class="${state.integrationEndpointOperation === 'modify' ? 'primary' : ''}" data-action="endpoint-connection-operation" data-operation="modify">Модифицировать</button>
-      <button type="button" class="${state.integrationEndpointOperation === 'delete' ? 'primary' : ''}" data-action="endpoint-connection-operation" data-operation="delete">Удалить</button>
-    </div>
-  `;
+  void endpoints;
+  return '';
 }
 
 function toolCatalogControls(tools) {
-  return `
-    <div class="toolbar compact">
-      <label>ReAct-вызов ИИ<select id="toolCatalogSelect">${referenceOptions(tools, 'tool_name', state.toolCatalogName, reactCallLabel)}</select></label>
-    </div>
-    <div class="scenario-menu">
-      <button type="button" class="${state.toolCatalogOperation === 'create' ? 'primary' : ''}" data-action="tool-catalog-operation" data-operation="create">Создать</button>
-      <button type="button" class="${state.toolCatalogOperation === 'modify' ? 'primary' : ''}" data-action="tool-catalog-operation" data-operation="modify">Модифицировать</button>
-      <button type="button" class="${state.toolCatalogOperation === 'delete' ? 'primary' : ''}" data-action="tool-catalog-operation" data-operation="delete">Удалить</button>
-    </div>
-  `;
+  void tools;
+  return '';
 }
 
 function operationBindingControls(tools) {
-  return `
-    <div class="scenario-menu">
-      <button type="button" class="${state.operationBindingMode === 'bind' ? 'primary' : ''}" data-action="operation-binding-mode" data-mode="bind">Привязать существующий</button>
-      <button type="button" class="${state.operationBindingMode === 'create' ? 'primary' : ''}" data-action="operation-binding-mode" data-mode="create">Создать и привязать ReAct-вызов ИИ</button>
-    </div>
-    ${state.operationBindingMode === 'bind' ? `
-      <div class="toolbar compact">
-        <label>ReAct-вызов ИИ<select id="operationBindingToolSelect">${referenceOptions(tools, 'tool_name', state.operationBindingToolName, reactCallLabel)}</select></label>
-      </div>
-    ` : ''}
-  `;
+  void tools;
+  return '';
 }
 
-function reactCallLabel(tool) {
+function legacyCallLabel(tool) {
   return tool?.description ? `${tool.tool_name} — ${tool.description}` : tool?.tool_name || '';
 }
 
@@ -6358,7 +6804,7 @@ function endpointGroupedOptions(endpoints, selectedId) {
 }
 
 function endpointAdapterGroups(endpoints) {
-  const order = ['mock', 'n8n_webhook', 'direct_http', 'queue'];
+  const order = ['mock', 'direct_http', 'queue'];
   const groups = new Map();
   for (const endpoint of endpoints || []) {
     const key = endpoint.adapter_type || 'unknown';
@@ -6497,11 +6943,11 @@ function defaultEndpointTransportSecurity(endpoint = {}) {
   return {
     http: {
       policy: 'admin_configured',
-      base_url_env: endpoint.base_url_env || 'N8N_WEBHOOK_BASE_URL',
+      base_url_env: endpoint.base_url_env || 'LEGACY_ENDPOINT_BASE_URL',
       callback_base_url_env: 'ORCHESTRATOR_PUBLIC_URL',
       production_recommended_scheme: 'https',
       token_header: 'X-ServiceDesk-Callback-Token',
-      token_env: 'INTEGRATION_CALLBACK_TOKEN__N8N',
+      token_env: 'INTEGRATION_CALLBACK_TOKEN__SOURCE',
     },
     kafka: {
       policy: 'admin_configured',
@@ -6538,56 +6984,13 @@ function csvList(value, fallback = []) {
 }
 
 function renderEndpointTransportSecurityEditor(endpoint = {}) {
-  if (endpoint.adapter_type !== 'n8n_webhook') {
-    return '';
-  }
-  const security = endpointTransportSecurity(endpoint);
-  return `
-    <fieldset class="launch-editor">
-      <legend>Безопасность транспорта n8n</legend>
-      <div class="meta">Этот блок описывает защиту HTTP и Kafka транспортов. Способ доставки результата конкретного запуска выбирается отдельно в async completion policy через result_transport.</div>
-      <div class="grid three">
-        <label>HTTP policy<input name="transport_http_policy" value="${escapeHtml(security.http.policy || 'admin_configured')}" readonly></label>
-        <label>Production scheme<input name="transport_http_production_scheme" value="${escapeHtml(security.http.production_recommended_scheme || 'https')}" readonly></label>
-        <label>Env базового URL<input name="transport_http_base_url_env" value="${escapeHtml(security.http.base_url_env || '')}" autocomplete="off" placeholder="N8N_WEBHOOK_BASE_URL"></label>
-        <label>Env callback URL<input name="transport_http_callback_base_url_env" value="${escapeHtml(security.http.callback_base_url_env || '')}" autocomplete="off" placeholder="ORCHESTRATOR_PUBLIC_URL"></label>
-        <label>Callback header<input name="transport_http_token_header" value="${escapeHtml(security.http.token_header || '')}" autocomplete="off" placeholder="X-ServiceDesk-Callback-Token"></label>
-        <label>Env callback token<input name="transport_http_token_env" value="${escapeHtml(security.http.token_env || '')}" autocomplete="off" placeholder="INTEGRATION_CALLBACK_TOKEN__N8N"></label>
-        <label>Kafka policy<input name="transport_kafka_policy" value="${escapeHtml(security.kafka.policy || 'admin_configured')}" readonly></label>
-        <label>Env Kafka bootstrap<input name="transport_kafka_bootstrap_servers_env" value="${escapeHtml(security.kafka.bootstrap_servers_env || '')}" autocomplete="off" placeholder="KAFKA_BOOTSTRAP_SERVERS"></label>
-        <label>Env Kafka security protocol<input name="transport_kafka_security_protocol_env" value="${escapeHtml(security.kafka.security_protocol_env || '')}" autocomplete="off" placeholder="KAFKA_SECURITY_PROTOCOL"></label>
-        <label>Kafka protocols<input name="transport_kafka_supported_security_protocols" value="${escapeHtml(csvList(security.kafka.supported_security_protocols, ['SASL_SSL', 'SSL']).join(', '))}" autocomplete="off"></label>
-        <label>Kafka auth<input name="transport_kafka_supported_auth" value="${escapeHtml(csvList(security.kafka.supported_auth, ['sasl', 'mtls']).join(', '))}" autocomplete="off"></label>
-      </div>
-      <div class="meta">Kafka не является HTTPS. Для production используйте broker ACL с SASL_SSL или SSL/mTLS; секреты задаются через env/Vault и здесь не показываются.</div>
-    </fieldset>
-  `;
+  void endpoint;
+  return '';
 }
 
 function renderEndpointContractSourceEditor(endpoint = {}) {
-  if (endpoint.adapter_type !== 'n8n_webhook') {
-    return '';
-  }
-  const source = endpointContractSource(endpoint);
-  return `
-    <fieldset class="launch-editor">
-      <legend>OpenAPI 3.1 контракт n8n</legend>
-      <div class="meta">Источник читает JSON-контракт n8n и заполняет операции подключения. Относительный URL считается от базового URL endpoint, например base_url /webhook + contracts/openapi.json = /webhook/contracts/openapi.json.</div>
-      <div class="grid three">
-        <label>Использовать OpenAPI<select name="contract_source_enabled">${booleanOptions(source.enabled !== false)}</select></label>
-        <label>Метод<select name="contract_source_method">${optionList(['GET'], source.method || 'GET')}</select></label>
-        <label>URL контракта<input name="contract_source_url" value="${escapeHtml(source.url || '')}" autocomplete="off" placeholder="contracts/openapi.json"></label>
-        <input type="hidden" name="contract_source_lang" value="${escapeHtml(adminInterfaceLanguage)}">
-      </div>
-      <div class="scenario-editor-actions">
-        <button type="button" data-action="endpoint-openapi-preview">Загрузить операции из OpenAPI</button>
-        <span class="meta" data-openapi-preview-status>Операции будут заменены данными из контракта в форме. Используемые старые операции сохраняются, чтобы не сломать связи.</span>
-      </div>
-      <div data-openapi-preview-panel>
-        ${renderOpenApiImportPreview(endpoint.endpoint_id)}
-      </div>
-    </fieldset>
-  `;
+  void endpoint;
+  return '';
 }
 
 function openApiPreviewForEndpoint(endpointId) {
@@ -6676,20 +7079,11 @@ function renderOpenApiImportPreview(endpointId) {
   }
   const result = preview.result || {};
   const operations = result.operations || {};
-  const proposedTools = result.proposed_react_calls?.tools || {};
   const operationRows = Object.entries(operations).map(([operationId, operation]) => [
     escapeHtml(operationId),
     escapeHtml(operation.display_name || operationId),
     escapeHtml(`${operation.method || 'POST'} ${operation.path || ''}`),
     badge(operation.contract_status || 'draft'),
-  ]);
-  const toolRows = Object.entries(proposedTools).map(([toolName, tool]) => [
-    escapeHtml(toolName),
-    badge(tool.action_type || 'action'),
-    escapeHtml(currentToolBinding(tool)
-      ? `${currentToolBinding(tool).endpoint_id}/${currentToolBinding(tool).operation_id}`
-      : 'без привязки'),
-    badge(tool.contract_status || 'draft'),
   ]);
   const warnings = openApiPreviewWarnings(result);
   return `
@@ -6701,7 +7095,6 @@ function renderOpenApiImportPreview(endpointId) {
     ${renderOpenApiLocalizationDiagnostics(result.contract_diagnostics)}
     ${renderTransportSecurityPreview(result.transport_security)}
     ${table(['Операция', 'Название', 'Вызов', 'Статус'], operationRows)}
-    ${table(['ReAct-вызов ИИ', 'Тип', 'Привязка', 'Статус'], toolRows)}
     <div class="scenario-editor-actions">
       <button type="button" class="primary" data-action="endpoint-openapi-apply">Применить импорт</button>
     </div>
@@ -6720,16 +7113,16 @@ function integrationEndpointUsage(endpointId, tools, workflows) {
   for (const tool of tools || []) {
     for (const binding of tool.endpoint_bindings || []) {
       if (binding.endpoint_id === endpointId) {
-        refs.push(`ReAct-вызов ИИ "${tool.tool_name}", операция "${binding.operation_id}"`);
+        refs.push(`legacy tool "${tool.tool_name}", операция "${binding.operation_id}"`);
       }
     }
   }
   for (const workflow of workflows || []) {
     if (workflow.endpoint_id === endpointId) {
-      refs.push(`n8n workflow "${workflow.display_name || workflow.workflow_id}" как основной endpoint`);
+      refs.push(`legacy workflow "${workflow.display_name || workflow.workflow_id}" как основной endpoint`);
     }
     if (workflow.callback_endpoint_id === endpointId) {
-      refs.push(`n8n workflow "${workflow.display_name || workflow.workflow_id}" как callback endpoint`);
+      refs.push(`legacy workflow "${workflow.display_name || workflow.workflow_id}" как callback endpoint`);
     }
   }
   return refs;
@@ -6747,7 +7140,7 @@ function integrationOperationToolUsage(endpointId, operationId, tools) {
   for (const tool of tools || []) {
     for (const binding of tool.endpoint_bindings || []) {
       if (binding.endpoint_id === endpointId && binding.operation_id === operationId) {
-        refs.push(`ReAct-вызов ИИ "${tool.tool_name}"`);
+        refs.push(`legacy tool "${tool.tool_name}"`);
       }
     }
   }
@@ -6758,7 +7151,7 @@ function integrationOperationWorkflowUsage(endpointId, operationId, workflows) {
   const refs = [];
   for (const workflow of workflows || []) {
     if (workflow.endpoint_id === endpointId && (workflow.operations || []).includes(operationId)) {
-      refs.push(`n8n workflow "${workflow.display_name || workflow.workflow_id}"`);
+      refs.push(`legacy workflow "${workflow.display_name || workflow.workflow_id}"`);
     }
   }
   return refs;
@@ -6794,9 +7187,7 @@ function endpointCreateTemplate(source, endpoints) {
     base_url: template.base_url || '',
     base_url_env: template.base_url_env || '',
     auth: template.auth || { type: 'none' },
-    contract_source: adapterType === 'n8n_webhook'
-      ? endpointContractSource(template)
-      : undefined,
+    contract_source: undefined,
     operations: {
       custom_operation: {
         display_name: 'Новая операция',
@@ -6858,14 +7249,14 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
           <span class="field-help">Стабильный ключ подключения. Используется в логах, bindings и callback URL.</span>
         </label>
         <label>Название<input name="display_name" value="${escapeHtml(current.display_name || '')}" autocomplete="off"></label>
-        <label>Тип адаптера<select name="adapter_type">${activeOptionList(activeEndpointAdapterTypes, current.adapter_type)}</select></label>
+        <label>Adapter type<select name="adapter_type">${activeOptionList(activeEndpointAdapterTypes, current.adapter_type)}</select></label>
         <label>Включен<select name="enabled">${booleanOptions(current.enabled)}</select></label>
         <label>Причина отключения<input name="disabled_reason" value="${escapeHtml(current.disabled_reason || '')}" autocomplete="off"></label>
-        <label>Базовый URL<input name="base_url" value="${escapeHtml(current.base_url || '')}" autocomplete="off" placeholder="http://127.0.0.1:5678/webhook"></label>
-        <label>Env-переменная базового URL<input name="base_url_env" value="${escapeHtml(current.base_url_env || '')}" autocomplete="off" placeholder="N8N_WEBHOOK_BASE_URL"></label>
+        <label>Базовый URL<input name="base_url" value="${escapeHtml(current.base_url || '')}" autocomplete="off" placeholder="http://127.0.0.1/mock"></label>
+        <label>Env-переменная базового URL<input name="base_url_env" value="${escapeHtml(current.base_url_env || '')}" autocomplete="off" placeholder="LEGACY_ENDPOINT_BASE_URL"></label>
         <label>Тип авторизации<select name="auth_type">${optionList(['none', 'header_token', 'bearer_token'], current.auth?.type || 'none')}</select></label>
         <label>Имя заголовка<input name="auth_header_name" value="${escapeHtml(current.auth?.header_name || '')}" autocomplete="off" placeholder="X-ServiceDesk-Token"></label>
-        <label>Env-переменная токена<input name="auth_token_env" value="${escapeHtml(current.auth?.token_env || '')}" autocomplete="off" placeholder="N8N_WEBHOOK_TOKEN"></label>
+        <label>Env-переменная токена<input name="auth_token_env" value="${escapeHtml(current.auth?.token_env || '')}" autocomplete="off" placeholder="LEGACY_ENDPOINT_TOKEN"></label>
       </div>
       ${renderEndpointContractSourceEditor(current)}
       ${renderEndpointTransportSecurityEditor(current)}
@@ -6877,7 +7268,7 @@ function renderEndpointConnectionEditor({ endpoint, endpoints, tools, workflows 
             <span>${escapeHtml(operationCount ? `Настроено операций: ${operationCount}` : 'Операции не настроены')}</span>
           </div>
         </summary>
-        <div class="meta">Операция описывает конкретный технический вызов: путь webhook, HTTP-метод, topic или тестовый ответ mock.</div>
+        <div class="meta">Endpoint operations удалены из runtime. Настраивайте внешнее исполнение через MCP environments, capabilities и capability bindings.</div>
         <div id="endpointOperationCards" class="slot-card-list">${operationCards}</div>
         <button type="button" data-action="endpoint-operation-add">Добавить операцию</button>
       </details>
@@ -7250,9 +7641,18 @@ function toolCreateTemplate(source, tools, endpoints) {
 }
 
 function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, channels }) {
+  void tool;
+  void tools;
+  void matrices;
+  void resolutionProfiles;
+  void channels;
+  return '<div class="empty">Старый catalog вызовов удален. Используйте раздел MCP: capabilities и capability bindings.</div>';
+}
+
+function renderRemovedToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, channels }) {
   if (state.toolCatalogOperation === 'delete') {
     if (!tool?.tool_name) {
-      return '<div class="empty">Нет выбранного ReAct-вызова ИИ для удаления</div>';
+      return '<div class="empty">Нет выбранного старого вызова для удаления</div>';
     }
     void matrices;
     void resolutionProfiles;
@@ -7260,10 +7660,10 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
     return `
       <form class="scenario-editor panel" data-form="tool-catalog-delete">
         <div>
-          <div class="metric-label">Удаляемый ReAct-вызов ИИ</div>
+          <div class="metric-label">Удаляемый старый вызов</div>
           <div class="scenario-title">${escapeHtml(tool.tool_name)}</div>
         </div>
-        <button class="danger" type="submit">Удалить ReAct-вызов ИИ</button>
+        <button class="danger" type="submit">Удалить старый вызов</button>
       </form>
     `;
   }
@@ -7271,7 +7671,7 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
     ? toolCreateTemplate(tool, tools)
     : tool;
   if (!current?.tool_name) {
-    return '<div class="empty">ReAct-вызов ИИ не выбран</div>';
+    return '<div class="empty">Старый вызов не выбран</div>';
   }
   const policy = current.policy || {};
   const retry = policy.retry || {};
@@ -7279,9 +7679,9 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
     <form class="scenario-editor panel" data-form="tool-catalog-editor">
       ${draftInfoPanel(current)}
       <div class="grid two">
-        <label>Техническое имя ReAct-вызова
+        <label>Техническое имя старого вызова
           <input name="tool_name" value="${escapeHtml(current.tool_name)}" autocomplete="off" ${state.toolCatalogOperation === 'modify' ? 'readonly' : ''}>
-          <span class="field-help">Стабильное имя вызова, который может выбрать ИИ в ReAct-loop. Используется в профилях разрешения и аудите.</span>
+          <span class="field-help">Старый contract удален. Используйте capabilities и capability bindings.</span>
         </label>
         <label>Тип действия<select name="action_type">${optionList(['read_only', 'action'], current.action_type)}</select></label>
         <label>Версия контракта<input name="contract_version" value="${escapeHtml(current.contract_version || '1.0')}" autocomplete="off"></label>
@@ -7289,7 +7689,7 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
       </div>
       <label>Описание<textarea name="description" rows="3">${escapeHtml(current.description || '')}</textarea></label>
       <fieldset class="launch-editor">
-        <legend>Политика ReAct-вызова</legend>
+        <legend>Политика старого вызова</legend>
         <div class="grid two">
           <label>Таймаут по умолчанию, сек<input name="default_timeout_seconds" type="number" min="1" max="120" value="${escapeHtml(policy.default_timeout_seconds || 10)}"></label>
           <label>Максимальный риск<select name="max_risk_level">${optionList(['low', 'medium', 'high', 'critical'], policy.max_risk_level || 'medium')}</select></label>
@@ -7305,7 +7705,7 @@ function renderToolCatalogEditor({ tool, tools, matrices, resolutionProfiles, ch
         <label>JSON Schema результата<textarea name="result_schema" rows="8">${escapeHtml(jsonPretty(current.result_schema || { type: 'object', additionalProperties: true }))}</textarea></label>
       </fieldset>
       <div class="scenario-editor-actions">
-        <button class="primary" type="submit">${state.toolCatalogOperation === 'create' ? 'Создать ReAct-вызов ИИ' : 'Сохранить ReAct-вызов ИИ'}</button>
+        <button class="primary" type="submit">${state.toolCatalogOperation === 'create' ? 'Создать старый вызов' : 'Сохранить старый вызов'}</button>
       </div>
     </form>
   `;
@@ -7338,8 +7738,17 @@ function operationBindingTarget(endpoints, currentBinding = null) {
 }
 
 function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionProfiles, channels }) {
+  void tool;
+  void endpoints;
+  void matrices;
+  void resolutionProfiles;
+  void channels;
+  return '<div class="empty">Старые operation bindings удалены. Используйте MCP capability bindings.</div>';
+}
+
+function renderRemovedOperationBindingEditor({ tool, endpoints, matrices, resolutionProfiles, channels }) {
   if (!tool?.tool_name) {
-    return '<div class="empty">ReAct-вызов ИИ не выбран</div>';
+    return '<div class="empty">Старый вызов не выбран</div>';
   }
   const currentBinding = selectedOperationBinding(tool);
   const usage = toolUsage(tool.tool_name, matrices, resolutionProfiles, channels);
@@ -7357,8 +7766,8 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
     <form class="scenario-editor panel" data-form="operation-binding-editor">
       ${draftInfoPanel(tool)}
       <div class="slot-schema-derived">
-        <div class="metric-label">ReAct-вызов ИИ</div>
-        <div class="meta">${escapeHtml(reactCallLabel(tool))}</div>
+        <div class="metric-label">Старый вызов</div>
+        <div class="meta">${escapeHtml(legacyCallLabel(tool))}</div>
       </div>
       <div class="slot-schema-derived">
         <div class="metric-label">Текущая привязка</div>
@@ -7374,12 +7783,12 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
       </div>
       <fieldset class="launch-editor">
         <legend>Входные параметры endpoint</legend>
-        <div class="meta">Здесь выбирается, какие параметры endpoint-операции видит ReAct-вызов. Слоты сценария сюда не подставляются: они заполняют параметры ReAct в профиле разрешения слота.</div>
+        <div class="meta">Старые operation bindings удалены. Используйте capability input schema и binding parameters.</div>
         ${renderOperationParameterVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       <fieldset class="launch-editor">
-        <legend>Поля ответа, доступные ReAct</legend>
-        <div class="meta">Можно вернуть в ReAct-результат любой набор полей endpoint-ответа и задать для них понятные имена.</div>
+        <legend>Поля ответа endpoint</legend>
+        <div class="meta">Legacy operation bindings удалены. Поля ответа задаются в capability output schema.</div>
         ${renderOperationResultVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       ${operationBindingCompatibilityPanel(compatibility)}
@@ -7392,13 +7801,13 @@ function renderOperationBindingEditor({ tool, endpoints, matrices, resolutionPro
   `;
 }
 
-function defaultReactCallNameForOperation(operationId, tools) {
+function defaultLegacyCallNameForOperation(operationId, tools) {
   const existing = new Set((tools || []).map((tool) => tool.tool_name));
-  const base = String(operationId || 'custom_react_call')
+  const base = String(operationId || 'custom_capability')
     .toLowerCase()
     .replace(/[^a-z0-9_.-]+/g, '_')
     .replace(/^_+/, '')
-    || 'custom_react_call';
+    || 'custom_capability';
   if (!existing.has(base)) {
     return base;
   }
@@ -7411,9 +7820,9 @@ function defaultReactCallNameForOperation(operationId, tools) {
   return candidate;
 }
 
-function defaultReactCallDescription(operationId, operation = {}) {
+function defaultLegacyCallDescription(operationId, operation = {}) {
   const label = operation.display_name || operationId || 'endpoint-операция';
-  return operation.description || `ReAct-вызов ИИ для операции "${label}".`;
+  return operation.description || `Старый вызов для операции "${label}".`;
 }
 
 function defaultOperationBindingPolicy(actionType, operation = {}) {
@@ -7430,7 +7839,7 @@ function defaultOperationBindingPolicy(actionType, operation = {}) {
   };
 }
 
-function createReactCallTemplateFromOperation({ toolName, actionType, description, operation }) {
+function createLegacyCallTemplateFromOperation({ toolName, actionType, description, operation }) {
   return {
     tool_name: toolName,
     action_type: actionType,
@@ -7451,12 +7860,12 @@ function renderOperationBindingCreateEditor({ tools, endpoints }) {
     selectedOperationId,
     selectedOperation,
   } = operationBindingTarget(endpoints, null);
-  const toolName = defaultReactCallNameForOperation(selectedOperationId, tools);
+  const toolName = defaultLegacyCallNameForOperation(selectedOperationId, tools);
   const actionType = 'read_only';
-  const templateTool = createReactCallTemplateFromOperation({
+  const templateTool = createLegacyCallTemplateFromOperation({
     toolName,
     actionType,
-    description: defaultReactCallDescription(selectedOperationId, selectedOperation),
+    description: defaultLegacyCallDescription(selectedOperationId, selectedOperation),
     operation: selectedOperation,
   });
   const bindingModel = operationBindingEditorModel(templateTool, selectedOperation, null, selectedEndpointId, selectedOperationId);
@@ -7464,8 +7873,8 @@ function renderOperationBindingCreateEditor({ tools, endpoints }) {
   return `
     <form class="scenario-editor panel" data-form="operation-binding-create-editor">
       <div class="slot-schema-derived">
-        <div class="metric-label">Новый ReAct-вызов ИИ</div>
-        <div class="meta">Создайте ReAct-вызов прямо из endpoint-операции. Имена параметров и полей результата ниже будут автоматически записаны в контракт ReAct.</div>
+          <div class="metric-label">Legacy operation binding удален</div>
+        <div class="meta">Создание старых вызовов из endpoint-операций удалено. Используйте MCP discovery/import capability package.</div>
       </div>
       <div class="grid two">
         <label>Подключение
@@ -7474,7 +7883,7 @@ function renderOperationBindingCreateEditor({ tools, endpoints }) {
         <label>Операция
           <select name="binding_operation_id" data-operation-binding-operation>${operationOptionsForEndpoint(selectedEndpoint, selectedOperationId)}</select>
         </label>
-        <label>Техническое имя ReAct-вызова
+        <label>Техническое имя legacy вызова
           <input name="tool_name" value="${escapeHtml(toolName)}" autocomplete="off">
           <span class="field-help">По умолчанию берется имя endpoint-операции. Если такое имя уже занято, добавляется суффикс.</span>
         </label>
@@ -7483,16 +7892,16 @@ function renderOperationBindingCreateEditor({ tools, endpoints }) {
         </label>
       </div>
       <label>Описание
-        <textarea name="description" rows="3">${escapeHtml(defaultReactCallDescription(selectedOperationId, selectedOperation))}</textarea>
+        <textarea name="description" rows="3">${escapeHtml(defaultLegacyCallDescription(selectedOperationId, selectedOperation))}</textarea>
       </label>
       <fieldset class="launch-editor">
         <legend>Входные параметры endpoint</legend>
-        <div class="meta">Отметьте, какие endpoint-параметры будут параметрами нового ReAct-вызова. Константы и секреты попадут только в технический payload.</div>
+        <div class="meta">Старый редактор удален. В новых сценариях параметры задаются через capability input schema.</div>
         ${renderOperationParameterVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       <fieldset class="launch-editor">
-        <legend>Поля ответа, доступные ReAct</legend>
-        <div class="meta">Выберите поля endpoint-ответа, которые должен возвращать новый ReAct-вызов.</div>
+        <legend>Поля ответа endpoint</legend>
+        <div class="meta">Legacy operation bindings удалены. Поля ответа задаются в capability output schema.</div>
         ${renderOperationResultVisibilityEditor(bindingModel.tool, selectedOperation, bindingModel.binding)}
       </fieldset>
       ${operationBindingCompatibilityPanel(compatibility)}
@@ -7581,14 +7990,14 @@ function operationParameterNames(operation = {}, parameterMapping = {}) {
   ]));
 }
 
-function reactParameterNames(tool = {}) {
+function legacyParameterNames(tool = {}) {
   return Array.from(new Set([
     ...schemaRequired(tool.parameters_schema || {}),
     ...Object.keys(schemaProperties(tool.parameters_schema || {})),
   ]));
 }
 
-function reactResultFieldNames(tool = {}) {
+function legacyResultFieldNames(tool = {}) {
   return Array.from(new Set([
     ...schemaRequired(tool.result_schema || {}),
     ...schemaResultFieldNames(tool.result_schema || {}),
@@ -7629,7 +8038,7 @@ function isEndpointParameterAlias(name, names, schema = {}) {
   return canonicalName !== value && names.has(canonicalName);
 }
 
-function isVisibleReactEndpointParameter(name, names, schema = {}) {
+function isVisibleLegacyEndpointParameter(name, names, schema = {}) {
   return !systemOperationParameters.has(name) && !isEndpointParameterAlias(name, names, schema);
 }
 
@@ -7638,8 +8047,8 @@ function defaultVisibleParameterMapping(operation = {}) {
   const names = new Set(operationParameterNames(operation, {}));
   const properties = schemaProperties(operation.request_schema || defaultOperationRequestSchema());
   for (const parameterName of names) {
-    if (!isVisibleReactEndpointParameter(parameterName, names, properties[parameterName])) continue;
-    result[parameterName] = `react:${parameterName}`;
+    if (!isVisibleLegacyEndpointParameter(parameterName, names, properties[parameterName])) continue;
+    result[parameterName] = `legacy:${parameterName}`;
   }
   return result;
 }
@@ -7680,9 +8089,9 @@ function visibleContractFromBinding(operation = {}, binding = {}) {
   const endpointNames = new Set(operationParameterNames(operation, binding.parameter_mapping || {}));
   const endpointProperties = schemaProperties(requestSchema);
   for (const [endpointParameter, sourceRef] of Object.entries(binding.parameter_mapping || {})) {
-    if (!isVisibleReactEndpointParameter(endpointParameter, endpointNames, endpointProperties[endpointParameter])) continue;
+    if (!isVisibleLegacyEndpointParameter(endpointParameter, endpointNames, endpointProperties[endpointParameter])) continue;
     const parsed = parseBindingString(sourceRef);
-    if (parsed.source !== 'react' || !parsed.value) continue;
+    if (parsed.source !== 'legacy' || !parsed.value) continue;
     parameterProperties[parsed.value] = schemaPropertyForName(requestSchema, endpointParameter, parsed.value);
     if (requestRequired.has(endpointParameter)) {
       parameterRequired.push(parsed.value);
@@ -7693,10 +8102,10 @@ function visibleContractFromBinding(operation = {}, binding = {}) {
   const resultRequired = [];
   const responseSchema = operationTerminalResultSchema(operation);
   const responseRequired = new Set(schemaRequired(responseSchema));
-  for (const [reactField, endpointPath] of Object.entries(binding.result_mapping || {})) {
-    resultProperties[reactField] = schemaPropertyForName(responseSchema, endpointPath, reactField);
+  for (const [legacyField, endpointPath] of Object.entries(binding.result_mapping || {})) {
+    resultProperties[legacyField] = schemaPropertyForName(responseSchema, endpointPath, legacyField);
     if (responseRequired.has(endpointPath)) {
-      resultRequired.push(reactField);
+      resultRequired.push(legacyField);
     }
   }
 
@@ -7734,7 +8143,7 @@ function operationBindingEditorModel(tool, operation, currentBinding, endpointId
 function operationMappingSourceOptions(selected, endpointRequired = false) {
   return [
     `<option value="" ${!selected ? 'selected' : ''}>${endpointRequired ? 'не задано' : 'не использовать'}</option>`,
-    ...['react', 'constant', 'secret'].map(
+    ...['legacy', 'constant', 'secret'].map(
       (value) => `<option value="${escapeHtml(value)}" ${value === selected ? 'selected' : ''}>${escapeHtml(visibleLabels[value] || value)}</option>`,
     ),
   ].join('');
@@ -7747,7 +8156,7 @@ function renderOperationParameterVisibilityRow(parameterName, sourceRef, tool, o
   const requestSchema = operation.request_schema || defaultOperationRequestSchema();
   const schema = schemaProperties(requestSchema)[parameterName] || null;
   const endpointRequired = schemaRequired(requestSchema).includes(parameterName);
-  const reactRequired = source === 'react'
+  const legacyRequired = source === 'legacy'
     ? schemaRequired(tool.parameters_schema || {}).includes(value)
     : endpointRequired;
   return `
@@ -7761,15 +8170,15 @@ function renderOperationParameterVisibilityRow(parameterName, sourceRef, tool, o
         <label>Источник значения
           <select data-operation-param-source name="operation_mapping_source_${rowIndex}">${operationMappingSourceOptions(source, endpointRequired)}</select>
         </label>
-        <label data-operation-param-react-wrap ${source === 'react' ? '' : 'hidden'}>Имя параметра ReAct
-          <input data-operation-param-react name="operation_mapping_react_${rowIndex}" value="${source === 'react' ? escapeHtml(value || parameterName) : escapeHtml(parameterName)}" autocomplete="off">
+        <label data-operation-param-legacy-wrap ${source === 'legacy' ? '' : 'hidden'}>Имя старого параметра
+          <input data-operation-param-legacy name="operation_mapping_legacy_${rowIndex}" value="${source === 'legacy' ? escapeHtml(value || parameterName) : escapeHtml(parameterName)}" autocomplete="off">
           <span class="field-help">Это имя увидит оркестратор. Слоты сценария настраиваются в профиле разрешения слота.</span>
         </label>
-        <label data-operation-param-react-wrap ${source === 'react' ? '' : 'hidden'}>Обязателен для ReAct
-          <select data-operation-param-react-required name="operation_mapping_react_required_${rowIndex}">${booleanOptions(reactRequired)}</select>
+        <label data-operation-param-legacy-wrap ${source === 'legacy' ? '' : 'hidden'}>Обязателен для старого контракта
+          <select data-operation-param-legacy-required name="operation_mapping_legacy_required_${rowIndex}">${booleanOptions(legacyRequired)}</select>
         </label>
-        <label data-operation-param-value-wrap ${source && source !== 'react' ? '' : 'hidden'}>Параметр или значение
-          <input data-operation-param-value name="operation_mapping_value_${rowIndex}" value="${source && source !== 'react' ? escapeHtml(value) : ''}" autocomplete="off" placeholder="${source === 'secret' ? 'ENV_NAME' : 'значение'}">
+        <label data-operation-param-value-wrap ${source && source !== 'legacy' ? '' : 'hidden'}>Параметр или значение
+          <input data-operation-param-value name="operation_mapping_value_${rowIndex}" value="${source && source !== 'legacy' ? escapeHtml(value) : ''}" autocomplete="off" placeholder="${source === 'secret' ? 'ENV_NAME' : 'значение'}">
         </label>
       </div>
     </div>
@@ -7802,21 +8211,21 @@ function renderOperationParameterVisibilityEditor(tool, operation, binding) {
 
 function resultMappingByEndpointField(resultMapping = {}) {
   const result = {};
-  for (const [reactField, endpointPath] of Object.entries(resultMapping || {})) {
+  for (const [legacyField, endpointPath] of Object.entries(resultMapping || {})) {
     if (!result[endpointPath]) {
-      result[endpointPath] = reactField;
+      result[endpointPath] = legacyField;
     }
   }
   return result;
 }
 
-function renderOperationResultVisibilityRow(endpointFieldName, reactFieldName, tool, operation, rowIndex) {
+function renderOperationResultVisibilityRow(endpointFieldName, legacyFieldName, tool, operation, rowIndex) {
   const responseSchema = operationTerminalResultSchema(operation);
   const schema = schemaProperties(responseSchema)[endpointFieldName] || null;
   const endpointRequired = schemaRequired(responseSchema).includes(endpointFieldName);
-  const included = Boolean(reactFieldName);
-  const reactRequired = included
-    ? schemaRequired(tool.result_schema || {}).includes(reactFieldName)
+  const included = Boolean(legacyFieldName);
+  const legacyRequired = included
+    ? schemaRequired(tool.result_schema || {}).includes(legacyFieldName)
     : endpointRequired;
   return `
     <div class="contract-field-row operation-contract-row" data-operation-result-row>
@@ -7826,14 +8235,14 @@ function renderOperationResultVisibilityRow(endpointFieldName, reactFieldName, t
         <span>${escapeHtml(schemaMetaLine(endpointFieldName, schema, endpointRequired, ' поле endpoint-ответа'))}</span>
       </div>
       <div class="grid three">
-        <label>Вернуть в ReAct
+        <label>Вернуть в старый контракт
           <select data-operation-result-include name="operation_result_include_${rowIndex}">${booleanOptions(included)}</select>
         </label>
-        <label data-operation-result-react-wrap ${included ? '' : 'hidden'}>Имя поля результата ReAct
-          <input data-operation-result-name name="operation_result_name_${rowIndex}" value="${escapeHtml(reactFieldName || endpointFieldName)}" autocomplete="off">
+        <label data-operation-result-legacy-wrap ${included ? '' : 'hidden'}>Имя старого поля результата
+          <input data-operation-result-name name="operation_result_name_${rowIndex}" value="${escapeHtml(legacyFieldName || endpointFieldName)}" autocomplete="off">
         </label>
-        <label data-operation-result-react-wrap ${included ? '' : 'hidden'}>Обязательное поле результата
-          <select data-operation-result-required name="operation_result_required_${rowIndex}">${booleanOptions(reactRequired)}</select>
+        <label data-operation-result-legacy-wrap ${included ? '' : 'hidden'}>Обязательное поле результата
+          <select data-operation-result-required name="operation_result_required_${rowIndex}">${booleanOptions(legacyRequired)}</select>
         </label>
       </div>
     </div>
@@ -7841,7 +8250,7 @@ function renderOperationResultVisibilityRow(endpointFieldName, reactFieldName, t
 }
 
 function renderOperationResultVisibilityEditor(tool, operation, binding) {
-  const endpointToReact = resultMappingByEndpointField(binding?.result_mapping || {});
+  const endpointToLegacy = resultMappingByEndpointField(binding?.result_mapping || {});
   const names = operationResponseFieldNames(operation, binding?.result_mapping || {});
   if (!names.length) {
     return '<div class="empty" data-operation-result-mapping>У endpoint-операции нет описанных полей ответа.</div>';
@@ -7850,7 +8259,7 @@ function renderOperationResultVisibilityEditor(tool, operation, binding) {
     <div class="operation-contract-list" data-operation-result-mapping>
       ${names.map((name, index) => renderOperationResultVisibilityRow(
         name,
-        endpointToReact[name] || '',
+        endpointToLegacy[name] || '',
         tool,
         operation,
         index,
@@ -7863,7 +8272,7 @@ function operationBindingCompatibility(tool, operation, binding) {
   const errors = [];
   const parameterMapping = binding?.parameter_mapping || {};
   const resultMapping = binding?.result_mapping || {};
-  const reactParameters = new Set(reactParameterNames(tool));
+  const legacyParameters = new Set(legacyParameterNames(tool));
   const endpointParameters = new Set(operationParameterNames(operation, parameterMapping));
   for (const required of schemaRequired(operation.request_schema || {})) {
     if (!parameterMapping[required]) {
@@ -7875,23 +8284,23 @@ function operationBindingCompatibility(tool, operation, binding) {
       errors.push(`маппинг ссылается на неизвестный параметр endpoint: ${endpointParameter}`);
     }
     const parsed = parseBindingString(sourceRef);
-    if (parsed.source === 'react' && !reactParameters.has(parsed.value)) {
-      errors.push(`маппинг параметра ${endpointParameter} ссылается на неизвестный параметр ReAct: ${parsed.value}`);
+    if (parsed.source === 'legacy' && !legacyParameters.has(parsed.value)) {
+      errors.push(`маппинг параметра ${endpointParameter} ссылается на неизвестный старый параметр: ${parsed.value}`);
     }
   }
-  const reactResultFields = new Set(reactResultFieldNames(tool));
+  const legacyResultFields = new Set(legacyResultFieldNames(tool));
   const endpointResponseFields = new Set(operationResponseFieldNames(operation, resultMapping));
   for (const required of schemaRequired(tool.result_schema || {})) {
     if (!resultMapping[required]) {
-      errors.push(`не заполнено обязательное поле результата ReAct: ${required}`);
+      errors.push(`не заполнено обязательное поле старого результата: ${required}`);
     }
   }
-  for (const [reactField, endpointPath] of Object.entries(resultMapping)) {
-    if (!reactResultFields.has(reactField)) {
-      errors.push(`маппинг результата ссылается на неизвестное поле ReAct: ${reactField}`);
+  for (const [legacyField, endpointPath] of Object.entries(resultMapping)) {
+    if (!legacyResultFields.has(legacyField)) {
+      errors.push(`маппинг результата ссылается на неизвестное старое поле: ${legacyField}`);
     }
     if (!endpointResponseFields.has(endpointPath)) {
-      errors.push(`маппинг результата ${reactField} ссылается на неизвестное поле endpoint: ${endpointPath}`);
+      errors.push(`маппинг результата ${legacyField} ссылается на неизвестное поле endpoint: ${endpointPath}`);
     }
   }
   return {
@@ -7905,47 +8314,36 @@ function operationBindingCompatibilityPanel(compatibility) {
   return `
     <div class="slot-schema-derived">
       <div class="metric-label">Совместимость контрактов</div>
-      <div class="meta">${badge(compatibility.status)} ${escapeHtml(errors.length ? 'Привязка требует исправления.' : 'ReAct-контракт и endpoint-контракт согласованы.')}</div>
+      <div class="meta">${badge(compatibility.status)} ${escapeHtml(errors.length ? 'Привязка требует исправления.' : 'Старый контракт и endpoint-контракт согласованы.')}</div>
       ${errors.length ? `<ul class="usage-list">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join('')}</ul>` : ''}
     </div>
   `;
 }
 
 function toolUsage(toolName, matrices, resolutionProfiles, channels) {
+  void toolName;
+  void matrices;
+  void resolutionProfiles;
   void channels;
-  const refs = [];
-  for (const profile of resolutionProfiles || []) {
-    if ((profile.enrichment_steps || []).some((step) => step.react_call === toolName)) {
-      refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
-    }
-  }
-  return refs;
+  return [];
 }
 
 function operationBindingUnbindDisabledReason(currentBinding, usage) {
   void usage;
   if (!currentBinding) {
-    return 'У ReAct-вызова ИИ нет текущей привязки операции.';
+    return 'У старого вызова нет текущей привязки операции.';
   }
   return 'Привязку можно отвязать.';
 }
 
 function toolBindingUsage(toolName, endpointId, operationId, matrices, resolutionProfiles, channels) {
+  void toolName;
+  void endpointId;
+  void operationId;
+  void matrices;
+  void resolutionProfiles;
   void channels;
-  const refs = [];
-  if (!toolName || !endpointId || !operationId) {
-    return refs;
-  }
-  for (const profile of resolutionProfiles || []) {
-    if ((profile.enrichment_steps || []).some((step) =>
-      step.react_call === toolName
-      && (!step.endpoint_id || step.endpoint_id === endpointId)
-      && (!step.operation_id || step.operation_id === operationId)
-    )) {
-      refs.push(`Профиль разрешения "${profile.display_name || profile.profile_id}", обогащение контекста`);
-    }
-  }
-  return refs;
+  return [];
 }
 
 async function renderWorkflow() {
@@ -8021,7 +8419,7 @@ async function renderModels() {
             ${modelRouteField(config, 'default', 'Обычные ответы')}
             ${modelRouteField(config, 'classification', 'Классификация')}
             ${modelRouteField(config, 'summarization', 'Суммаризация')}
-            ${modelRouteField(config, 'tool_selection', 'Выбор ReAct-вызовов')}
+            ${modelRouteField(config, 'capability_selection', 'Выбор capability')}
             ${modelRouteField(config, 'slot_resolution', 'Профили разрешения')}
           </div>
         </fieldset>
@@ -8073,7 +8471,7 @@ function normalizeModelConfig(config = {}) {
       default: config.routing?.default || defaultAlias,
       classification: config.routing?.classification || defaultAlias,
       summarization: config.routing?.summarization || defaultAlias,
-      tool_selection: config.routing?.tool_selection || defaultAlias,
+      capability_selection: config.routing?.capability_selection || defaultAlias,
       slot_resolution: config.routing?.slot_resolution || defaultAlias,
     },
     fallbacks: config.fallbacks || [],
@@ -8084,6 +8482,7 @@ function normalizeModelConfig(config = {}) {
       system_prompts: {
         ...rawSystemPrompts,
         slot_resolution: rawSystemPrompts.slot_resolution || DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE,
+        capability_step_assist: rawSystemPrompts.capability_step_assist || DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE,
       },
     },
     runtime: config.runtime || {},
@@ -8219,6 +8618,10 @@ async function renderSystemPrompts() {
         <label>Prompt slot resolution
           <textarea name="slot_resolution_prompt" rows="9">${escapeHtml(slotResolutionPromptTemplate(config))}</textarea>
           <span class="field-help">Доступные переменные: {{step_refs}}, {{output_slots}}, {{target_slot}}.</span>
+        </label>
+        <label>Prompt capability step assist
+          <textarea name="capability_step_assist_prompt" rows="9">${escapeHtml(capabilityStepAssistPromptTemplate(config))}</textarea>
+          <span class="field-help">Применяется при формировании структуры шага профиля разрешения из инструкции оператора.</span>
         </label>
         <div class="scenario-editor-actions">
           <button class="primary" type="submit">Сохранить системные промпты</button>
@@ -8511,24 +8914,9 @@ function endpointAuthFromFormData(data) {
 }
 
 function endpointContractSourceFromFormData(data, adapterType) {
-  if (adapterType !== 'n8n_webhook') {
-    return null;
-  }
-  const sourceUrl = String(data.get('contract_source_url') || '').trim();
-  const enabled = parseBoolean(data.get('contract_source_enabled'));
-  if (!sourceUrl && !enabled) {
-    return null;
-  }
-  if (!sourceUrl) {
-    throw new Error('Укажите URL OpenAPI-контракта n8n.');
-  }
-  return {
-    type: 'openapi_3_1',
-    enabled,
-    method: String(data.get('contract_source_method') || 'GET').trim() || 'GET',
-    url: sourceUrl,
-    lang: String(data.get('contract_source_lang') || adminInterfaceLanguage).trim() || adminInterfaceLanguage,
-  };
+  void data;
+  void adapterType;
+  return null;
 }
 
 function normalizedOpenApiContractSource(source = {}) {
@@ -8562,32 +8950,10 @@ function endpointTransportPolicyFromForm(data, name, fallback = 'admin_configure
 }
 
 function endpointTransportSecurityFromFormData(data, adapterType, currentEndpoint = {}) {
-  if (adapterType !== 'n8n_webhook') {
-    return null;
-  }
-  const defaults = endpointTransportSecurity(currentEndpoint);
-  const http = {
-    policy: endpointTransportPolicyFromForm(data, 'transport_http_policy', defaults.http.policy),
-    base_url_env: String(data.get('transport_http_base_url_env') || defaults.http.base_url_env || '').trim(),
-    callback_base_url_env: String(data.get('transport_http_callback_base_url_env') || defaults.http.callback_base_url_env || '').trim(),
-    production_recommended_scheme: 'https',
-    token_header: String(data.get('transport_http_token_header') || defaults.http.token_header || '').trim(),
-    token_env: String(data.get('transport_http_token_env') || defaults.http.token_env || '').trim(),
-  };
-  const kafka = {
-    policy: endpointTransportPolicyFromForm(data, 'transport_kafka_policy', defaults.kafka.policy),
-    bootstrap_servers_env: String(data.get('transport_kafka_bootstrap_servers_env') || defaults.kafka.bootstrap_servers_env || '').trim(),
-    security_protocol_env: String(data.get('transport_kafka_security_protocol_env') || defaults.kafka.security_protocol_env || '').trim(),
-    supported_security_protocols: csvList(
-      String(data.get('transport_kafka_supported_security_protocols') || ''),
-      csvList(defaults.kafka.supported_security_protocols, ['SASL_SSL', 'SSL']),
-    ),
-    supported_auth: csvList(
-      String(data.get('transport_kafka_supported_auth') || ''),
-      csvList(defaults.kafka.supported_auth, ['sasl', 'mtls']),
-    ),
-  };
-  return { http, kafka };
+  void data;
+  void adapterType;
+  void currentEndpoint;
+  return null;
 }
 
 function endpointExtensionsFromFormData(data, adapterType) {
@@ -8980,7 +9346,7 @@ function operationCardElement({ endpointId, operationId, operation }) {
     operationId,
     operation,
     tools: state.lastData.toolCatalog || [],
-    workflows: state.lastData.n8nWorkflows || [],
+    workflows: [],
     open: true,
   }).trim();
   return wrapper.firstElementChild;
@@ -9081,7 +9447,7 @@ async function saveToolCatalogForm(form) {
 
 async function deleteToolCatalogForm() {
   if (!state.toolCatalogName) {
-    throw new Error('ReAct-вызов ИИ для удаления не выбран.');
+    throw new Error('Старый catalog вызовов удален.');
   }
   await applyToolCatalogMutation('delete', { tool_name: state.toolCatalogName });
 }
@@ -9121,12 +9487,12 @@ async function saveOperationBindingCreateForm(form) {
   const toolName = String(data.get('tool_name') || '').trim();
   const actionType = String(data.get('action_type') || 'read_only').trim();
   if (!toolName) {
-    throw new Error('Укажите техническое имя ReAct-вызова ИИ.');
+    throw new Error('Старый редактор operation bindings удален.');
   }
-  const tool = createReactCallTemplateFromOperation({
+  const tool = createLegacyCallTemplateFromOperation({
     toolName,
     actionType,
-    description: String(data.get('description') || '').trim() || defaultReactCallDescription(operationId, endpointOperation),
+    description: String(data.get('description') || '').trim() || defaultLegacyCallDescription(operationId, endpointOperation),
     operation: endpointOperation,
   });
   tool.parameters_schema = contract.parameters_schema;
@@ -9159,8 +9525,8 @@ function parseOperationBindingContract(form, operation) {
     const parameterName = row.querySelector('[data-operation-param-name]')?.value?.trim() || '';
     const endpointRequired = row.dataset.required === 'true';
     const source = row.querySelector('[data-operation-param-source]')?.value?.trim() || '';
-    const value = source === 'react'
-      ? row.querySelector('[data-operation-param-react]')?.value?.trim() || ''
+    const value = source === 'legacy'
+      ? row.querySelector('[data-operation-param-legacy]')?.value?.trim() || ''
       : row.querySelector('[data-operation-param-value]')?.value?.trim() || '';
     if (!parameterName) continue;
     if (!source) {
@@ -9169,21 +9535,21 @@ function parseOperationBindingContract(form, operation) {
       }
       continue;
     }
-    if (!['react', 'constant', 'secret'].includes(source)) {
+    if (!['legacy', 'constant', 'secret'].includes(source)) {
       throw new Error(`Параметр endpoint ${parameterName} имеет неизвестный источник: ${source}.`);
     }
     if (!value) {
       throw new Error(
-        source === 'react'
-          ? `Параметр endpoint ${parameterName}: укажите имя параметра ReAct.`
+        source === 'legacy'
+          ? `Параметр endpoint ${parameterName}: укажите имя legacy параметра.`
           : `Параметр endpoint ${parameterName}: укажите значение для ${visibleLabels[source] || source}.`,
       );
     }
     parameter_mapping[parameterName] = `${source}:${value}`;
-    if (source === 'react') {
+    if (source === 'legacy') {
       parameterProperties[value] = parameterProperties[value]
         || schemaPropertyForName(operation.request_schema || defaultOperationRequestSchema(), parameterName, value);
-      if (parseBoolean(row.querySelector('[data-operation-param-react-required]')?.value)) {
+      if (parseBoolean(row.querySelector('[data-operation-param-legacy-required]')?.value)) {
         parameterRequired.push(value);
       }
     }
@@ -9194,17 +9560,17 @@ function parseOperationBindingContract(form, operation) {
     const endpointFieldName = row.querySelector('[data-operation-response-field-name]')?.value?.trim() || '';
     const include = parseBoolean(row.querySelector('[data-operation-result-include]')?.value);
     if (!endpointFieldName || !include) continue;
-    const reactFieldName = row.querySelector('[data-operation-result-name]')?.value?.trim() || '';
-    if (!reactFieldName) {
-      throw new Error(`Поле ответа endpoint ${endpointFieldName}: укажите имя поля результата ReAct.`);
+    const legacyFieldName = row.querySelector('[data-operation-result-name]')?.value?.trim() || '';
+    if (!legacyFieldName) {
+      throw new Error(`Поле ответа endpoint ${endpointFieldName}: укажите имя legacy поля результата.`);
     }
-    if (result_mapping[reactFieldName]) {
-      throw new Error(`Поле результата ReAct ${reactFieldName} указано несколько раз.`);
+    if (result_mapping[legacyFieldName]) {
+      throw new Error(`Поле legacy результата ${legacyFieldName} указано несколько раз.`);
     }
-    result_mapping[reactFieldName] = endpointFieldName;
-    resultProperties[reactFieldName] = schemaPropertyForName(operationTerminalResultSchema(operation), endpointFieldName, reactFieldName);
+    result_mapping[legacyFieldName] = endpointFieldName;
+    resultProperties[legacyFieldName] = schemaPropertyForName(operationTerminalResultSchema(operation), endpointFieldName, legacyFieldName);
     if (parseBoolean(row.querySelector('[data-operation-result-required]')?.value)) {
-      resultRequired.push(reactFieldName);
+      resultRequired.push(legacyFieldName);
     }
   }
 
@@ -9218,7 +9584,7 @@ function parseOperationBindingContract(form, operation) {
 
 async function deleteOperationBindingForm() {
   if (!state.operationBindingToolName) {
-    throw new Error('ReAct-вызов ИИ для отвязки не выбран.');
+    throw new Error('Старые operation bindings удалены.');
   }
   await applyOperationBindingMutation({
     operation: 'unbind',
@@ -9258,17 +9624,16 @@ async function saveScenarioForm(form) {
     escalation_policy_id: data.get('escalation_policy_id'),
     default_channel_id: data.get('default_channel_id'),
     allowed_channel_ids: selectedValues(form.elements.allowed_channel_ids),
-    allowed_react_call_names: selectedScenarioReactCallValues(form),
     audit_required: data.get('audit_required') === 'true',
     log_required: data.get('log_required') === 'true',
     tags: parseExistingScenarioTags(data.get('existing_tags')),
   });
-  const reactPolicySettings = {
-    max_iterations: parseInt(data.get('react_max_iterations'), 10),
-    consecutive_tool_errors_to_escalate: parseInt(data.get('react_consecutive_tool_errors_to_escalate'), 10),
+  const orchestrationPolicySettings = {
+    max_iterations: parseInt(data.get('orchestration_max_iterations'), 10),
+    consecutive_capability_errors_to_escalate: parseInt(data.get('orchestration_consecutive_capability_errors_to_escalate'), 10),
   };
   if (isConfigActivateAction()) {
-    scenario.orchestrator_policy_id = await ensureScenarioReactPolicy(scenario, reactPolicySettings);
+    scenario.orchestrator_policy_id = await ensureScenarioOrchestrationPolicy(scenario, orchestrationPolicySettings);
     scenario.escalation_policy_id = await ensureScenarioEscalationPolicy(scenario);
   }
   await applyScenarioMutation(state.scenarioOperation, scenario);
@@ -9707,9 +10072,9 @@ async function savePolicyForm(form) {
     policy_id: String(data.get('policy_id') || '').trim(),
     display_name: String(data.get('display_name') || '').trim(),
     max_iterations: parseInt(data.get('max_iterations'), 10),
-    consecutive_tool_errors_to_escalate: parseInt(data.get('consecutive_tool_errors_to_escalate'), 10),
+    consecutive_capability_errors_to_escalate: parseInt(data.get('consecutive_capability_errors_to_escalate'), 10),
     stop_conditions: formList(data, 'stop_conditions'),
-    allowed_react_action_groups: formList(data, 'allowed_react_action_groups'),
+    allowed_orchestration_action_groups: formList(data, 'allowed_orchestration_action_groups'),
   };
   await applyConfigItemMutation({
     domain: 'orchestrator_policy',
@@ -9720,7 +10085,7 @@ async function savePolicyForm(form) {
     referenceKey: 'orchestrator_policy_id',
     stateIdKey: 'policyId',
     stateOperationKey: 'policyOperation',
-    successNoun: 'ReAct-политика',
+    successNoun: 'Политика оркестрации',
   });
 }
 
@@ -9732,13 +10097,13 @@ async function saveConfidenceDefaultsForm(form) {
   await submitConfigPayload('orchestrator_policy', payload, active.activeVersionId, {
     successMessage: (version) => `Системные пороги уверенности сохранены. Активирована версия ${version.version_id}.`,
     onDraftSaved: async () => {
-      await renderScenarioReact();
+      await renderScenarioOrchestration();
     },
     onDraftValidated: async () => {
-      await renderScenarioReact();
+      await renderScenarioOrchestration();
     },
     onActivated: async () => {
-      await renderScenarioReact();
+      await renderScenarioOrchestration();
     },
   });
 }
@@ -9793,7 +10158,7 @@ function resetEditorReferenceHintsForm(target) {
 
 async function deletePolicyForm() {
   if (!state.policyId) {
-    throw new Error('ReAct-политика для удаления не выбрана.');
+    throw new Error('Политика оркестрации для удаления не выбрана.');
   }
   await applyConfigItemMutation({
     domain: 'orchestrator_policy',
@@ -9804,23 +10169,23 @@ async function deletePolicyForm() {
     referenceKey: 'orchestrator_policy_id',
     stateIdKey: 'policyId',
     stateOperationKey: 'policyOperation',
-    successNoun: 'ReAct-политика',
+    successNoun: 'Политика оркестрации',
   });
 }
 
-async function ensureScenarioReactPolicy(scenario, settings) {
+async function ensureScenarioOrchestrationPolicy(scenario, settings) {
   const maxIterations = Number.isFinite(settings.max_iterations) ? settings.max_iterations : 6;
-  const consecutiveErrors = Number.isFinite(settings.consecutive_tool_errors_to_escalate)
-    ? settings.consecutive_tool_errors_to_escalate
+  const consecutiveErrors = Number.isFinite(settings.consecutive_capability_errors_to_escalate)
+    ? settings.consecutive_capability_errors_to_escalate
     : 2;
   if (maxIterations < 1 || maxIterations > 20) {
     throw new Error('Лимит итераций должен быть в диапазоне 1..20.');
   }
   if (consecutiveErrors < 1 || consecutiveErrors > 10) {
-    throw new Error('Ошибок ReAct-вызовов подряд до эскалации должно быть в диапазоне 1..10.');
+    throw new Error('Ошибок capability подряд до эскалации должно быть в диапазоне 1..10.');
   }
   if (consecutiveErrors > maxIterations) {
-    throw new Error('Ошибок ReAct-вызовов подряд до эскалации не может быть больше лимита итераций.');
+    throw new Error('Ошибок capability подряд до эскалации не может быть больше лимита итераций.');
   }
 
   const active = await loadConfigEditPayload('orchestrator_policy');
@@ -9836,13 +10201,13 @@ async function ensureScenarioReactPolicy(scenario, settings) {
     ...policyForScenario({ ...scenario, orchestrator_policy_id: policyId }, policies),
     ...current,
     policy_id: policyId,
-    display_name: current.display_name || `ReAct-политика: ${scenario.display_name || scenario.scenario_id}`,
+    display_name: current.display_name || `Политика оркестрации: ${scenario.display_name || scenario.scenario_id}`,
     max_iterations: maxIterations,
-    consecutive_tool_errors_to_escalate: consecutiveErrors,
-    stop_conditions: current.stop_conditions?.length ? current.stop_conditions : defaultReactStopConditions,
-    allowed_react_action_groups: current.allowed_react_action_groups?.length
-      ? current.allowed_react_action_groups
-      : defaultReactActionGroups,
+    consecutive_capability_errors_to_escalate: consecutiveErrors,
+    stop_conditions: current.stop_conditions?.length ? current.stop_conditions : defaultOrchestrationStopConditions,
+    allowed_orchestration_action_groups: current.allowed_orchestration_action_groups?.length
+      ? current.allowed_orchestration_action_groups
+      : defaultOrchestrationActionGroups,
   };
   if (index >= 0) {
     policies[index] = nextPolicy;
@@ -9965,8 +10330,8 @@ async function savePromptPackForm(form) {
       behavior_principles: String(data.get('behavior_principles') || '').trim(),
       slot_schemas: String(data.get('slot_schemas') || '').trim(),
       classification_confidence: String(data.get('classification_confidence') || '').trim(),
-      react_planning: String(data.get('react_planning') || '').trim(),
-      tool_rules: String(data.get('tool_rules') || '').trim(),
+      orchestration: String(data.get('orchestration') || '').trim(),
+      capability_rules: String(data.get('capability_rules') || '').trim(),
       escalation_response: String(data.get('escalation_response') || '').trim(),
     },
   };
@@ -10004,8 +10369,12 @@ async function saveSystemPromptsForm(form) {
   const active = await loadConfigEditPayload('model_routing');
   const config = normalizeModelConfig(active.payload || {});
   const slotResolutionPrompt = String(data.get('slot_resolution_prompt') || '').trim();
+  const capabilityStepAssistPrompt = String(data.get('capability_step_assist_prompt') || '').trim();
   if (!slotResolutionPrompt) {
     throw new Error('Prompt slot resolution не должен быть пустым.');
+  }
+  if (!capabilityStepAssistPrompt) {
+    throw new Error('Prompt capability step assist не должен быть пустым.');
   }
   const payload = {
     ...config,
@@ -10014,6 +10383,7 @@ async function saveSystemPromptsForm(form) {
       system_prompts: {
         ...(config.settings?.system_prompts || {}),
         slot_resolution: slotResolutionPrompt,
+        capability_step_assist: capabilityStepAssistPrompt,
       },
     },
   };
@@ -10094,7 +10464,7 @@ function modelPayloadFromForm(data) {
       default: routeAlias('route_default'),
       classification: routeAlias('route_classification'),
       summarization: routeAlias('route_summarization'),
-      tool_selection: routeAlias('route_tool_selection'),
+      capability_selection: routeAlias('route_capability_selection'),
       slot_resolution: routeAlias('route_slot_resolution'),
     },
     fallbacks: enabledAliases.has(fallbackFrom) && enabledAliases.has(fallbackTo) ? [{ from: fallbackFrom, to: fallbackTo }] : [],
@@ -10108,6 +10478,7 @@ function modelPayloadFromForm(data) {
       system_prompts: {
         ...((state.lastData.modelConfig || {}).settings?.system_prompts || {}),
         slot_resolution: slotResolutionPromptTemplate(state.lastData.modelConfig || {}),
+        capability_step_assist: capabilityStepAssistPromptTemplate(state.lastData.modelConfig || {}),
       },
     },
     runtime: {
@@ -10137,7 +10508,7 @@ async function switchModelProvider(providerId) {
       default: alias,
       classification: alias,
       summarization: alias,
-      tool_selection: alias,
+      capability_selection: alias,
       slot_resolution: alias,
     },
     settings: {
@@ -10147,6 +10518,7 @@ async function switchModelProvider(providerId) {
       system_prompts: {
         ...(config.settings?.system_prompts || {}),
         slot_resolution: slotResolutionPromptTemplate(config),
+        capability_step_assist: capabilityStepAssistPromptTemplate(config),
       },
     },
     runtime: {
@@ -10300,7 +10672,6 @@ function compactScenarioPayload(scenario) {
     allowed_channel_ids: scenario.allowed_channel_ids?.length
       ? scenario.allowed_channel_ids
       : [String(scenario.default_channel_id || '').trim()].filter(Boolean),
-    allowed_react_call_names: scenario.allowed_react_call_names || [],
     audit_required: Boolean(scenario.audit_required),
     log_required: Boolean(scenario.log_required),
   };
@@ -10639,268 +11010,20 @@ async function applyPromptPackMutation(operation, promptPack) {
   });
 }
 
-async function applyIntegrationEndpointMutation(operation, endpoint) {
-  const [active, toolsActive, n8nActive] = await Promise.all([
-    loadConfigEditPayload('integration_endpoints'),
-    loadDraftAwareCollection('tools'),
-    api('/admin/config/active/n8n_workflows'),
-  ]);
-  const payload = active.payload;
-  const n8nPayload = JSON.parse(JSON.stringify(n8nActive.payload || { schema_version: '1.0', workflows: [] }));
-  const endpoints = payload.endpoints || [];
-  const endpointId = endpoint.endpoint_id;
-  const index = endpoints.findIndex((item) => item.endpoint_id === endpointId);
-  const tools = toolsActive.items || [];
-  const workflows = n8nPayload.workflows || [];
-  const clearedWorkflowRefs = [];
-  if (operation === 'create') {
-    if (index >= 0) {
-      throw new Error(`Подключение уже существует: ${endpointId}`);
-    }
-    endpoints.push(endpoint);
-  } else if (operation === 'modify') {
-    if (index < 0) {
-      throw new Error(`Подключение не найдено: ${endpointId}`);
-    }
-    const current = endpoints[index];
-    const removedOperations = Object.keys(current.operations || {})
-      .filter((operationId) => !endpoint.operations?.[operationId]);
-    for (const operationId of removedOperations) {
-      const toolUsage = integrationOperationToolUsage(endpointId, operationId, tools);
-      if (toolUsage.length && isConfigActivateAction()) {
-        throw new Error(
-          `Операция ${operationId} связана с: ${toolUsage.join('; ')}. Сначала отвяжите ReAct-вызов ИИ от операции.`,
-        );
-      }
-      if (isConfigActivateAction()) {
-        const workflowRefs = clearOperationFromN8nWorkflows(n8nPayload, endpointId, operationId);
-        clearedWorkflowRefs.push(...workflowRefs.map((workflowName) => `${workflowName}: ${operationId}`));
-      }
-    }
-    endpoints[index] = endpoint;
-  } else if (operation === 'delete') {
-    if (index < 0) {
-      throw new Error(`Подключение не найдено: ${endpointId}`);
-    }
-    const usage = integrationEndpointUsage(endpointId, tools, workflows);
-    if (usage.length && isConfigActivateAction()) {
-      throw new Error(`Подключение связано с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
-    }
-    endpoints.splice(index, 1);
-  } else {
-    throw new Error(`Неизвестная операция с подключением: ${operation}`);
-  }
-  payload.endpoints = endpoints;
-  let workflowsVersion = null;
-  if (clearedWorkflowRefs.length && isConfigActivateAction()) {
-    workflowsVersion = await activateConfigPayload('n8n_workflows', n8nPayload, n8nActive.active_version_id);
-  }
-  const actionText = configMutationActionText(operation);
-  const cleanupText = clearedWorkflowRefs.length
-    ? ` Очищены ссылки n8n workflow: ${clearedWorkflowRefs.join(', ')}. Версия workflow: ${workflowsVersion.version_id}.`
-    : '';
-  const syncSelection = async () => {
-    if (operation === 'delete') {
-      state.integrationEndpointId = endpoints[0]?.endpoint_id || '';
-    } else {
-      state.integrationEndpointId = endpointId;
-      state.integrationEndpointOperation = 'modify';
-    }
-    await renderIntegrations();
-  };
-  await submitConfigPayload('integration_endpoints', payload, active.activeVersionId, {
-    successMessage: (version) => `Подключение ${actionText}. Активирована версия ${version.version_id}.${cleanupText}`,
-    onDraftSaved: syncSelection,
-    onDraftValidated: syncSelection,
-    onActivated: syncSelection,
-  });
+async function applyIntegrationEndpointMutation() {
+  throw new Error('Legacy integration_endpoints удалены. Настраивайте исполнение через MCP environments, capabilities и capability bindings.');
 }
 
-async function applyToolCatalogMutation(operation, tool) {
-  const [active, resolutionActive, channelsActive] = await Promise.all([
-    loadConfigEditPayload('tools'),
-    loadDraftAwareCollection('attribute_resolution_profiles'),
-    loadDraftAwareCollection('interaction_channels'),
-  ]);
-  const payload = active.payload;
-  const tools = payload.tools || [];
-  const toolName = tool.tool_name;
-  const index = tools.findIndex((item) => item.tool_name === toolName);
-  const matrices = [];
-  const resolutionProfiles = resolutionActive.items || [];
-  const channels = channelsActive.items || [];
-  if (operation === 'create') {
-    if (index >= 0) {
-      throw new Error(`ReAct-вызов ИИ уже существует: ${toolName}`);
-    }
-    tools.push(tool);
-  } else if (operation === 'modify') {
-    if (index < 0) {
-      throw new Error(`ReAct-вызов ИИ не найден: ${toolName}`);
-    }
-    const current = tools[index];
-    const removedBindings = (current.endpoint_bindings || []).filter(
-      (binding) => !(tool.endpoint_bindings || []).some(
-        (nextBinding) =>
-          nextBinding.endpoint_id === binding.endpoint_id
-          && nextBinding.operation_id === binding.operation_id,
-      ),
-    );
-    for (const binding of removedBindings) {
-      const usage = toolBindingUsage(
-        toolName,
-        binding.endpoint_id,
-        binding.operation_id,
-        matrices,
-        resolutionProfiles,
-        channels,
-      );
-      if (usage.length && isConfigActivateAction()) {
-        throw new Error(
-          `Привязка операции ${binding.endpoint_id}/${binding.operation_id} связана с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`,
-        );
-      }
-    }
-    tools[index] = tool;
-  } else if (operation === 'delete') {
-    if (index < 0) {
-      throw new Error(`ReAct-вызов ИИ не найден: ${toolName}`);
-    }
-    const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
-    if (usage.length && isConfigActivateAction()) {
-      throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
-    }
-    tools.splice(index, 1);
-  } else {
-    throw new Error(`Неизвестная операция с ReAct-вызовом ИИ: ${operation}`);
-  }
-  payload.tools = tools;
-  const actionText = configMutationActionText(operation);
-  const syncSelection = async () => {
-    if (operation === 'delete') {
-      state.toolCatalogName = tools[0]?.tool_name || '';
-    } else {
-      state.toolCatalogName = toolName;
-      state.toolCatalogOperation = 'modify';
-    }
-    await renderReactCalls();
-  };
-  await submitConfigPayload('tools', payload, active.activeVersionId, {
-    successMessage: (version) => `ReAct-вызов ИИ ${actionText}. Активирована версия ${version.version_id}.`,
-    onDraftSaved: syncSelection,
-    onDraftValidated: syncSelection,
-    onActivated: syncSelection,
-  });
+async function applyToolCatalogMutation() {
+  throw new Error('Старый catalog вызовов удален. Настраивайте capabilities и capability bindings.');
 }
 
-async function applyOperationBindingMutation({
-  operation,
-  toolName,
-  binding,
-}) {
-  const [active, endpointsActive, resolutionActive, channelsActive] = await Promise.all([
-    loadConfigEditPayload('tools'),
-    loadDraftAwareCollection('integration_endpoints'),
-    loadDraftAwareCollection('attribute_resolution_profiles'),
-    loadDraftAwareCollection('interaction_channels'),
-  ]);
-  const payload = active.payload;
-  const tools = payload.tools || [];
-  const tool = tools.find((item) => item.tool_name === toolName);
-  if (!tool) {
-    throw new Error(`ReAct-вызов ИИ не найден: ${toolName}`);
-  }
-  const currentBinding = currentToolBinding(tool);
-  const matrices = [];
-  const resolutionProfiles = resolutionActive.items || [];
-  const channels = channelsActive.items || [];
-  const endpoints = endpointsActive.items || [];
-  let nextBinding = null;
-
-  if (operation === 'bind') {
-    if (!binding.endpoint_id || !binding.operation_id) {
-      throw new Error('Для привязки выберите подключение и операцию.');
-    }
-    const selectedOperation = operationForBinding(binding, endpoints);
-    if (!selectedOperation) {
-      throw new Error(`Endpoint-операция не найдена: ${binding.endpoint_id}/${binding.operation_id}`);
-    }
-    tool.parameters_schema = binding.parameters_schema || operationObjectSchema({}, []);
-    tool.result_schema = binding.result_schema || operationObjectSchema({}, []);
-    tool.contract_version = selectedOperation.contract_version || tool.contract_version || '1.0';
-    tool.contract_status = selectedOperation.contract_status || tool.contract_status || 'draft';
-    nextBinding = {
-      endpoint_id: binding.endpoint_id,
-      operation_id: binding.operation_id,
-      parameter_mapping: binding.parameter_mapping || {},
-      result_mapping: binding.result_mapping || {},
-    };
-    tool.endpoint_bindings = [nextBinding];
-  } else if (operation === 'unbind') {
-    if (!currentBinding) {
-      throw new Error('У ReAct-вызова ИИ нет текущей привязки операции.');
-    }
-    const usage = toolUsage(toolName, matrices, resolutionProfiles, channels);
-    if (usage.length && isConfigActivateAction()) {
-      throw new Error(`ReAct-вызов ИИ связан с: ${usage.join('; ')}. Автоматическая очистка таких связей пока не реализована.`);
-    }
-    tool.endpoint_bindings = [];
-  } else {
-    throw new Error(`Неизвестная операция с привязкой операции: ${operation}`);
-  }
-
-  const actionText = configMutationActionText(operation);
-  const syncSelection = async () => {
-    if (operation === 'bind') {
-      await updateOperationBindingReferences(toolName, nextBinding);
-    }
-    state.operationBindingToolName = toolName;
-    state.operationBindingLastToolName = toolName;
-    if (operation === 'unbind') {
-      state.operationBindingEndpointId = '';
-      state.operationBindingOperationId = '';
-    } else {
-      state.operationBindingEndpointId = nextBinding.endpoint_id;
-      state.operationBindingOperationId = nextBinding.operation_id;
-    }
-    await renderOperationBindings();
-  };
-  await submitConfigPayload('tools', payload, active.activeVersionId, {
-    successMessage: (version) => `Привязка операции ${actionText}. Активирована версия ${version.version_id}.`,
-    onDraftSaved: syncSelection,
-    onDraftValidated: syncSelection,
-    onActivated: syncSelection,
-  });
+async function applyOperationBindingMutation() {
+  throw new Error('Legacy operation bindings удалены. Настраивайте capability binding для внешнего MCP environment.');
 }
 
-async function applyOperationBindingCreateMutation(tool) {
-  const active = await loadConfigEditPayload('tools');
-  const payload = active.payload;
-  const tools = payload.tools || [];
-  if (tools.some((item) => item.tool_name === tool.tool_name)) {
-    throw new Error(`ReAct-вызов ИИ уже существует: ${tool.tool_name}`);
-  }
-  if (!tool.endpoint_bindings?.[0]?.endpoint_id || !tool.endpoint_bindings?.[0]?.operation_id) {
-    throw new Error('Для создания выберите подключение и операцию.');
-  }
-  tools.push(tool);
-  payload.tools = tools;
-  const binding = currentToolBinding(tool);
-  const syncSelection = async () => {
-    state.toolCatalogName = tool.tool_name;
-    state.operationBindingToolName = tool.tool_name;
-    state.operationBindingLastToolName = tool.tool_name;
-    state.operationBindingMode = 'bind';
-    state.operationBindingEndpointId = binding.endpoint_id;
-    state.operationBindingOperationId = binding.operation_id;
-    await renderOperationBindings();
-  };
-  await submitConfigPayload('tools', payload, active.activeVersionId, {
-    successMessage: (version) => `ReAct-вызов ИИ создан и привязан. Активирована версия ${version.version_id}.`,
-    onDraftSaved: syncSelection,
-    onDraftValidated: syncSelection,
-    onActivated: syncSelection,
-  });
+async function applyOperationBindingCreateMutation() {
+  throw new Error('Создание старого operation binding удалено. Используйте MCP discovery/import capability package.');
 }
 
 async function updateOperationBindingReferences(toolName, binding) {
@@ -11070,6 +11193,32 @@ async function applyConfigItemMutation({
     onDraftSaved: syncSelection,
     onDraftValidated: syncSelection,
     onActivated: syncSelection,
+  });
+}
+
+async function applyMcpEnvironmentMutation(operation, environment) {
+  await applyConfigItemMutation({
+    domain: 'mcp_environments',
+    collectionKey: 'environments',
+    idKey: 'environment_id',
+    item: environment,
+    operation,
+    stateIdKey: 'mcpEnvironmentId',
+    stateOperationKey: 'mcpEnvironmentOperation',
+    successNoun: 'MCP environment',
+  });
+}
+
+async function applyCapabilityBindingMutation(operation, binding) {
+  await applyConfigItemMutation({
+    domain: 'capability_bindings',
+    collectionKey: 'bindings',
+    idKey: 'binding_id',
+    item: binding,
+    operation,
+    stateIdKey: 'capabilityBindingId',
+    stateOperationKey: 'capabilityBindingOperation',
+    successNoun: 'Capability binding',
   });
 }
 
@@ -11296,6 +11445,7 @@ async function submitConfigPayload(domain, payload, baseVersionId, options = {})
   if (validated.validation?.status !== 'valid') {
     const message = configValidationMessage(domain, validated.validation);
     rememberConfigDraftErrorStatus(domain, message);
+    setNotice(message, 'error');
     const onDraftInvalid = options.onDraftInvalid || options.onDraftValidated;
     if (typeof onDraftInvalid === 'function') {
       await onDraftInvalid(validated);
@@ -11316,6 +11466,7 @@ async function submitConfigPayload(domain, payload, baseVersionId, options = {})
   if (checked.regression?.status === 'failed') {
     const message = 'Регрессионная проверка не пройдена.';
     rememberConfigDraftErrorStatus(domain, message);
+    setNotice(message, 'error');
     return { mode: 'regression_failed', draft: checked };
   }
 
@@ -11431,6 +11582,7 @@ async function activateExistingConfigDraft(domain, draft, successMessage) {
   if (validated.validation?.status !== 'valid') {
     const message = configValidationMessage(domain, validated.validation);
     rememberConfigDraftErrorStatus(domain, message);
+    setNotice(message, 'error');
     return { mode: 'invalid', draft: validated };
   }
   if (currentConfigSubmitAction() === 'validate') {
@@ -11443,6 +11595,7 @@ async function activateExistingConfigDraft(domain, draft, successMessage) {
   if (checked.regression?.status === 'failed') {
     const message = 'Регрессионная проверка не пройдена.';
     rememberConfigDraftErrorStatus(domain, message);
+    setNotice(message, 'error');
     return { mode: 'regression_failed', draft: checked };
   }
   const version = await activateConfigDraft(draft.draft_id);
@@ -11506,6 +11659,7 @@ async function submitResolutionProfilePayload(payload, baseVersionId, profile, a
     if (validated.validation?.status !== 'valid') {
       const message = configValidationMessage('attribute_resolution_profiles', validated.validation);
       rememberConfigDraftErrorStatus('attribute_resolution_profiles', message);
+      setNotice(message, 'error');
       return { mode: 'invalid', draft: validated };
     }
     if (action === 'validate') {
@@ -11518,6 +11672,7 @@ async function submitResolutionProfilePayload(payload, baseVersionId, profile, a
     if (checked.regression?.status === 'failed') {
       const message = 'Регрессионная проверка профиля не пройдена.';
       rememberConfigDraftErrorStatus('attribute_resolution_profiles', message);
+      setNotice(message, 'error');
       return { mode: 'regression_failed', draft: checked };
     }
     const version = await activateConfigDraft(profileDraft.draft_id);
@@ -11533,6 +11688,7 @@ async function submitResolutionProfilePayload(payload, baseVersionId, profile, a
       if (result.status !== 'valid') {
         const message = configBundleValidationMessage(result);
         rememberConfigDraftBundleErrorStatus(['attribute_resolution_profiles', 'slot_schemas'], message);
+        setNotice(message, 'error');
         return { mode: 'invalid', bundle: result };
       }
       const message = `Пакет черновиков валиден: ${bundleDraftIds.join(', ')}. Активная версия не изменена.`;
@@ -11552,6 +11708,7 @@ async function submitResolutionProfilePayload(payload, baseVersionId, profile, a
       if (error.validation) {
         const message = error.message || configBundleValidationMessage(error.validation);
         rememberConfigDraftBundleErrorStatus(['attribute_resolution_profiles', 'slot_schemas'], message);
+        setNotice(message, 'error');
         return { mode: 'invalid', bundle: error.validation };
       }
       throw error;
@@ -11721,8 +11878,8 @@ function selectedValues(select) {
     .filter(Boolean);
 }
 
-function selectedScenarioReactCallValues(form) {
-  const controls = Array.from(form?.querySelectorAll('[data-scenario-react-call]') || []);
+function selectedScenarioCapabilityValues(form) {
+  const controls = Array.from(form?.querySelectorAll('[data-scenario-capability]') || []);
   if (!controls.length) {
     return [];
   }
@@ -11753,6 +11910,106 @@ function parseJsonField(value, label) {
 
 function parseBoolean(value) {
   return String(value) === 'true';
+}
+
+function parseOptionalInteger(value, label, { min = null, max = null } = {}) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label}: укажите целое число.`);
+  }
+  if (min !== null && parsed < min) {
+    throw new Error(`${label}: значение должно быть не меньше ${min}.`);
+  }
+  if (max !== null && parsed > max) {
+    throw new Error(`${label}: значение должно быть не больше ${max}.`);
+  }
+  return parsed;
+}
+
+function parseStringMappingField(value, label) {
+  const parsed = parseJsonField(String(value || '').trim() || '{}', label);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    throw new Error(`${label}: ожидается JSON object.`);
+  }
+  const result = {};
+  Object.entries(parsed).forEach(([key, mappingValue]) => {
+    const normalizedKey = String(key || '').trim();
+    const normalizedValue = String(mappingValue ?? '').trim();
+    if (!normalizedKey || !normalizedValue || typeof mappingValue !== 'string') {
+      throw new Error(`${label}: все ключи и значения mapping должны быть непустыми строками.`);
+    }
+    result[normalizedKey] = normalizedValue;
+  });
+  return result;
+}
+
+function mcpEnvironmentFromForm(form) {
+  const data = new FormData(form);
+  const environment = {
+    environment_id: String(data.get('environment_id') || '').trim(),
+    display_name: String(data.get('display_name') || '').trim(),
+    status: String(data.get('status') || 'draft').trim(),
+    environment_tier: String(data.get('environment_tier') || 'dev').trim(),
+    transport: String(data.get('transport') || 'streamable_http').trim(),
+    base_url: String(data.get('base_url') || '').trim(),
+    auth_mode: String(data.get('auth_mode') || 'dev_bearer_token').trim(),
+    auth_ref: String(data.get('auth_ref') || '').trim(),
+    allowed_capabilities: data.getAll('allowed_capabilities').map((value) => String(value || '').trim()).filter(Boolean),
+    health_check: {
+      mode: String(data.get('health_check_mode') || 'http_get').trim(),
+    },
+    discovery_policy: {
+      mode: String(data.get('discovery_policy_mode') || 'manual').trim(),
+    },
+  };
+  const oidcAudience = String(data.get('oidc_audience') || '').trim();
+  const healthPath = String(data.get('health_check_path') || '').trim();
+  const healthTimeout = parseOptionalInteger(data.get('health_check_timeout_seconds'), 'Health timeout', { min: 1, max: 120 });
+  const discoveryRefresh = parseOptionalInteger(data.get('discovery_policy_refresh_interval_seconds'), 'Discovery refresh', { min: 60, max: 604800 });
+  if (oidcAudience) environment.oidc_audience = oidcAudience;
+  if (healthPath) environment.health_check.path = healthPath;
+  if (healthTimeout !== null) environment.health_check.timeout_seconds = healthTimeout;
+  if (discoveryRefresh !== null) environment.discovery_policy.refresh_interval_seconds = discoveryRefresh;
+  return environment;
+}
+
+async function saveMcpEnvironmentForm(form) {
+  await applyMcpEnvironmentMutation(state.mcpEnvironmentOperation, mcpEnvironmentFromForm(form));
+}
+
+async function deleteMcpEnvironmentForm() {
+  if (!state.mcpEnvironmentId) {
+    throw new Error('MCP окружение для удаления не выбрано.');
+  }
+  await applyMcpEnvironmentMutation('delete', { environment_id: state.mcpEnvironmentId });
+}
+
+function capabilityBindingFromForm(form) {
+  const data = new FormData(form);
+  return {
+    binding_id: String(data.get('binding_id') || '').trim(),
+    capability_id: String(data.get('capability_id') || '').trim(),
+    environment_id: String(data.get('environment_id') || '').trim(),
+    mcp_tool_name: String(data.get('mcp_tool_name') || '').trim(),
+    execution_mode: String(data.get('execution_mode') || 'sync').trim(),
+    status: String(data.get('status') || 'draft').trim(),
+    input_mapping: parseStringMappingField(data.get('input_mapping'), 'Input mapping'),
+    output_mapping: parseStringMappingField(data.get('output_mapping'), 'Output mapping'),
+    async_context_mapping: parseStringMappingField(data.get('async_context_mapping'), 'Async context mapping'),
+  };
+}
+
+async function saveCapabilityBindingForm(form) {
+  await applyCapabilityBindingMutation(state.capabilityBindingOperation, capabilityBindingFromForm(form));
+}
+
+async function deleteCapabilityBindingForm() {
+  if (!state.capabilityBindingId) {
+    throw new Error('Capability binding для удаления не выбран.');
+  }
+  await applyCapabilityBindingMutation('delete', { binding_id: state.capabilityBindingId });
 }
 
 function parseResolverParameterMapping(form) {
@@ -11805,47 +12062,102 @@ function parseEnrichmentParameterMapping(card) {
   return mapping;
 }
 
-function enrichmentStepBindingFromCard(card, fallbackReactCall = '') {
-  let reactCall = fallbackReactCall;
-  let endpointId = '';
-  let operationId = '';
-  const bindingValue = card.querySelector('[data-enrichment-binding]')?.value?.trim() || '';
-  const binding = parseCandidateBindingValue(bindingValue);
-  if (binding.tool_name || binding.endpoint_id || binding.operation_id) {
-    reactCall = binding.tool_name || reactCall;
-    endpointId = binding.endpoint_id || '';
-    operationId = binding.operation_id || '';
-  }
-  return { reactCall, endpointId, operationId, bindingValue };
+function parseEnrichmentOutputMapping(card, index) {
+  const value = card?.querySelector('[data-enrichment-output-mapping]')?.value;
+  if (value === undefined) return {};
+  return parseStringMappingField(value || '{}', `Шаг обогащения ${index + 1}: output mapping`);
 }
 
-function enrichmentCompletionPolicyFromCard(card, index, { reactCall, endpointId, operationId }) {
-  const completionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || 'sync';
-  const expectedEventType = card.querySelector('[data-enrichment-expected-event-type]')?.value?.trim() || '';
+function selectedResolutionOutputSlotIds(form) {
+  return new Set(currentResolutionOutputRulesFromDom(form).map((rule) => rule.slot_id).filter(Boolean));
+}
+
+function filterEnrichmentOutputMappingForSelectedSlots(mapping = {}, selectedSlotIds = new Set()) {
+  const filtered = {};
+  const removed = [];
+  for (const [slotId, fieldPath] of Object.entries(mapping || {})) {
+    if (selectedSlotIds.has(slotId)) {
+      filtered[slotId] = fieldPath;
+    } else {
+      removed.push(slotId);
+    }
+  }
+  return { filtered, removed };
+}
+
+function parseSelectedEnrichmentOutputMapping(card, index, form = card?.closest('form')) {
+  const parsed = parseEnrichmentOutputMapping(card, index);
+  const selectedSlotIds = selectedResolutionOutputSlotIds(form);
+  return filterEnrichmentOutputMappingForSelectedSlots(parsed, selectedSlotIds).filtered;
+}
+
+function outputMappingSummary(mapping = {}) {
+  const pairs = Object.entries(mapping || {});
+  return pairs.length
+    ? pairs.map(([slotId, fieldPath]) => `${slotId}<-${fieldPath}`).join(', ')
+    : 'нет';
+}
+
+function capabilityExecutionModeForCompletionMode(mode) {
+  return mode === 'external_event' ? 'async' : 'sync';
+}
+
+function activeCapabilityBindingForUi(capabilityId, { executionMode = '', environmentId = '' } = {}) {
+  const candidates = (state.lastData.capabilityBindings || []).filter((binding) =>
+    binding.capability_id === capabilityId && binding.status === 'active'
+  );
+  if (!candidates.length) return null;
+  const exact = candidates.find((binding) =>
+    (!executionMode || binding.execution_mode === executionMode)
+    && (!environmentId || binding.environment_id === environmentId)
+  );
+  if (exact) return exact;
+  if (executionMode) {
+    const byMode = candidates.find((binding) => binding.execution_mode === executionMode);
+    if (byMode) return byMode;
+  }
+  if (environmentId) {
+    const byEnvironment = candidates.find((binding) => binding.environment_id === environmentId);
+    if (byEnvironment) return byEnvironment;
+  }
+  return candidates[0];
+}
+
+function enrichmentCapabilityCompletionPolicyFromCard(card, index, capability) {
+  const defaultPolicy = capability?.default_completion_policy || {};
+  const completionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || defaultPolicy.mode || 'sync';
+  const expectedEventType = card.querySelector('[data-enrichment-expected-event-type]')?.value?.trim()
+    || defaultPolicy.expected_event_type
+    || '';
   const completionPolicy = {
     mode: completionMode,
-    max_wait_seconds: parseInt(card.querySelector('[data-enrichment-max-wait-seconds]')?.value || (completionMode === 'external_event' ? '3600' : '0'), 10),
-    timeout_action: card.querySelector('[data-enrichment-timeout-action]')?.value || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent'),
+    max_wait_seconds: parseInt(
+      card.querySelector('[data-enrichment-max-wait-seconds]')?.value
+      || String(defaultPolicy.max_wait_seconds ?? (completionMode === 'external_event' ? 3600 : 0)),
+      10,
+    ),
+    timeout_action: card.querySelector('[data-enrichment-timeout-action]')?.value
+      || defaultPolicy.timeout_action
+      || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent'),
   };
   if (completionMode !== 'external_event') {
     return { completionMode, completionPolicy };
   }
-
-  const operationRef = endpointId && operationId ? `${endpointId}/${operationId}` : reactCall || 'операция не выбрана';
-  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], endpointId, operationId);
-  const eventTypes = operationAsyncEventTypes(operation);
+  const eventTypes = Object.keys(capability?.async_event_contracts || {});
   if (!eventTypes.length) {
-    throw new Error(`Шаг обогащения ${index + 1}: external_event недоступен для ${operationRef}: операция не содержит async_event_contracts.`);
+    throw new Error(`Шаг обогащения ${index + 1}: external_event недоступен для capability ${capability?.capability_id || 'н/д'}: async_event_contracts не настроены.`);
   }
   const normalizedEventType = expectedEventType || eventTypes[0];
   if (!eventTypes.includes(normalizedEventType)) {
-    throw new Error(
-      `Шаг обогащения ${index + 1}: expected_event_type ${normalizedEventType} отсутствует в async_event_contracts операции ${operationRef}. Доступные события: ${eventTypes.join(', ')}.`,
-    );
+    throw new Error(`Шаг обогащения ${index + 1}: expected_event_type ${normalizedEventType} отсутствует в async_event_contracts capability ${capability?.capability_id || 'н/д'}.`);
   }
   completionPolicy.expected_event_type = normalizedEventType;
-  completionPolicy.result_transport = card.querySelector('[data-enrichment-result-transport]')?.value || 'kafka_event';
-  completionPolicy.result_topic = card.querySelector('[data-enrichment-result-topic]')?.value?.trim() || 'external.events';
+  completionPolicy.result_transport = card.querySelector('[data-enrichment-result-transport]')?.value
+    || defaultPolicy.result_transport
+    || 'kafka_event';
+  completionPolicy.result_topic = card.querySelector('[data-enrichment-result-topic]')?.value?.trim()
+    || defaultPolicy.result_topic
+    || 'external.events';
   return { completionMode, completionPolicy };
 }
 
@@ -11858,21 +12170,15 @@ function enrichmentStepDraftFromCard(card, index) {
       return {};
     }
   }
-  const fallbackReactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
-  const { reactCall, endpointId, operationId } = enrichmentStepBindingFromCard(card, fallbackReactCall);
-  const completionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || 'sync';
-  const completionPolicy = {
-    mode: completionMode,
-    max_wait_seconds: parseInt(card.querySelector('[data-enrichment-max-wait-seconds]')?.value || (completionMode === 'external_event' ? '3600' : '0'), 10),
-    timeout_action: card.querySelector('[data-enrichment-timeout-action]')?.value || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent'),
-  };
-  if (completionMode === 'external_event') {
-    completionPolicy.expected_event_type = card.querySelector('[data-enrichment-expected-event-type]')?.value?.trim() || '';
-    completionPolicy.result_transport = card.querySelector('[data-enrichment-result-transport]')?.value || 'kafka_event';
-    completionPolicy.result_topic = card.querySelector('[data-enrichment-result-topic]')?.value?.trim() || 'external.events';
-  }
-  const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
-  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], endpointId, operationId);
+  const capabilityId = card.querySelector('[data-enrichment-capability-id]')?.value?.trim() || '';
+  const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId) || null;
+  const requestedCompletionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || capability?.default_completion_policy?.mode || 'sync';
+  const requestedEnvironmentId = card.querySelector('[data-enrichment-mcp-environment-id]')?.value?.trim() || '';
+  const binding = activeCapabilityBindingForUi(capabilityId, {
+    executionMode: capabilityExecutionModeForCompletionMode(requestedCompletionMode),
+    environmentId: requestedEnvironmentId,
+  }) || {};
+  const { completionPolicy } = enrichmentCapabilityCompletionPolicyFromCard(card, index, capability);
   const metadataValue = card.querySelector('[data-enrichment-generated-metadata]')?.value || '{}';
   let generatedStructureMetadata = {};
   try {
@@ -11883,16 +12189,16 @@ function enrichmentStepDraftFromCard(card, index) {
   const step = {
     step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
-    react_call: reactCall,
-    parameter_mapping: parseEnrichmentParameterMapping(card),
-    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
+    capability_id: capabilityId,
+    mcp_environment_id: binding.environment_id || '',
+    input_mapping: parseEnrichmentParameterMapping(card),
+    output_mapping: parseSelectedEnrichmentOutputMapping(card, index),
+    result_fields: resultFieldsFromSchema(capability?.output_schema || {}),
     on_error: card.querySelector('[data-enrichment-on-error]')?.value || 'continue_to_llm',
     configuration_instruction: card.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
     generated_structure_metadata: generatedStructureMetadata,
   };
-  if (endpointId) step.endpoint_id = endpointId;
-  if (operationId) step.operation_id = operationId;
-  if (endpointId || operationId || completionMode !== 'sync') step.completion_policy = completionPolicy;
+  step.completion_policy = completionPolicy;
   return step;
 }
 
@@ -11910,21 +12216,25 @@ function parseEnrichmentStepCard(card, index) {
       throw new Error(`Шаг обогащения ${index + 1}: не удалось прочитать данные (${error.message})`);
     }
   }
-  const fallbackReactCall = card.querySelector('[data-enrichment-react-call]')?.value?.trim() || '';
-  const { reactCall, endpointId, operationId } = enrichmentStepBindingFromCard(card, fallbackReactCall);
-  if (!reactCall) {
-    throw new Error(`В шаге обогащения ${index + 1} выберите ReAct-вызов.`);
+  const capabilityId = card.querySelector('[data-enrichment-capability-id]')?.value?.trim() || '';
+  if (!capabilityId) {
+    throw new Error(`В шаге обогащения ${index + 1} выберите capability.`);
   }
-  const { completionMode, completionPolicy } = enrichmentCompletionPolicyFromCard(
-    card,
-    index,
-    { reactCall, endpointId, operationId },
-  );
+  const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId) || null;
+  const requestedCompletionMode = card.querySelector('[data-enrichment-completion-mode]')?.value || capability?.default_completion_policy?.mode || 'sync';
+  const requestedEnvironmentId = card.querySelector('[data-enrichment-mcp-environment-id]')?.value?.trim() || '';
+  const binding = activeCapabilityBindingForUi(capabilityId, {
+    executionMode: capabilityExecutionModeForCompletionMode(requestedCompletionMode),
+    environmentId: requestedEnvironmentId,
+  }) || {};
+  const { completionPolicy } = enrichmentCapabilityCompletionPolicyFromCard(card, index, capability);
   const step = {
     step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
     step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
-    react_call: reactCall,
-    parameter_mapping: parseEnrichmentParameterMapping(card),
+    capability_id: capabilityId,
+    mcp_environment_id: binding.environment_id || '',
+    input_mapping: parseEnrichmentParameterMapping(card),
+    output_mapping: parseSelectedEnrichmentOutputMapping(card, index),
     on_error: card.querySelector('[data-enrichment-on-error]')?.value || 'continue_to_llm',
     configuration_instruction: card.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
     generated_structure_metadata: parseJsonField(
@@ -11932,28 +12242,58 @@ function parseEnrichmentStepCard(card, index) {
       `Шаг обогащения ${index + 1}: метаданные сформированной структуры`,
     ),
   };
-  if (endpointId) step.endpoint_id = endpointId;
-  if (operationId) step.operation_id = operationId;
-  if (endpointId || operationId || completionMode !== 'sync') step.completion_policy = completionPolicy;
+  step.completion_policy = completionPolicy;
   return step;
+}
+
+function sanitizeEnrichmentStepForConfig(step = {}) {
+  const allowedKeys = new Set([
+    'step_id',
+    'step_name',
+    'capability_id',
+    'mcp_environment_id',
+    'completion_policy',
+    'configuration_instruction',
+    'generated_structure_metadata',
+    'input_mapping',
+    'output_mapping',
+    'on_error',
+  ]);
+  return Object.fromEntries(
+    Object.entries(step || {}).filter(([key]) => allowedKeys.has(key)),
+  );
 }
 
 function parseEnrichmentSteps(form) {
   const steps = [];
+  const selectedOutputSlotIds = selectedResolutionOutputSlotIds(form);
+  const removedOutputSlots = [];
   const cards = Array.from(form.querySelectorAll('[data-enrichment-step-card]'));
   for (const [index, card] of cards.entries()) {
     const parsedStep = parseEnrichmentStepCard(card, index);
-    const step = {
+    const outputMappingFilter = filterEnrichmentOutputMappingForSelectedSlots(
+      parsedStep.output_mapping || {},
+      selectedOutputSlotIds,
+    );
+    parsedStep.output_mapping = outputMappingFilter.filtered;
+    for (const removedSlotId of outputMappingFilter.removed) {
+      removedOutputSlots.push(removedSlotId);
+    }
+    const step = sanitizeEnrichmentStepForConfig({
       ...parsedStep,
       step_id: normalizeEnrichmentStepId(parsedStep.step_id, index),
-    };
-    delete step.result_fields;
-    delete step.result_entity_name;
-    delete step.result_entity_description;
-    if (!step.react_call) {
-      throw new Error(`В шаге обогащения ${index + 1} выберите ReAct-вызов.`);
+    });
+    if (!step.capability_id) {
+      throw new Error(`В шаге обогащения ${index + 1} выберите capability.`);
     }
     steps.push(step);
+  }
+  if (removedOutputSlots.length) {
+    const uniqueRemoved = Array.from(new Set(removedOutputSlots)).sort();
+    setNotice(
+      `Из mapping шага удалены поля результата, не выбранные как выходные слоты профиля: ${uniqueRemoved.join(', ')}.`,
+      'warning',
+    );
   }
   return steps;
 }
@@ -12089,15 +12429,7 @@ function activeReferenceFragment(textarea) {
 function referenceAutocompleteQueryVariants(query) {
   const normalized = String(query || '').toLowerCase();
   if (!normalized) return [''];
-  const variants = [normalized];
-  if (normalized.startsWith('react.')) {
-    const tail = normalized.slice('react.'.length);
-    variants.push(`paramreact.${tail}`, tail);
-  }
-  if (normalized.startsWith('paramreact.')) {
-    variants.push(`react.${normalized.slice('paramreact.'.length)}`);
-  }
-  return Array.from(new Set(variants.filter(Boolean)));
+  return [normalized];
 }
 
 function filterReferenceAutocompleteItems(items, query) {
@@ -12395,13 +12727,9 @@ function currentResolutionSlotContextFromForm(form) {
 }
 
 function currentResolutionToolsFromForm(form, steps = []) {
-  const slotContext = currentResolutionSlotContextFromForm(form);
-  return toolsForScenario(
-    state.lastData.toolCatalog || [],
-    state.lastData.serviceScenarios || [],
-    slotContext.selectedScenario,
-    (steps || []).map((step) => step.react_call),
-  );
+  void form;
+  void steps;
+  return [];
 }
 
 function addEnrichmentStep(target) {
@@ -12409,17 +12737,17 @@ function addEnrichmentStep(target) {
   const container = form?.querySelector('[data-enrichment-step-list]');
   if (!container) return;
   const steps = currentEnrichmentStepsFromDom(form);
-  const tools = currentResolutionToolsFromForm(form, steps);
   const index = steps.length;
-  const tool = tools[0] || null;
-  const binding = currentToolBinding(tool);
-  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], binding?.endpoint_id || '', binding?.operation_id || '');
+  const capability = (state.lastData.capabilities || [])[0] || null;
+  const binding = activeCapabilityBindingForUi(capability?.capability_id || '') || {};
   steps.push({
     step_id: normalizeEnrichmentStepId('', index),
     step_name: '',
-    react_call: tool?.tool_name || '',
-    parameter_mapping: {},
-    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
+    capability_id: capability?.capability_id || '',
+    mcp_environment_id: binding.environment_id || '',
+    input_mapping: {},
+    output_mapping: {},
+    result_fields: resultFieldsFromSchema(capability?.output_schema || {}),
     on_error: 'continue_to_llm',
   });
   state.resolutionEnrichmentEditIndex = index;
@@ -12444,98 +12772,11 @@ function editEnrichmentStep(target) {
 }
 
 function refreshEnrichmentStepCard(target) {
-  const form = target.closest('form');
-  const card = target.closest('[data-enrichment-step-card]');
-  const container = form?.querySelector('[data-enrichment-step-list]');
-  if (!form || !card || !container) return;
-  const cards = Array.from(container.querySelectorAll('[data-enrichment-step-card]'));
-  const index = cards.indexOf(card);
-  if (index < 0) return;
-  const steps = currentEnrichmentStepDraftsFromDom(form);
-  const tool = findToolInCatalog(state.lastData.toolCatalog || [], target.value);
-  const binding = currentToolBinding(tool);
-  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], binding?.endpoint_id || '', binding?.operation_id || '');
-  const eventTypes = operationAsyncEventTypes(operation);
-  const step = {
-    ...steps[index],
-    step_id: normalizeEnrichmentStepId(steps[index]?.step_id, index),
-    react_call: target.value,
-    endpoint_id: binding?.endpoint_id || '',
-    operation_id: binding?.operation_id || '',
-  };
-  if (!step.endpoint_id) delete step.endpoint_id;
-  if (!step.operation_id) delete step.operation_id;
-  if (eventTypes.length) {
-    step.completion_policy = {
-      ...step.completion_policy,
-      mode: 'external_event',
-      max_wait_seconds: step.completion_policy?.max_wait_seconds || 3600,
-      timeout_action: step.completion_policy?.timeout_action || 'escalate_operator',
-      expected_event_type: eventTypes.includes(step.completion_policy?.expected_event_type)
-        ? step.completion_policy.expected_event_type
-        : eventTypes[0],
-      result_transport: step.completion_policy?.result_transport || 'kafka_event',
-      result_topic: step.completion_policy?.result_topic || 'external.events',
-    };
-  } else if (step.completion_policy?.mode === 'external_event') {
-    step.completion_policy = {
-      mode: 'sync',
-      max_wait_seconds: 0,
-      timeout_action: 'resume_agent',
-    };
-  }
-  step.result_fields = operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool);
-  steps[index] = step;
-  state.resolutionEnrichmentEditIndex = index;
-  rerenderEnrichmentSteps(form, steps);
+  refreshEnrichmentCapabilityCard(target);
 }
 
 function refreshEnrichmentStepBindingCard(target) {
-  const form = target.closest('form');
-  const card = target.closest('[data-enrichment-step-card]');
-  const container = form?.querySelector('[data-enrichment-step-list]');
-  if (!form || !card || !container) return;
-  const cards = Array.from(container.querySelectorAll('[data-enrichment-step-card]'));
-  const index = cards.indexOf(card);
-  if (index < 0) return;
-  const steps = currentEnrichmentStepDraftsFromDom(form);
-  const binding = parseCandidateBindingValue(target.value);
-  const reactCall = binding.tool_name || steps[index]?.react_call || '';
-  const tool = findToolInCatalog(state.lastData.toolCatalog || [], reactCall);
-  const operation = endpointOperationById(state.lastData.integrationEndpoints || [], binding.endpoint_id, binding.operation_id);
-  const eventTypes = operationAsyncEventTypes(operation);
-  const step = {
-    ...steps[index],
-    step_id: normalizeEnrichmentStepId(steps[index]?.step_id, index),
-    react_call: reactCall,
-    endpoint_id: binding.endpoint_id || '',
-    operation_id: binding.operation_id || '',
-    result_fields: operation ? inferResultFieldsFromOperation(operation) : resultFieldsFromTool(tool),
-  };
-  if (!step.endpoint_id) delete step.endpoint_id;
-  if (!step.operation_id) delete step.operation_id;
-  if (eventTypes.length) {
-    step.completion_policy = {
-      ...step.completion_policy,
-      mode: 'external_event',
-      max_wait_seconds: step.completion_policy?.max_wait_seconds || 3600,
-      timeout_action: step.completion_policy?.timeout_action || 'escalate_operator',
-      expected_event_type: eventTypes.includes(step.completion_policy?.expected_event_type)
-        ? step.completion_policy.expected_event_type
-        : eventTypes[0],
-      result_transport: step.completion_policy?.result_transport || 'kafka_event',
-      result_topic: step.completion_policy?.result_topic || 'external.events',
-    };
-  } else if (step.completion_policy?.mode === 'external_event') {
-    step.completion_policy = {
-      mode: 'sync',
-      max_wait_seconds: 0,
-      timeout_action: 'resume_agent',
-    };
-  }
-  steps[index] = step;
-  state.resolutionEnrichmentEditIndex = index;
-  rerenderEnrichmentSteps(form, steps);
+  refreshEnrichmentCapabilityCard(target);
 }
 
 function rerenderEnrichmentSteps(form, steps) {
@@ -12548,7 +12789,60 @@ function rerenderEnrichmentSteps(form, steps) {
     currentResolutionOutputRulesFromDom(form),
     currentResolutionToolsFromForm(form, steps),
     state.lastData.integrationEndpoints || [],
+    state.lastData.capabilities || [],
+    state.lastData.capabilityBindings || [],
   );
+}
+
+function refreshEnrichmentCapabilityCard(target) {
+  const form = target.closest('form');
+  const card = target.closest('[data-enrichment-step-card]');
+  const container = form?.querySelector('[data-enrichment-step-list]');
+  if (!form || !card || !container) return;
+  const cards = Array.from(container.querySelectorAll('[data-enrichment-step-card]'));
+  const index = cards.indexOf(card);
+  if (index < 0) return;
+  const steps = currentEnrichmentStepDraftsFromDom(form);
+  const capabilityId = target.value || (state.lastData.capabilities || [])[0]?.capability_id || '';
+  const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId) || null;
+  const currentPolicy = enrichmentStepCompletionPolicy(steps[index] || {}, capability);
+  const requestedCompletionMode = currentPolicy.mode || capability?.default_completion_policy?.mode || 'sync';
+  const binding = activeCapabilityBindingForUi(capabilityId, {
+    executionMode: capabilityExecutionModeForCompletionMode(requestedCompletionMode),
+    environmentId: steps[index]?.mcp_environment_id || '',
+  }) || {};
+  const eventTypes = Object.keys(capability?.async_event_contracts || {});
+  const step = {
+    ...steps[index],
+    step_id: normalizeEnrichmentStepId(steps[index]?.step_id, index),
+    capability_id: capabilityId,
+    mcp_environment_id: binding.environment_id || '',
+    input_mapping: steps[index]?.input_mapping || {},
+    output_mapping: {},
+    result_fields: resultFieldsFromSchema(capability?.output_schema || {}),
+  };
+  if (eventTypes.length) {
+    step.completion_policy = {
+      ...currentPolicy,
+      mode: 'external_event',
+      max_wait_seconds: currentPolicy.max_wait_seconds || capability?.default_completion_policy?.max_wait_seconds || 3600,
+      timeout_action: currentPolicy.timeout_action || capability?.default_completion_policy?.timeout_action || 'escalate_operator',
+      expected_event_type: eventTypes.includes(currentPolicy.expected_event_type)
+        ? currentPolicy.expected_event_type
+        : capability?.default_completion_policy?.expected_event_type || eventTypes[0],
+      result_transport: currentPolicy.result_transport || capability?.default_completion_policy?.result_transport || 'kafka_event',
+      result_topic: currentPolicy.result_topic || capability?.default_completion_policy?.result_topic || 'external.events',
+    };
+  } else {
+    step.completion_policy = {
+      mode: 'sync',
+      max_wait_seconds: currentPolicy.max_wait_seconds ?? capability?.default_completion_policy?.max_wait_seconds ?? 0,
+      timeout_action: currentPolicy.timeout_action || capability?.default_completion_policy?.timeout_action || 'resume_agent',
+    };
+  }
+  steps[index] = step;
+  state.resolutionEnrichmentEditIndex = index;
+  rerenderEnrichmentSteps(form, steps);
 }
 
 function readEnrichmentStepsForCompile(form, activeIndex) {
@@ -12566,23 +12860,22 @@ function readEnrichmentStepsForCompile(form, activeIndex) {
       const parsed = {
         step_id: item.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
         step_name: item.querySelector('[data-enrichment-step-name]')?.value?.trim() || '',
-        react_call: item.querySelector('[data-enrichment-react-call]')?.value?.trim() || '',
         configuration_instruction: item.querySelector('[data-enrichment-configuration-instruction]')?.value?.trim() || '',
         generated_structure_metadata: metadata,
       };
-      const binding = enrichmentStepBindingFromCard(item, parsed.react_call);
-      parsed.react_call = binding.reactCall;
-      if (binding.endpointId) {
-        parsed.endpoint_id = binding.endpointId;
-      }
-      if (binding.operationId) {
-        parsed.operation_id = binding.operationId;
-      }
-      parsed.completion_policy = enrichmentCompletionPolicyFromCard(
-        item,
-        index,
-        { reactCall: parsed.react_call, endpointId: parsed.endpoint_id, operationId: parsed.operation_id },
-      ).completionPolicy;
+      const capabilityId = item.querySelector('[data-enrichment-capability-id]')?.value?.trim() || '';
+      const capability = (state.lastData.capabilities || []).find((candidate) => candidate.capability_id === capabilityId) || null;
+      const requestedCompletionMode = item.querySelector('[data-enrichment-completion-mode]')?.value || capability?.default_completion_policy?.mode || 'sync';
+      const requestedEnvironmentId = item.querySelector('[data-enrichment-mcp-environment-id]')?.value?.trim() || '';
+      const binding = activeCapabilityBindingForUi(capabilityId, {
+        executionMode: capabilityExecutionModeForCompletionMode(requestedCompletionMode),
+        environmentId: requestedEnvironmentId,
+      }) || {};
+      parsed.capability_id = capabilityId;
+      parsed.mcp_environment_id = binding.environment_id || '';
+      parsed.input_mapping = parseEnrichmentParameterMapping(item);
+      parsed.output_mapping = parseSelectedEnrichmentOutputMapping(item, index, form);
+      parsed.completion_policy = enrichmentCapabilityCompletionPolicyFromCard(item, index, capability).completionPolicy;
       steps.push(parsed);
       return;
     }
@@ -12593,6 +12886,25 @@ function readEnrichmentStepsForCompile(form, activeIndex) {
     }
   });
   return steps;
+}
+
+function resolutionCompileProfileContext(form, currentStep = {}) {
+  const selectedScenarioId = form.querySelector('[data-resolution-slot-scenario]')?.value || state.resolutionSlotScenarioId || '';
+  const selectedTarget = form.querySelector('[data-resolution-target-slot]')?.value?.trim() || '';
+  const customTarget = form.querySelector('[name="target_slot_id_custom"]')?.value?.trim() || '';
+  const targetSlotId = selectedTarget === '__custom__' ? customTarget : selectedTarget;
+  const outputRules = currentResolutionOutputRulesFromDom(form);
+  return {
+    profile_id: form.querySelector('[name="profile_id"]')?.value?.trim() || '',
+    display_name: form.querySelector('[name="display_name"]')?.value?.trim() || '',
+    description: form.querySelector('[name="description"]')?.value?.trim() || '',
+    scenario_id: selectedScenarioId,
+    slot_schema_id: form.querySelector('[name="slot_schema_id"]')?.value?.trim() || '',
+    target_slot_id: targetSlotId || '',
+    output_slots_order: outputRules,
+    output_slot_ids: outputRules.map((rule) => rule.slot_id).filter(Boolean),
+    capability_id: currentStep.capability_id || '',
+  };
 }
 
 async function compileResolutionStep(target) {
@@ -12615,21 +12927,18 @@ async function compileResolutionStep(target) {
       operator_id: state.actorId,
       instruction: current.configuration_instruction,
       scenario_id: form.querySelector('[data-resolution-slot-scenario]')?.value || state.resolutionSlotScenarioId,
-      react_call: current.react_call,
+      capability_id: current.capability_id,
       step_name: current.step_name,
       previous_steps: steps.slice(0, index),
+      profile_context: resolutionCompileProfileContext(form, current),
     }),
   });
   const compiledStructure = result.structure || {};
-  const reactCallChanged = compiledStructure.react_call && compiledStructure.react_call !== current.react_call;
   steps[index] = {
     ...current,
     ...compiledStructure,
+    output_mapping: compiledStructure.output_mapping || {},
   };
-  if (reactCallChanged) {
-    steps[index].endpoint_id = compiledStructure.endpoint_id || '';
-    steps[index].operation_id = compiledStructure.operation_id || '';
-  }
   const appliedOutputMappings = applyResolutionOutputMappingHints(
     form,
     result.references?.output_mapping_hints || [],
@@ -12638,15 +12947,18 @@ async function compileResolutionStep(target) {
   rerenderEnrichmentSteps(form, steps);
   const validationErrors = result.validation_errors || [];
   const warnings = result.warnings || [];
+  const compiledOutputSummary = outputMappingSummary(steps[index]?.output_mapping || {});
+  const llmAssumptions = (result.references?.llm_assist?.assumptions || []).filter(Boolean);
+  const llmAssumptionText = llmAssumptions.length ? ` LLM assist: ${llmAssumptions.join('; ')}.` : '';
   if (validationErrors.length) {
     const warningText = warnings.length ? ` Предупреждения: ${warnings.join('; ')}` : '';
-    setNotice(`Структура шага сформирована с ошибками: ${validationErrors.join('; ')}${warningText}`, 'error');
+    setNotice(`Структура шага сформирована с ошибками: ${validationErrors.join('; ')}${warningText}${llmAssumptionText}`, 'error');
   } else if (warnings.length) {
-    setNotice(`Структура шага сформирована с предупреждениями: ${warnings.join('; ')}`, 'warning');
+    setNotice(`Структура шага сформирована с предупреждениями: ${warnings.join('; ')}${llmAssumptionText}`, 'warning');
   } else if (appliedOutputMappings) {
-    setNotice(`Структура шага сформирована. Обновлены поля результата для выходных слотов: ${appliedOutputMappings}.`, 'success');
+    setNotice(`Структура шага сформирована. Output mapping шага: ${compiledOutputSummary}. Обновлены поля результата для выходных слотов: ${appliedOutputMappings}.${llmAssumptionText}`, 'success');
   } else {
-    setNotice('Структура шага сформирована. Проверьте и сохраните профиль.', 'success');
+    setNotice(`Структура шага сформирована. Output mapping шага: ${compiledOutputSummary}. Проверьте и сохраните профиль.${llmAssumptionText}`, 'success');
   }
 }
 
@@ -12964,17 +13276,17 @@ function finishEnrichmentStepDrag() {
 
 function syncOperationParameterMappingRow(row) {
   const source = row.querySelector('[data-operation-param-source]')?.value || '';
-  row.querySelectorAll('[data-operation-param-react-wrap]').forEach((element) => {
-    element.hidden = source !== 'react';
+  row.querySelectorAll('[data-operation-param-legacy-wrap]').forEach((element) => {
+    element.hidden = source !== 'legacy';
   });
   row.querySelectorAll('[data-operation-param-value-wrap]').forEach((element) => {
-    element.hidden = !source || source === 'react';
+    element.hidden = !source || source === 'legacy';
   });
 }
 
 function syncOperationResultMappingRow(row) {
   const include = parseBoolean(row.querySelector('[data-operation-result-include]')?.value);
-  row.querySelectorAll('[data-operation-result-react-wrap]').forEach((element) => {
+  row.querySelectorAll('[data-operation-result-legacy-wrap]').forEach((element) => {
     element.hidden = !include;
   });
 }
@@ -13145,7 +13457,7 @@ function mergeImportedEndpointOperations(endpointId, importedOperations) {
   const currentEndpoint = (state.lastData.integrationEndpoints || [])
     .find((endpoint) => endpoint.endpoint_id === endpointId);
   const tools = state.lastData.toolCatalog || [];
-  const workflows = state.lastData.n8nWorkflows || [];
+  const workflows = [];
   Object.entries(currentEndpoint?.operations || {}).forEach(([operationId, operation]) => {
     if (merged[operationId]) {
       return;
@@ -13159,134 +13471,13 @@ function mergeImportedEndpointOperations(endpointId, importedOperations) {
 }
 
 async function previewEndpointOpenApiContract(target) {
-  const form = target.closest('form');
-  if (!form) return;
-  const endpoint = endpointBaseFromForm(form);
-  if (endpoint.adapter_type !== 'n8n_webhook') {
-    throw new Error('OpenAPI импорт доступен только для endpoint n8n_webhook.');
-  }
-  if (!endpoint.contract_source?.url) {
-    throw new Error('Укажите URL OpenAPI-контракта n8n.');
-  }
-  const status = form.querySelector('[data-openapi-preview-status]');
-  if (status) {
-    status.textContent = 'Загрузка OpenAPI-контракта...';
-  }
-  const result = await api('/admin/integration-endpoints/openapi/preview', {
-    method: 'POST',
-    body: JSON.stringify({
-      operator_id: state.actorId,
-      endpoint_id: endpoint.endpoint_id,
-      contract_source: endpoint.contract_source,
-      lang: endpoint.contract_source.lang || adminInterfaceLanguage,
-    }),
-  });
-  const operations = mergeImportedEndpointOperations(endpoint.endpoint_id, result.operations || {});
-  state.lastData.openApiImportPreview = {
-    endpoint_id: endpoint.endpoint_id,
-    contract_source: normalizedOpenApiContractSource(endpoint.contract_source),
-    result,
-  };
-  const container = form.querySelector('#endpointOperationCards');
-  if (!container) {
-    throw new Error('Блок операций подключения не найден.');
-  }
-  const tools = state.lastData.toolCatalog || [];
-  const workflows = state.lastData.n8nWorkflows || [];
-  container.innerHTML = Object.entries(operations)
-    .map(([operationId, operation], index) => renderEndpointOperationCard({
-      endpointId: endpoint.endpoint_id,
-      adapterType: endpoint.adapter_type,
-      operationId,
-      operation,
-      tools,
-      workflows,
-      open: index === 0,
-    }))
-    .join('');
-  const warningText = (result.warnings || []).length
-    ? ` Предупреждения: ${(result.warnings || []).slice(0, 3).join('; ')}${result.warnings.length > 3 ? '...' : ''}`
-    : '';
-  if (status) {
-    status.textContent = `Загружено операций: ${Object.keys(result.operations || {}).length}.${warningText}`;
-  }
-  const previewPanel = form.querySelector('[data-openapi-preview-panel]');
-  if (previewPanel) {
-    previewPanel.innerHTML = renderOpenApiImportPreview(endpoint.endpoint_id);
-  }
-  setNotice(`OpenAPI-контракт загружен: операций ${Object.keys(result.operations || {}).length}. Нажмите "Применить импорт", чтобы сохранить изменения.`, 'success');
+  void target;
+  throw new Error('Legacy OpenAPI import для integration endpoints удален. Используйте MCP discovery/import.');
 }
 
 async function applyEndpointOpenApiImport(target) {
-  const form = target.closest('form');
-  if (!form) return;
-  const endpoint = endpointBaseFromForm(form);
-  const preview = openApiPreviewForEndpoint(endpoint.endpoint_id);
-  if (!preview) {
-    throw new Error('Сначала загрузите preview OpenAPI-контракта.');
-  }
-  if (!openApiPreviewMatchesEndpoint(preview, endpoint)) {
-    throw new Error('Повторно загрузите preview OpenAPI-контракта после изменения URL, метода или языка контракта.');
-  }
-  endpoint.operations = parseEndpointOperationCards(form, endpoint.adapter_type);
-  if (preview.result?.transport_security) {
-    endpoint.extensions = {
-      ...(endpoint.extensions || {}),
-      transport_security: cloneJson(preview.result.transport_security),
-    };
-  }
-  const warnings = openApiPreviewWarnings(preview.result || {});
-  if (warnings.length) {
-    const message = [
-      'OpenAPI импорт может повлиять на существующие связи:',
-      ...warnings.slice(0, 8).map((warning) => `- ${warning}`),
-      warnings.length > 8 ? `- ...и еще ${warnings.length - 8}` : '',
-      'Применить импорт?',
-    ].filter(Boolean).join('\n');
-    if (!window.confirm(message)) {
-      return;
-    }
-  }
-
-  const [endpointsActive, toolsActive] = await Promise.all([
-    api('/admin/config/active/integration_endpoints'),
-    api('/admin/config/active/tools'),
-  ]);
-  const endpointsPayload = cloneJson(endpointsActive.payload);
-  const endpoints = endpointsPayload.endpoints || [];
-  const endpointIndex = endpoints.findIndex((item) => item.endpoint_id === endpoint.endpoint_id);
-  if (endpointIndex >= 0) {
-    endpoints[endpointIndex] = endpoint;
-  } else {
-    endpoints.push(endpoint);
-  }
-  endpointsPayload.endpoints = endpoints;
-  const endpointVersion = await activateConfigPayload(
-    'integration_endpoints',
-    endpointsPayload,
-    endpointsActive.active_version_id,
-  );
-
-  const toolsPayload = cloneJson(toolsActive.payload);
-  const tools = toolsPayload.tools || [];
-  const proposedTools = preview.result?.proposed_react_calls?.tools || {};
-  for (const proposedTool of Object.values(proposedTools)) {
-    const index = tools.findIndex((tool) => tool.tool_name === proposedTool.tool_name);
-    if (index >= 0) {
-      tools[index] = proposedTool;
-    } else {
-      tools.push(proposedTool);
-    }
-  }
-  toolsPayload.tools = tools;
-  const toolsVersion = await activateConfigPayload('tools', toolsPayload, toolsActive.active_version_id);
-  state.lastData.openApiImportPreview = null;
-  state.integrationEndpointId = endpoint.endpoint_id;
-  setNotice(
-    `OpenAPI импорт применен. Подключение: ${endpointVersion.version_id}; ReAct-вызовы: ${toolsVersion.version_id}.`,
-    'success',
-  );
-  await renderIntegrations();
+  void target;
+  throw new Error('Legacy OpenAPI import для integration endpoints удален. Используйте MCP discovery/import.');
 }
 
 function syncOperationBindingOperationOptions(form) {
@@ -13440,7 +13631,7 @@ function initEvents() {
         await renderScenarioClassification();
       } else if (action === 'policy-operation') {
         state.policyOperation = target.dataset.operation;
-        await renderScenarioReact();
+        await renderScenarioOrchestration();
       } else if (action === 'prompt-pack-operation') {
         state.promptPackOperation = target.dataset.operation;
         await renderScenarioPrompts();
@@ -13458,15 +13649,20 @@ function initEvents() {
         await runOrphanResolutionProfileRepair(target, true);
       } else if (action === 'orphan-repair-apply') {
         await runOrphanResolutionProfileRepair(target, false);
-      } else if (action === 'endpoint-connection-operation') {
-        state.integrationEndpointOperation = target.dataset.operation;
+      } else if (action === 'mcp-discover') {
+        await discoverMcpEnvironmentCapabilities(target.dataset.environmentId || '');
+      } else if (action === 'mcp-import-drafts') {
+        await importMcpEnvironmentDiscoveryDrafts(target.dataset.environmentId || '');
+      } else if (action === 'mcp-activate-import-bundle') {
+        await activateMcpDiscoveryImportBundle(target.dataset.environmentId || '');
+      } else if (action === 'mcp-environment-operation') {
+        state.mcpEnvironmentOperation = target.dataset.operation || 'modify';
         await renderIntegrations();
-      } else if (action === 'tool-catalog-operation') {
-        state.toolCatalogOperation = target.dataset.operation;
-        await renderReactCalls();
-      } else if (action === 'operation-binding-mode') {
-        state.operationBindingMode = target.dataset.mode || 'bind';
+        enhanceConfigDraftForms();
+      } else if (action === 'capability-binding-operation') {
+        state.capabilityBindingOperation = target.dataset.operation || 'modify';
         await renderOperationBindings();
+        enhanceConfigDraftForms();
       } else if (action === 'model-provider-switch') {
         await switchModelProvider(target.dataset.provider);
       } else if (action === 'model-provider-add') {
@@ -13505,24 +13701,6 @@ function initEvents() {
         addRouteRuleCard();
       } else if (action === 'route-rule-remove') {
         removeRouteRuleCard(target);
-      } else if (action === 'endpoint-operation-add') {
-        addEndpointOperationCard();
-      } else if (action === 'endpoint-operation-remove') {
-        removeEndpointOperationCard(target);
-      } else if (action === 'endpoint-mock-import-operations') {
-        importSelectedOperationsIntoMockEndpoint(target);
-      } else if (action === 'endpoint-request-field-add') {
-        addEndpointOperationFieldRow(target, 'request');
-      } else if (action === 'endpoint-response-field-add') {
-        addEndpointOperationFieldRow(target, 'response');
-      } else if (action === 'endpoint-request-field-remove' || action === 'endpoint-response-field-remove') {
-        removeEndpointOperationFieldRow(target);
-      } else if (action === 'endpoint-operation-json-apply') {
-        applyEndpointOperationJsonToForm(target);
-      } else if (action === 'endpoint-openapi-preview') {
-        await previewEndpointOpenApiContract(target);
-      } else if (action === 'endpoint-openapi-apply') {
-        await applyEndpointOpenApiImport(target);
       }
     } catch (error) {
       setNotice(configMaintenanceErrorMessage(error), 'error');
@@ -13615,44 +13793,6 @@ function initEvents() {
       syncConfidenceOverrideBlock(target.closest('[data-confidence-override]'));
       return;
     }
-    if (target?.matches?.('[data-scenario-react-endpoint-type]')) {
-      syncScenarioReactCallsByEndpointTypes(target.closest('form'));
-      return;
-    }
-    if (target?.matches?.('[data-operation-contract-control]')) {
-      const card = target.closest('[data-endpoint-operation-card]');
-      if (target.closest('[data-operation-schema-editor="response"]')) {
-        syncEndpointMockRowsFromResponse(card);
-      }
-      updateEndpointOperationJsonPreview(card);
-      return;
-    }
-    if (target?.matches?.('[data-operation-mock-control]')) {
-      updateEndpointOperationJsonPreview(target.closest('[data-endpoint-operation-card]'));
-      return;
-    }
-    if (target?.matches?.('[data-mock-import-source]')) {
-      syncMockImportOperationRows(target.closest('form'));
-      return;
-    }
-    if (target?.matches?.('[data-operation-param-source]')) {
-      syncOperationParameterMappingRow(target.closest('[data-operation-param-row]'));
-      return;
-    }
-    if (target?.matches?.('[data-operation-result-include]')) {
-      syncOperationResultMappingRow(target.closest('[data-operation-result-row]'));
-      return;
-    }
-    if (target?.matches?.('[data-operation-binding-endpoint]')) {
-      syncOperationBindingOperationOptions(target.closest('form'));
-      await renderOperationBindings();
-      return;
-    }
-    if (target?.matches?.('[data-operation-binding-operation]')) {
-      state.operationBindingOperationId = target.value;
-      await renderOperationBindings();
-      return;
-    }
     if (target?.matches?.('[data-graph-view-select]')) {
       state.orchestrationGraphView = target.value;
       state.orchestrationGraphSelectedNodeId = 'slot_filling';
@@ -13691,12 +13831,22 @@ function initEvents() {
       syncResolutionOutputSlotCustom(target.closest('[data-resolution-output-row]'));
       return;
     }
-    if (target?.matches?.('[data-enrichment-react-call]')) {
-      refreshEnrichmentStepCard(target);
+    if (target?.matches?.('#mcpEnvironmentSelect')) {
+      state.mcpEnvironmentId = target.value;
+      state.mcpEnvironmentOperation = 'modify';
+      await renderIntegrations();
+      enhanceConfigDraftForms();
       return;
     }
-    if (target?.matches?.('[data-enrichment-binding]')) {
-      refreshEnrichmentStepBindingCard(target);
+    if (target?.matches?.('#capabilityBindingSelect')) {
+      state.capabilityBindingId = target.value;
+      state.capabilityBindingOperation = 'modify';
+      await renderOperationBindings();
+      enhanceConfigDraftForms();
+      return;
+    }
+    if (target?.matches?.('[data-enrichment-capability-id]')) {
+      refreshEnrichmentCapabilityCard(target);
       return;
     }
     if (target?.matches?.('[data-enrichment-param-source-mode]')) {
@@ -13718,9 +13868,6 @@ function initEvents() {
     if (target?.matches?.('[name="technical_agent_type"], [name="technical_task_topic_template"]')) {
       syncChannelTaskTopic(target.closest('form'));
       return;
-    }
-    if (target?.matches?.('[data-operation-contract-control], [data-operation-mock-control]')) {
-      updateEndpointOperationJsonPreview(target.closest('[data-endpoint-operation-card]'));
     }
   });
 
@@ -13763,6 +13910,14 @@ function initEvents() {
         await saveInteractionChannelForm(form);
       } else if (form.dataset.form === 'interaction-channel-delete') {
         await deleteInteractionChannelForm();
+      } else if (form.dataset.form === 'mcp-environment-editor') {
+        await saveMcpEnvironmentForm(form);
+      } else if (form.dataset.form === 'mcp-environment-delete') {
+        await deleteMcpEnvironmentForm();
+      } else if (form.dataset.form === 'capability-binding-editor') {
+        await saveCapabilityBindingForm(form);
+      } else if (form.dataset.form === 'capability-binding-delete') {
+        await deleteCapabilityBindingForm();
       } else if (form.dataset.form === 'model-routing-editor') {
         await saveModelRoutingForm(form);
       } else if (form.dataset.form === 'system-prompts-editor') {
@@ -13771,20 +13926,6 @@ function initEvents() {
         await saveResolutionProfileForm(form);
       } else if (form.dataset.form === 'resolution-profile-delete') {
         await deleteResolutionProfileForm();
-      } else if (form.dataset.form === 'integration-endpoint-editor') {
-        await saveIntegrationEndpointForm(form);
-      } else if (form.dataset.form === 'integration-endpoint-delete') {
-        await deleteIntegrationEndpointForm();
-      } else if (form.dataset.form === 'tool-catalog-editor') {
-        await saveToolCatalogForm(form);
-      } else if (form.dataset.form === 'tool-catalog-delete') {
-        await deleteToolCatalogForm();
-      } else if (form.dataset.form === 'operation-binding-editor') {
-        await saveOperationBindingForm(form, event.submitter);
-      } else if (form.dataset.form === 'operation-binding-create-editor') {
-        await saveOperationBindingCreateForm(form);
-      } else if (form.dataset.form === 'operation-binding-delete') {
-        await deleteOperationBindingForm();
       } else if (form.dataset.form === 'audit-filter') {
         const data = new FormData(form);
         const filters = Object.fromEntries(

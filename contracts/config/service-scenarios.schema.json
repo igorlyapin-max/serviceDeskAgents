@@ -77,13 +77,6 @@
             },
             "uniqueItems": true
           },
-          "allowed_react_call_names": {
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/id"
-            },
-            "uniqueItems": true
-          },
           "audit_required": {
             "type": "boolean"
           },

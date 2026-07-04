@@ -17,10 +17,10 @@ from .cases import CaseStore
 from .config_registry import ConfigStore
 from .contracts import ContractValidationError
 from .contracts import ContractRegistry
-from .integrations import IntegrationDispatcher, ToolRegistry
+from .mcp_execution import McpExecutionError, invoke_mcp_tool_request, validate_async_ack, validate_sync_result
 from .metrics import metrics
 from .processing import (
-    DEFAULT_ASYNC_TOOL_COMMAND_TOPIC,
+    DEFAULT_ASYNC_MCP_COMMAND_TOPIC,
     DEFAULT_EXTERNAL_EVENT_TOPIC,
     ProcessingConflict,
     ProcessingNotFound,
@@ -185,11 +185,11 @@ class JsonKafkaConsumer:
         topic: str | None = None,
         bootstrap_servers: str | None = None,
         group_id: str | None = None,
-        offset_reset_env: str = "TOOL_COMMAND_WORKER_OFFSET_RESET",
+        offset_reset_env: str = "MCP_COMMAND_WORKER_OFFSET_RESET",
     ):
-        self.topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        self.topic = topic or os.getenv("MCP_COMMAND_TOPIC", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
         self.bootstrap_servers = bootstrap_servers or os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092")
-        self.group_id = group_id or os.getenv("TOOL_COMMAND_WORKER_GROUP_ID", "servicedesk-tool-workers")
+        self.group_id = group_id or os.getenv("MCP_COMMAND_WORKER_GROUP_ID", "servicedesk-mcp-workers")
         self.offset_reset_env = offset_reset_env
         try:
             from kafka import KafkaConsumer
@@ -262,7 +262,8 @@ class OutboxPublisher:
         failed = 0
         for message in messages:
             try:
-                self.producer.publish(message["topic"], message["key"], message)
+                wire_payload = self._wire_payload(message)
+                self.producer.publish(message["topic"], message["key"], wire_payload)
                 self.processing_store.mark_outbox_published(message["message_id"], worker_id=self.worker_id)
                 published += 1
                 metrics.increment("outbox_publish_total", {"topic": message["topic"], "status": "published"})
@@ -310,6 +311,13 @@ class OutboxPublisher:
             "published": published,
             "failed": failed,
         }
+
+    @staticmethod
+    def _wire_payload(message: dict[str, Any]) -> dict[str, Any]:
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            raise KafkaRuntimeError("Outbox message payload должен быть JSON object.")
+        return copy.deepcopy(payload)
 
     def publish_forever(
         self,
@@ -392,33 +400,33 @@ def decode_kafka_json_object(value: Any) -> dict[str, Any]:
     raise KafkaRuntimeError("Kafka message value должен быть JSON object.")
 
 
-class ToolCommandWorker:
+class McpCommandWorker:
     def __init__(
         self,
         processing_store: ProcessingStore,
-        dispatcher: IntegrationDispatcher,
+        config_store: ConfigStore,
         *,
         worker_id: str | None = None,
         topic: str | None = None,
     ):
         self.processing_store = processing_store
-        self.dispatcher = dispatcher
-        self.worker_id = worker_id or f"tool-worker-{uuid.uuid4().hex[:8]}"
-        self.topic = topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        self.config_store = config_store
+        self.worker_id = worker_id or f"mcp-worker-{uuid.uuid4().hex[:8]}"
+        self.topic = topic or os.getenv("MCP_COMMAND_TOPIC", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
 
     def process_command(self, command: dict[str, Any]) -> dict[str, Any]:
         command = self._extract_command(command)
         self._validate_command(command)
-        self.processing_store.verify_tool_command(command)
-        invocation = copy.deepcopy(command["invocation"])
-        self._resolve_secret_operation_parameters(invocation)
+        command = self.processing_store.verify_tool_command(command)
+        self._validate_command(command)
+        capability, environment = self._resolve_command_context(command)
         receipt = self.processing_store.begin_tool_command(command, worker_id=self.worker_id)
         if receipt["duplicate"]:
             existing = receipt.get("receipt") or {}
             log_json(
                 logger,
                 logging.INFO,
-                "tool_command_duplicate_skipped",
+                "mcp_command_duplicate_skipped",
                 command_id=command["command_id"],
                 case_id=command["case_id"],
                 receipt_status=existing.get("status"),
@@ -430,50 +438,59 @@ class ToolCommandWorker:
                 "wait_id": command["wait_id"],
                 "duplicate": True,
                 "receipt_status": existing.get("status"),
-                "tool_result": existing.get("result", {}).get("tool_result"),
+                "mcp_result": existing.get("result", {}).get("mcp_result"),
             }
-        invocation.setdefault("extensions", {})
-        invocation["extensions"].setdefault(
-            "async_callback",
-            {
-                "source": command["source"],
-                "callback_url": command["callback_url"],
-                "case_id": command["case_id"],
-                "ticket_id": command.get("ticket_id"),
-                "run_id": command["run_id"],
-                "wait_id": command["wait_id"],
-                "correlation_id": command["correlation_id"],
-                "event_type": command["expected_event_type"],
-                "idempotency_key_base": command["idempotency_key"],
-                "result_transport": command.get("result_transport", "http_callback"),
-                "result_topic": command.get("result_topic", DEFAULT_EXTERNAL_EVENT_TOPIC),
-            },
-        )
+
         started_at = time.monotonic()
-        result = self.dispatcher.dispatch(invocation)
+        external_result = None
+        try:
+            self.processing_store.mark_tool_command_dispatch_started(command, worker_id=self.worker_id)
+            ack_or_result = invoke_mcp_tool_request(
+                environment=environment,
+                mcp_request=command["mcp_request"],
+                secret_resolver=os.getenv,
+                request_id=command["command_id"],
+            )
+            if command["mcp_request"].get("execution_mode") == "async":
+                validate_async_ack(ack_or_result, correlation_id=command["correlation_id"])
+            else:
+                validate_sync_result(ack_or_result, capability)
+            result = self._success_result(
+                command,
+                ack_or_result,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
+        except McpExecutionError as error:
+            result = self._failure_result(
+                command,
+                str(error),
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
+            external_result = self._record_dispatch_failure(command, result)
+
         duration_seconds = time.monotonic() - started_at
         self.processing_store.record_tool_command_result(
             result,
             case_id=command["case_id"],
-            idempotency_key=f"{command['idempotency_key']}:tool_result",
+            idempotency_key=f"{command['idempotency_key']}:mcp_result",
         )
-        if result["status"] not in {"success", "dry_run_completed"}:
-            external_result = self._record_dispatch_failure(command, result)
-        else:
-            external_result = None
-        metrics.increment("tool_command_worker_total", {"status": result["status"], "tool_name": result["tool_name"]})
+        metrics.increment(
+            "mcp_command_worker_total",
+            {"status": result["status"], "capability_id": command["capability_id"]},
+        )
         metrics.observe(
-            "tool_command_worker_duration_seconds",
+            "mcp_command_worker_duration_seconds",
             duration_seconds,
-            {"tool_name": result["tool_name"], "status": result["status"]},
+            {"capability_id": command["capability_id"], "status": result["status"]},
         )
         log_json(
             logger,
             logging.INFO,
-            "tool_command_processed",
+            "mcp_command_processed",
             command_id=command["command_id"],
             case_id=command["case_id"],
-            tool_name=result["tool_name"],
+            capability_id=command["capability_id"],
+            mcp_environment_id=command["mcp_environment_id"],
             status=result["status"],
             duration_ms=int(duration_seconds * 1000),
         )
@@ -482,6 +499,7 @@ class ToolCommandWorker:
             "command_id": command["command_id"],
             "case_id": command["case_id"],
             "wait_id": command["wait_id"],
+            "mcp_result": result,
             "tool_result": result,
         }
         if external_result:
@@ -489,15 +507,20 @@ class ToolCommandWorker:
         self.processing_store.complete_tool_command(command, response, worker_id=self.worker_id)
         return response
 
-    def process_commands(self, commands: Iterable[dict[str, Any] | KafkaCommandRecord], *, limit: int | None = None) -> dict[str, Any]:
+    def process_commands(
+        self,
+        commands: Iterable[dict[str, Any] | KafkaCommandRecord],
+        *,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
         processed = 0
         failed = 0
         dead_lettered = 0
         handled = 0
         with RuntimeHeartbeat(
             self.processing_store,
-            role="tool_worker",
-            display_name="Tool command worker",
+            role="mcp_worker",
+            display_name="MCP command worker",
             worker_id=self.worker_id,
             topic=self.topic,
         ) as heartbeat:
@@ -512,7 +535,7 @@ class ToolCommandWorker:
                     self._commit_record(item)
                     processed += 1
                     handled += 1
-                except (KafkaRuntimeError, ProcessingConflict, ProcessingNotFound) as error:
+                except (KafkaRuntimeError, McpExecutionError, ProcessingConflict, ProcessingNotFound) as error:
                     failed += 1
                     handled += 1
                     if command is None:
@@ -529,24 +552,24 @@ class ToolCommandWorker:
                         log_json(
                             logger,
                             logging.ERROR,
-                            "tool_command_dead_letter_failed",
+                            "mcp_command_dead_letter_failed",
                             error=ProcessingStore._sanitize_error_text(str(dlq_error)),
                         )
-                    metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
+                    metrics.increment("mcp_command_worker_total", {"status": "failed", "capability_id": "unknown"})
                     log_json(
                         logger,
                         logging.ERROR,
-                        "tool_command_failed",
+                        "mcp_command_failed",
                         error=ProcessingStore._sanitize_error_text(str(error)),
                     )
                 except Exception as error:  # noqa: BLE001 - no commit for transient/unclassified failures
                     failed += 1
                     handled += 1
-                    metrics.increment("tool_command_worker_total", {"status": "failed", "tool_name": "unknown"})
+                    metrics.increment("mcp_command_worker_total", {"status": "failed", "capability_id": "unknown"})
                     log_json(
                         logger,
                         logging.ERROR,
-                        "tool_command_failed_without_commit",
+                        "mcp_command_failed_without_commit",
                         error=ProcessingStore._sanitize_error_text(str(error)),
                     )
             heartbeat.beat(
@@ -558,6 +581,91 @@ class ToolCommandWorker:
             "processed": processed,
             "failed": failed,
             "dead_lettered": dead_lettered,
+        }
+
+    def _resolve_command_context(self, command: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        capability = command.get("capability_snapshot")
+        if not isinstance(capability, dict) or capability.get("capability_id") != command.get("capability_id"):
+            capability = self._find_config_item(
+                self.config_store.active_payload("capabilities").get("capabilities", []),
+                "capability_id",
+                command["capability_id"],
+            )
+        environment = command.get("mcp_environment_snapshot")
+        if not isinstance(environment, dict) or environment.get("environment_id") != command.get("mcp_environment_id"):
+            environment = self._find_config_item(
+                self.config_store.active_payload("mcp_environments").get("environments", []),
+                "environment_id",
+                command["mcp_environment_id"],
+            )
+        return capability, environment
+
+    @staticmethod
+    def _find_config_item(items: Iterable[dict[str, Any]], key: str, value: str) -> dict[str, Any]:
+        for item in items:
+            if item.get(key) == value:
+                return copy.deepcopy(item)
+        raise McpExecutionError(f"MCP command ссылается на неизвестный {key}: {value}.")
+
+    @classmethod
+    def _success_result(cls, command: dict[str, Any], mcp_result: dict[str, Any], *, duration_ms: int) -> dict[str, Any]:
+        return {
+            **cls._tool_result_base(command, duration_ms=duration_ms),
+            "schema_version": "1.0",
+            "tool_name": command["mcp_tool_name"],
+            "adapter_type": "mcp_tool",
+            "endpoint_id": command["mcp_environment_id"],
+            "operation_id": command["mcp_tool_name"],
+            "status": "success",
+            "output": copy.deepcopy(mcp_result),
+            "extensions": {
+                "capability_id": command["capability_id"],
+                "mcp_environment_id": command["mcp_environment_id"],
+                "mcp_tool_name": command["mcp_tool_name"],
+                "external_execution_id": mcp_result.get("external_execution_id"),
+                "diagnostics": copy.deepcopy(mcp_result.get("diagnostics") or {}),
+            },
+        }
+
+    @classmethod
+    def _failure_result(cls, command: dict[str, Any], message: str, *, duration_ms: int) -> dict[str, Any]:
+        return {
+            **cls._tool_result_base(command, duration_ms=duration_ms),
+            "schema_version": "1.0",
+            "tool_name": command["mcp_tool_name"],
+            "adapter_type": "mcp_tool",
+            "endpoint_id": command["mcp_environment_id"],
+            "operation_id": command["mcp_tool_name"],
+            "status": "error",
+            "output": {},
+            "error": {
+                "code": "mcp_execution_failed",
+                "message": ProcessingStore._sanitize_error_text(message),
+            },
+            "extensions": {
+                "capability_id": command["capability_id"],
+                "mcp_environment_id": command["mcp_environment_id"],
+                "mcp_tool_name": command["mcp_tool_name"],
+            },
+        }
+
+    @staticmethod
+    def _tool_result_base(command: dict[str, Any], *, duration_ms: int) -> dict[str, Any]:
+        invocation = command.get("invocation") if isinstance(command.get("invocation"), dict) else {}
+        extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        invocation_id = str(invocation.get("invocation_id") or command["command_id"])
+        action_id = str(invocation.get("action_id") or invocation.get("launch_id") or command["capability_id"])
+        policy_rule_id = str(
+            invocation.get("policy_rule_id")
+            or extensions.get("policy_rule_id")
+            or f"capability.{command['capability_id']}.mcp_dispatch"
+        )
+        return {
+            "invocation_id": invocation_id,
+            "action_id": action_id,
+            "policy_rule_id": policy_rule_id,
+            "duration_ms": max(0, int(duration_ms)),
+            "attempts": int(command.get("attempts") or 1),
         }
 
     @staticmethod
@@ -574,24 +682,30 @@ class ToolCommandWorker:
             "expected_event_type",
             "callback_url",
             "idempotency_key",
+            "capability_id",
+            "mcp_environment_id",
+            "mcp_tool_name",
+            "mcp_request",
             "invocation",
         }
         missing = sorted(key for key in required if key not in command)
         if missing:
-            raise KafkaRuntimeError(f"tool command misses required fields: {', '.join(missing)}")
-        if command["schema_version"] != "1.0" or command["command_type"] != "async_tool_invocation":
-            raise KafkaRuntimeError("tool command имеет неподдерживаемую версию или тип.")
+            raise KafkaRuntimeError(f"MCP command misses required fields: {', '.join(missing)}")
+        if command["schema_version"] != "1.0" or command["command_type"] != "async_mcp_capability_invocation":
+            raise KafkaRuntimeError("MCP command имеет неподдерживаемую версию или тип.")
+        if not isinstance(command.get("mcp_request"), dict):
+            raise KafkaRuntimeError("MCP command mcp_request должен быть object.")
 
     @staticmethod
     def _extract_command(item: dict[str, Any] | KafkaCommandRecord) -> dict[str, Any]:
         value = item.value if isinstance(item, KafkaCommandRecord) else item
         value = decode_kafka_json_object(value)
-        if value.get("event_type") == "async_tool_invocation_requested" and isinstance(value.get("payload"), dict):
+        if value.get("event_type") == "async_mcp_capability_invocation_requested" and isinstance(value.get("payload"), dict):
             command = copy.deepcopy(value["payload"])
-            command.setdefault("topic", value.get("topic"))
+            command["topic"] = value.get("topic") or command.get("topic") or DEFAULT_ASYNC_MCP_COMMAND_TOPIC
             return command
         command = copy.deepcopy(value)
-        command.setdefault("topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
+        command.setdefault("topic", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
         return command
 
     @staticmethod
@@ -603,15 +717,15 @@ class ToolCommandWorker:
     def _dead_letter_command(item: dict[str, Any] | KafkaCommandRecord) -> dict[str, Any]:
         value = item.value if isinstance(item, KafkaCommandRecord) else item
         record_key = (
-            f"{getattr(item, 'topic', DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)}:"
+            f"{getattr(item, 'topic', DEFAULT_ASYNC_MCP_COMMAND_TOPIC)}:"
             f"{getattr(item, 'partition', 'unknown')}:"
             f"{getattr(item, 'offset', uuid.uuid4().hex[:12])}"
         )
         return {
             "schema_version": "1.0",
             "command_id": f"invalid-{uuid.uuid4().hex[:12]}",
-            "command_type": "invalid_tool_command",
-            "topic": getattr(item, "topic", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC),
+            "command_type": "invalid_mcp_command",
+            "topic": getattr(item, "topic", DEFAULT_ASYNC_MCP_COMMAND_TOPIC),
             "case_id": "unknown",
             "wait_id": None,
             "correlation_id": None,
@@ -619,23 +733,10 @@ class ToolCommandWorker:
             "raw": value,
         }
 
-    @staticmethod
-    def _resolve_secret_operation_parameters(invocation: dict[str, Any]) -> None:
-        extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
-        secret_parameters = extensions.get("secret_operation_parameters")
-        if not isinstance(secret_parameters, dict):
-            return
-        operation_parameters = invocation.setdefault("operation_parameters", {})
-        for parameter, env_name in secret_parameters.items():
-            secret_value = os.getenv(str(env_name), "")
-            if not secret_value:
-                raise KafkaRuntimeError(f"Не задана переменная окружения для secret operation parameter: {env_name}")
-            operation_parameters[parameter] = secret_value
-
     def _record_dispatch_failure(self, command: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         error = result.get("error") or {
-            "code": f"tool_status_{result['status']}",
-            "message": f"ReAct-вызов завершился статусом {result['status']}.",
+            "code": f"mcp_status_{result['status']}",
+            "message": f"MCP-вызов завершился статусом {result['status']}.",
         }
         event = {
             "schema_version": "1.0",
@@ -650,8 +751,8 @@ class ToolCommandWorker:
             "received_at": utc_now(),
             "idempotency_key": f"{command['idempotency_key']}:dispatch_error",
             "error": {
-                "code": str(error.get("code") or "tool_dispatch_failed"),
-                "message": str(error.get("message") or "Async ReAct-вызов завершился ошибкой."),
+                "code": str(error.get("code") or "mcp_dispatch_failed"),
+                "message": str(error.get("message") or "Async MCP-вызов завершился ошибкой."),
             },
         }
         return self.processing_store.record_external_event(event)
@@ -1141,17 +1242,11 @@ class AgentTaskWorker:
         return totals
 
 
-def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingStore, IntegrationDispatcher]:
+def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingStore]:
     contracts = ContractRegistry()
     case_store = CaseStore(contracts)
     config_store = ConfigStore(contracts)
     processing_store = ProcessingStore(case_store, config_store=config_store)
-    for domain, attribute in (
-        ("tools", "tool_catalog"),
-        ("integration_endpoints", "integration_endpoint_catalog"),
-        ("n8n_workflows", "n8n_workflow_catalog"),
-    ):
-        setattr(contracts, attribute, copy.deepcopy(config_store.active_payload(domain)))
     from .workflow import TicketWorkflow
 
     workflow = TicketWorkflow(
@@ -1161,14 +1256,15 @@ def build_default_runtime() -> tuple[ContractRegistry, ConfigStore, ProcessingSt
         processing_store=processing_store,
     )
     processing_store.attach_workflow(workflow)
-    registry = ToolRegistry(contracts)
-    dispatcher = workflow.integration_dispatcher or IntegrationDispatcher(contracts, registry)
-    return contracts, config_store, processing_store, dispatcher
+    return contracts, config_store, processing_store
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ServiceDeskAgents Kafka async runtime")
-    parser.add_argument("mode", choices=["publish-once", "publisher", "worker", "external-event-worker", "agent-task-worker"])
+    parser.add_argument(
+        "mode",
+        choices=["publish-once", "publisher", "mcp-worker", "external-event-worker", "agent-task-worker"],
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--topic")
     parser.add_argument("--interval-seconds", type=float, default=2.0)
@@ -1177,7 +1273,7 @@ def main() -> None:
 
     configure_logging()
     validate_startup_environment()
-    contracts, config_store, processing_store, dispatcher = build_default_runtime()
+    contracts, config_store, processing_store = build_default_runtime()
     if args.mode == "publish-once":
         publish_limit = args.limit if args.limit is not None else 50
         result = OutboxPublisher(
@@ -1204,10 +1300,14 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
 
-    if args.mode == "worker":
-        topic = args.topic or os.getenv("TOOL_COMMAND_TOPIC", DEFAULT_ASYNC_TOOL_COMMAND_TOPIC)
-        consumer = JsonKafkaConsumer(topic=topic)
-        result = ToolCommandWorker(processing_store, dispatcher, topic=topic).process_commands(consumer, limit=args.limit)
+    if args.mode == "mcp-worker":
+        topic = args.topic or os.getenv("MCP_COMMAND_TOPIC", DEFAULT_ASYNC_MCP_COMMAND_TOPIC)
+        consumer = JsonKafkaConsumer(
+            topic=topic,
+            group_id=os.getenv("MCP_COMMAND_WORKER_GROUP_ID", "servicedesk-mcp-workers"),
+            offset_reset_env="MCP_COMMAND_WORKER_OFFSET_RESET",
+        )
+        result = McpCommandWorker(processing_store, config_store, topic=topic).process_commands(consumer, limit=args.limit)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return
 

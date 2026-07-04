@@ -142,7 +142,7 @@ const visibleLabels = {
   provided: 'заполнено',
   ready: 'готово',
   ready_for_execution: 'готово к выполнению',
-  ready_for_react: 'готово к ReAct',
+  ready_for_react: 'готово к оркестрации',
   required: 'обязательный',
   resolution_pending: 'ожидает разрешения',
   skipped: 'пропущено',
@@ -171,11 +171,12 @@ const visibleLabels = {
   published_to_kafka: 'опубликовано в Kafka',
   worker_started: 'worker начал',
   worker_failed: 'ошибка worker',
-  n8n_launch_rejected: 'n8n отклонил запуск',
-  waiting_external_event: 'ожидает n8n callback',
-  external_event_received: 'результат n8n получен',
-  external_event_failed: 'n8n вернул ошибку',
-  external_event_timeout: 'n8n timeout',
+  external_launch_rejected: 'внешний исполнитель отклонил запуск',
+  mcp_launch_rejected: 'MCP отклонил запуск',
+  waiting_external_event: 'ожидает ExternalEvent',
+  external_event_received: 'внешний результат получен',
+  external_event_failed: 'внешнее исполнение вернуло ошибку',
+  external_event_timeout: 'ExternalEvent timeout',
   runtime_completed: 'runtime выполнен',
   runtime_failed: 'runtime ошибка',
   runtime_cancelled: 'runtime отменен',
@@ -220,18 +221,20 @@ const visibleLabels = {
   no: 'нет',
   policy_blocked: 'policy blocked',
   all_required_slots_filled: 'все обязательные слоты заполнены',
-  tool_success: 'успешный результат инструмента',
+  capability_success: 'успешный результат capability',
+  tool_success: 'успешный результат capability',
   clarification_required: 'нужно уточнение у клиента',
   handoff_required: 'требуется эскалация оператору',
   iteration_limit: 'лимит итераций',
-  consecutive_tool_errors: 'ошибки инструментов подряд',
+  consecutive_capability_errors: 'ошибки capability подряд',
+  consecutive_tool_errors: 'ошибки capability подряд',
   read_diagnostics: 'чтение и диагностика',
   knowledge_search: 'поиск в знаниях',
   external_status_check: 'проверка внешних систем',
   action_preparation: 'подготовка действия',
   state_changing_actions: 'действия с изменением состояния',
   communication_handoff: 'коммуникация и эскалация',
-  react_call: 'ReAct-вызов чтения',
+  react_call: 'вызов',
   client_question: 'вопрос клиенту',
   approval: 'согласование',
   timer: 'таймер',
@@ -269,14 +272,16 @@ const fillMethodLabels = {
 
 const stopConditionLabels = {
   all_required_slots_filled: 'все обязательные слоты заполнены',
-  tool_success: 'получен успешный результат инструмента',
+  capability_success: 'получен успешный результат capability',
+  tool_success: 'получен успешный результат capability',
   clarification_required: 'нужно уточнение у клиента',
   handoff_required: 'требуется эскалация оператору',
   iteration_limit: 'достигнут лимит итераций',
-  consecutive_tool_errors: 'ошибки инструментов подряд',
+  consecutive_capability_errors: 'ошибки capability подряд',
+  consecutive_tool_errors: 'ошибки capability подряд',
 };
 
-const reactActionGroupLabels = {
+const orchestrationActionGroupLabels = {
   read_diagnostics: 'чтение и диагностика',
   knowledge_search: 'поиск в знаниях',
   external_status_check: 'проверка внешних систем',
@@ -291,7 +296,6 @@ const eventTypeLabels = {
   action_gate_created: 'Создано согласование',
   approval_decisioned: 'Согласование обработано',
   tool_result_recorded: 'Результат инструмента записан',
-  integration_callback_received: 'Получен callback интеграции',
   feedback_recorded: 'Обратная связь записана',
   evaluation_result_recorded: 'Результат оценки записан',
 };
@@ -622,7 +626,7 @@ function traceJson(value) {
 
 function traceCallLabel(item) {
   const details = item.details || {};
-  const callName = details.react_call || details.tool_name || '';
+  const callName = details.capability_id || details.react_call || details.tool_name || '';
   const endpoint = details.endpoint_id || '';
   const operation = details.operation_id || '';
   if (callName && endpoint && operation) {
@@ -713,7 +717,7 @@ function traceStatusHint(status) {
     waiting: 'Открыто ожидание результата или ответа.',
     waiting_for_dependencies: 'Ожидаются зависимые слоты или результат внешнего вызова.',
     blocked_by_dependency_cycle: 'Обнаружен цикл зависимостей слотов.',
-    waiting_external_event: 'Открыто ожидание terminal ExternalEvent от n8n.',
+    waiting_external_event: 'Открыто ожидание terminal ExternalEvent от внешнего исполнителя.',
     superseded_by_runtime: 'Плановое ожидание закрыто фактическим runtime.',
     started: 'Шаг начат.',
   };
@@ -817,7 +821,7 @@ function renderVariableContextSnapshot(simulation) {
     ['${stage.0.slot_values}', 'Этапы сценария: собранные значения'],
     ['${stage.1.resolution_state}', 'Профили разрешения: состояние разрешения'],
     ['${stage.2.classification}', 'Классификация и маршрут'],
-    ['${stage.4.ready_tool_launches}', 'Подготовленные ReAct-вызовы'],
+    ['${stage.4.ready_tool_launches}', 'Подготовленные capability-вызовы'],
     ['${stage.4.planned_waits}', 'Запланированные ожидания'],
     ['${stage.5.final_decision}', 'Финальное решение'],
     ['${stage.5.agent_outcome}', 'Итог агента'],
@@ -1077,13 +1081,13 @@ function clientAgentOutcome(simulation) {
   }
   const pendingExternalEvent = simulation.final_decision === 'waiting_external_event'
     || (simulation.attribute_resolution || []).some((item) =>
-      item.status === 'pending_live_execution' || item.decision === 'execute_react_call',
+      item.status === 'pending_live_execution' || item.decision === 'execute_capability',
     );
   if (pendingExternalEvent) {
     return {
       status: 'waiting_external_event',
-      label: 'Ожидает n8n',
-      summary: 'Агент ожидает внешний результат ReAct-вызова или n8n workflow.',
+      label: 'Ожидает внешний результат',
+      summary: 'Агент ожидает ExternalEvent от MCP capability.',
       next_step: 'Дождитесь terminal ExternalEvent; после callback проверьте профиль разрешения и итоговые слоты.',
       missing_slots: simulation.missing_slots || [],
     };
@@ -1129,7 +1133,12 @@ function outcomeList(values = []) {
 
 function outcomeCallLabel(item) {
   if (!item) return '';
-  const name = item.react_call || item.tool_name || 'ReAct-вызов';
+  const name = item.capability_id || item.react_call || item.tool_name || 'внешний вызов';
+  if (item.capability_id) {
+    return item.mcp_environment_id || item.mcp_tool_name
+      ? `${name} -> ${item.mcp_environment_id || 'MCP н/д'}/${item.mcp_tool_name || 'tool н/д'}`
+      : name;
+  }
   const endpoint = item.endpoint_id || '';
   const operation = item.operation_id || '';
   return endpoint || operation
@@ -1139,14 +1148,14 @@ function outcomeCallLabel(item) {
 
 function renderAgentOutcomePanel(simulation) {
   const outcome = clientAgentOutcome(simulation);
-  const readyCalls = outcome.ready_react_calls || [];
-  const blockedCalls = outcome.blocked_react_calls || [];
+  const readyCapabilities = outcome.ready_capabilities || [];
+  const blockedCapabilities = outcome.blocked_capabilities || [];
   const details = [
     metric('Статус агента', badge(outcome.status)),
     metric('Заполнено слотов', escapeHtml(outcomeList(outcome.filled_slots || []))),
     metric('Не хватает слотов', escapeHtml(outcomeList(outcome.missing_slots || []))),
-    metric('Готовые ReAct-вызовы', escapeHtml(outcomeList(readyCalls.map(outcomeCallLabel)))),
-    metric('Заблокированные вызовы', escapeHtml(outcomeList(blockedCalls.map(outcomeCallLabel)))),
+    metric('Готовые MCP capabilities', escapeHtml(outcomeList(readyCapabilities.map(outcomeCallLabel)))),
+    metric('Заблокированные capabilities', escapeHtml(outcomeList(blockedCapabilities.map(outcomeCallLabel)))),
   ].join('');
   return `
     <section class="agent-outcome agent-outcome-${escapeHtml(outcome.status || 'pending')}">
@@ -1354,9 +1363,9 @@ function resolutionProgressText(item) {
 }
 
 function resolutionEnrichmentLabel(steps = []) {
-  if (!steps.length) return 'нет ReAct-вызовов';
+  if (!steps.length) return 'нет capability-шагов';
   return steps
-    .map((step, index) => `${step.step_name || step.react_call || `Шаг ${index + 1}`} (${step.step_id || `step${index + 1}`})`)
+    .map((step, index) => `${step.step_name || step.capability_id || step.react_call || `Шаг ${index + 1}`} (${step.step_id || `step${index + 1}`})`)
     .join('; ');
 }
 
@@ -1540,7 +1549,8 @@ function launchExecutionState(launch, stepResult, analysis = state.analysis) {
 }
 
 function renderResolutionParameterTable(step = {}, stepResult = {}, launch = null, execution = {}) {
-  const bindings = step.parameter_mapping || launch?.parameter_bindings || {};
+  const isCapability = Boolean(step.capability_id || stepResult.capability_id || launch?.capability_id);
+  const bindings = step.input_mapping || step.parameter_mapping || launch?.parameter_bindings || {};
   const trace = execution.result?.extensions?.trace || {};
   const reactParameters = trace.react_parameters || execution.action?.parameters || stepResult.parameters || {};
   const operationParameters = trace.operation_parameters || {};
@@ -1550,7 +1560,10 @@ function renderResolutionParameterTable(step = {}, stepResult = {}, launch = nul
     traceJson(reactParameters[parameter]),
     traceJson(operationParameters[parameter]),
   ]);
-  return table(['Параметр ReAct', 'Источник', 'Значение ReAct', 'Параметр endpoint'], rows);
+  return table(
+    [isCapability ? 'Параметр capability' : 'Параметр вызова', 'Источник', 'Значение', isCapability ? 'Параметр MCP' : 'Параметр endpoint'],
+    rows,
+  );
 }
 
 function renderAsyncDeliveryDiagnostics(delivery) {
@@ -1565,6 +1578,8 @@ function renderAsyncDeliveryDiagnostics(delivery) {
   const pollingDiagnostic = latestResult.polling_diagnostic || {};
   const receiptError = receipt.tool_result_error || {};
   const receiptOutput = receipt.tool_result_output || {};
+  const isMcp = Boolean(receipt.capability_id || receipt.mcp_environment_id || wait.origin?.kind === 'capability');
+  const executionLabel = isMcp ? 'MCP / ExternalEvent' : 'ExternalEvent';
   const latestEventDetail = latestEvent.error?.message
     || latestResult.message
     || (pollingDiagnostic.current_status ? `polling=${pollingDiagnostic.current_status}; match_count=${pollingDiagnostic.match_count ?? 'н/д'}` : '')
@@ -1596,13 +1611,13 @@ function renderAsyncDeliveryDiagnostics(delivery) {
       ),
     ],
     [
-      'n8n / ExternalEvent',
+      executionLabel,
       badge(latestEvent.status || wait.status || 'waiting'),
       escapeHtml(latestEvent.event_id || wait.wait_id || 'н/д'),
       escapeHtml(latestEventDetail),
     ],
   ];
-  const n8nResultSummary = latestEvent.result ? `
+  const externalResultSummary = latestEvent.result ? `
     <div class="grid">
       ${metric('Runbook status', badge(latestResult.runbook_status || latestEvent.status || 'н/д'))}
       ${metric('Email result', badge(emailResult.status || 'н/д'))}
@@ -1632,15 +1647,19 @@ function renderAsyncDeliveryDiagnostics(delivery) {
         ${metric('Уровень', badge(delivery.severity || 'н/д'))}
         ${metric('Endpoint / операция', escapeHtml(`${receipt.endpoint_id || 'н/д'} / ${receipt.operation_id || 'н/д'}`))}
         ${metric('Tool', escapeHtml(receipt.tool_name || 'н/д'))}
+        ${isMcp ? metric('Capability', escapeHtml(receipt.capability_id || 'н/д')) : ''}
+        ${isMcp ? metric('MCP окружение', escapeHtml(receipt.mcp_environment_id || 'н/д')) : ''}
+        ${isMcp ? metric('MCP tool', escapeHtml(receipt.mcp_tool_name || 'н/д')) : ''}
+        ${isMcp ? metric('External execution', escapeHtml(receipt.external_execution_id || 'н/д')) : ''}
         ${metric('Command ID', escapeHtml(delivery.command_id || 'н/д'))}
         ${metric('Wait ID', escapeHtml(delivery.wait_id || 'н/д'))}
         ${metric('Topic', escapeHtml(delivery.topic || outbox.topic || 'н/д'))}
-        ${metric('n8n URL', escapeHtml(receipt.endpoint_url || 'н/д'))}
+        ${!isMcp ? metric('External URL', escapeHtml(receipt.endpoint_url || 'н/д')) : ''}
       </div>
       <p>${escapeHtml(delivery.message || 'н/д')}</p>
       <p><strong>Корневая причина:</strong> ${escapeHtml(delivery.root_cause || 'н/д')}</p>
       ${pollingSummary}
-      ${n8nResultSummary}
+      ${externalResultSummary}
       ${table(['Стадия', 'Статус', 'Идентификатор', 'Деталь'], rows)}
       <details>
         <summary>Технические детали async-доставки</summary>
@@ -1727,8 +1746,12 @@ function renderResolutionProfileStep(profileItem, step, index) {
       </summary>
       <div class="resolution-step-body">
         <div class="grid">
-          ${metric('ReAct-вызов', escapeHtml(step.react_call || stepResult.react_call || launch?.tool_name || 'н/д'))}
-          ${metric('Endpoint / операция', escapeHtml(`${step.endpoint_id || stepResult.endpoint_id || launch?.endpoint_id || 'н/д'} / ${step.operation_id || stepResult.operation_id || launch?.operation_id || 'н/д'}`))}
+          ${(step.capability_id || stepResult.capability_id || launch?.capability_id)
+            ? metric('Capability', escapeHtml(step.capability_id || stepResult.capability_id || launch?.capability_id || 'н/д'))
+            : metric('Вызов', escapeHtml(step.react_call || stepResult.react_call || launch?.tool_name || 'н/д'))}
+          ${(step.capability_id || stepResult.capability_id || launch?.capability_id)
+            ? metric('MCP / tool', escapeHtml(`${step.mcp_environment_id || stepResult.mcp_environment_id || launch?.mcp_environment_id || 'н/д'} / ${step.mcp_tool_name || stepResult.mcp_tool_name || launch?.mcp_tool_name || 'н/д'}`))
+            : metric('Endpoint / операция', escapeHtml(`${step.endpoint_id || stepResult.endpoint_id || launch?.endpoint_id || 'н/д'} / ${step.operation_id || stepResult.operation_id || launch?.operation_id || 'н/д'}`))}
           ${metric('Получение результата', escapeHtml(completionPolicySummary(completionPolicy)))}
           ${metric('Launch ID', escapeHtml(launch?.launch_id || `${profileItem.profile_id}.${stepId}`))}
         </div>
@@ -1749,7 +1772,7 @@ function resolutionProfileRuntimeSummary(item, steps = []) {
     })
     .filter(Boolean);
   const errorExecution = executions.find((execution) =>
-    ['n8n_launch_rejected', 'external_event_failed', 'worker_failed', 'not_dispatched', 'error'].includes(execution.status),
+      ['external_launch_rejected', 'external_event_failed', 'worker_failed', 'not_dispatched', 'error'].includes(execution.status),
   );
   if (errorExecution) {
     return {
@@ -1860,10 +1883,13 @@ function waitOriginSummary(origin = {}) {
   if (!origin || !origin.kind) return 'н/д';
   const kind = visibleLabels[origin.kind] || origin.kind;
   if (origin.kind === 'react_call') {
-    const call = origin.react_call || origin.tool_name || 'ReAct-вызов';
-    const endpoint = origin.endpoint_id || 'endpoint н/д';
-    const operation = origin.operation_id || 'операция н/д';
-    return `${kind}: ${call} -> ${endpoint}/${operation}`;
+    return `вызов: ${origin.react_call || origin.tool_name || 'н/д'}`;
+  }
+  if (origin.kind === 'capability') {
+    const capability = origin.capability_id || 'capability н/д';
+    const environment = origin.mcp_environment_id || 'MCP н/д';
+    const tool = origin.mcp_tool_name || 'tool н/д';
+    return `${kind}: ${capability} -> ${environment}/${tool}`;
   }
   if (origin.kind === 'client_question') {
     return `${kind}: ${formatList(origin.slot_ids || origin.expected_slots || [])}`;
@@ -2043,7 +2069,7 @@ function renderQuestion() {
     elements.questionView.innerHTML = `
       <div class="question-ready">
         <div class="question-title">Данных достаточно для следующего шага</div>
-        <div class="question-meta">Оператор может запускать анализ, а сценарий перейдет к ReAct-планированию.</div>
+        <div class="question-meta">Оператор может запускать анализ, а сценарий перейдет к планированию оркестрации.</div>
       </div>
     `;
     return;
@@ -2183,18 +2209,29 @@ function renderFiveStepView(detail, simulation, options = {}) {
   const launchRows = (detail.tool_launches || []).map((launch) => {
     const runtime = launchRuntimeSummary(launch, simulation);
     const completionPolicy = runtime.completion_policy || launch.completion_policy || { mode: 'sync' };
+    const isCapability = launch.launch_type === 'capability' || Boolean(launch.capability_id);
+    const launchName = isCapability
+      ? (launch.capability_id || launch.tool_name || launch.mcp_tool_name || 'capability н/д')
+      : (launch.tool_name || 'вызов н/д');
+    const executionLabel = launch.execution_mode || launch.target_execution_level || launch.execution_level || 'н/д';
+    const bindingLabel = isCapability
+      ? `${launch.mcp_environment_id || 'mcp н/д'} / ${launch.mcp_tool_name || 'tool н/д'}`
+      : `${launch.endpoint_id || 'endpoint н/д'} / ${launch.operation_id || 'operation н/д'}`;
     const blockReasons = [
       ...(runtime.missing_slots || []).map((slotId) => `не заполнен: ${slotId}`),
+      ...(runtime.missing_parameter_slots || []).map((slotId) => `не заполнен: ${slotId}`),
       ...(runtime.unknown_required_slots || []).map((slotId) => `нет в схеме: ${slotId}`),
+      ...(runtime.block_reasons || []),
+      ...(launch.block_reasons || []),
     ];
     return [
       badge(runtime.status),
-      escapeHtml(launch.tool_name),
-      badge(launch.target_execution_level || launch.execution_level),
+      escapeHtml(launchName),
+      badge(executionLabel),
       escapeHtml(completionPolicySummary(completionPolicy)),
       escapeHtml(formatList(launch.required_slots)),
       formatMap(launch.parameter_bindings),
-      escapeHtml(`${launch.endpoint_id} / ${launch.operation_id}`),
+      escapeHtml(bindingLabel),
       badge(launch.risk_level),
       formatList(blockReasons),
     ];
@@ -2219,15 +2256,15 @@ function renderFiveStepView(detail, simulation, options = {}) {
   ]);
   const packageLabels = {
     slots: 'собранные слоты',
-    react_history: 'история ReAct',
+    react_history: 'история вызовов',
     tool_results: 'результаты инструментов',
     agent_hypothesis: 'гипотеза агента',
     sla_remaining: 'остаток SLA',
     user_notification: 'уведомление клиента',
   };
   const conditionLabels = {
-    two_tool_errors: '2 ошибки инструментов подряд',
-    iteration_limit: 'достигнут лимит ReAct-итераций',
+    two_tool_errors: '2 ошибки capability подряд',
+    iteration_limit: 'достигнут лимит итераций оркестрации',
     confidence_below_050: 'confidence ниже 0.50',
     policy_blocked: 'политика заблокировала автоисполнение',
   };
@@ -2266,21 +2303,21 @@ function renderFiveStepView(detail, simulation, options = {}) {
     ),
     stepBlock(
       3,
-      'Планирование ReAct',
+      'Планирование оркестрации',
       'ready',
       `<div class="grid">
         ${metric('Лимит итераций', escapeHtml(policy.max_iterations || 'н/д'))}
-        ${metric('Ошибок до эскалации оператору', escapeHtml(policy.consecutive_tool_errors_to_escalate || 'н/д'))}
-        ${metric('Группы действий ReAct', escapeHtml(formatList(policy.allowed_react_action_groups, (item) => reactActionGroupLabels[item] || item)))}
+        ${metric('Ошибок capability до эскалации оператору', escapeHtml(policy.consecutive_capability_errors_to_escalate || 'н/д'))}
+        ${metric('Группы действий оркестрации', escapeHtml(formatList(policy.allowed_orchestration_action_groups, (item) => orchestrationActionGroupLabels[item] || item)))}
         ${metric('Стоп-условия', escapeHtml(formatList(policy.stop_conditions, (item) => stopConditionLabels[item] || item)))}
       </div>`,
     ),
     stepBlock(
       4,
-      'Выполнение и инструменты',
+      'Выполнение capabilities',
       simulation?.blocked_tool_launches?.length ? 'blocked' : 'ready',
-      `${table(['Готовность', 'ReAct-вызов', 'Вид запуска', 'Получение результата', 'Слоты', 'Параметры вызова', 'Подключение / операция', 'Риск', 'Причина блокировки'], launchRows)}
-      <div class="hint">Action-инструменты в MVP запускаются через подтверждение оператора, даже если вид запуска отмечен как авто.</div>`,
+      `${table(['Готовность', 'Capability', 'Вид запуска', 'Получение результата', 'Слоты', 'Параметры вызова', 'MCP / tool', 'Риск', 'Причина блокировки'], launchRows)}
+      <div class="hint">State-changing capabilities запускаются через подтверждение оператора, если это требует policy.</div>`,
     ),
     stepBlock(
       5,
@@ -2586,8 +2623,18 @@ function buildScenarioDebugActions(payload) {
         parameters[parameter] = value;
       }
     });
-    const actionType = launch.action_type || 'read_only';
+    const isCapabilityLaunch = launch.launch_type === 'capability' || Boolean(launch.capability_id);
+    const launchActionType = launch.action_type || 'read_only';
+    const actionType = ['read_only', 'action'].includes(launchActionType) ? launchActionType : 'read_only';
+    const toolName = isCapabilityLaunch
+      ? (launch.tool_name || launch.capability_id || launch.mcp_tool_name)
+      : launch.tool_name;
     const extensions = compactObject({
+      launch_type: launch.launch_type,
+      capability_id: launch.capability_id,
+      mcp_environment_id: launch.mcp_environment_id,
+      mcp_tool_name: launch.mcp_tool_name,
+      execution_mode: launch.execution_mode,
       endpoint_id: launch.endpoint_id,
       operation_id: launch.operation_id,
       completion_policy: launch.completion_policy,
@@ -2599,13 +2646,17 @@ function buildScenarioDebugActions(payload) {
       debug_launch_id: launch.launch_id,
     });
     return {
-      tool_name: launch.tool_name,
+      tool_name: toolName,
       action_id: `${launch.launch_id || `debug_launch_${index + 1}`}.action`,
       action_type: actionType,
       parameters,
-      reason: `Операторский отладочный запуск ReAct-вызова ${launch.tool_name}.`,
+      reason: isCapabilityLaunch
+        ? `Операторский отладочный запуск MCP capability ${launch.capability_id || toolName}.`
+        : `Операторский отладочный запуск вызова ${toolName}.`,
       risk_level: launch.risk_level || (actionType === 'action' ? 'medium' : 'low'),
-      expected_effect: `Будет выполнена endpoint-операция ${launch.endpoint_id || 'н/д'} / ${launch.operation_id || 'н/д'}.`,
+      expected_effect: isCapabilityLaunch
+        ? `Будет вызвана MCP capability ${launch.capability_id || 'н/д'} в окружении ${launch.mcp_environment_id || 'н/д'}.`
+        : `Будет выполнена endpoint-операция ${launch.endpoint_id || 'н/д'} / ${launch.operation_id || 'н/д'}.`,
       requires_state_change: actionType === 'action',
       risk_notes: 'Операторская консоль отладки выполняет вызов без policy/safety gates.',
       extensions,
@@ -2620,11 +2671,11 @@ function scenarioDebugDecisionOverride(payload) {
     schema_version: '1.0',
     decision: {
       type: 'action_proposed',
-      summary: `Операторский отладочный запуск: ${proposedActions.length} ReAct-вызовов сценария.`,
+      summary: `Операторский отладочный запуск: ${proposedActions.length} capability-вызовов сценария.`,
       confidence: 1,
     },
     operator_message: 'Выполняется полный отладочный прогон вызовов сценария без policy/safety gates.',
-    internal_reasoning_summary: 'Операторская консоль отладки передала готовые ReAct-вызовы из сценарной симуляции.',
+    internal_reasoning_summary: 'Операторская консоль отладки передала готовые capability-вызовы из сценарной симуляции.',
     citations: [],
     proposed_actions: proposedActions,
   };

@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/mcp-environment-catalog.schema.json",
+  "title": "MCP Environment Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environments"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "environments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "environment_id",
+          "display_name",
+          "status",
+          "environment_tier",
+          "transport",
+          "base_url",
+          "auth_mode",
+          "auth_ref",
+          "allowed_capabilities",
+          "health_check",
+          "discovery_policy"
+        ],
+        "properties": {
+          "environment_id": {
+            "$ref": "#/$defs/id"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "environment_tier": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "test",
+              "staging",
+              "prod"
+            ]
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "streamable_http",
+              "http_sse",
+              "stdio"
+            ]
+          },
+          "base_url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "auth_mode": {
+            "type": "string",
+            "enum": [
+              "dev_bearer_token",
+              "oidc_client_credentials",
+              "oidc_workload_identity",
+              "signed_event"
+            ]
+          },
+          "auth_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^(secret|env):.+$"
+          },
+          "oidc_audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "allowed_capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/id"
+            },
+            "uniqueItems": true
+          },
+          "health_check": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "mcp_ping",
+                  "http_get",
+                  "disabled"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 120
+              }
+            }
+          },
+          "discovery_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "disabled",
+                  "manual",
+                  "mcp_tools"
+                ]
+              },
+              "refresh_interval_seconds": {
+                "type": "integer",
+                "minimum": 60,
+                "maximum": 604800
+              }
+            }
+          },
+          "extensions": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "active",
+        "planned",
+        "disabled"
+      ]
+    }
+  }
+}

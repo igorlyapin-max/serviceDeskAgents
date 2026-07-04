@@ -11,14 +11,24 @@ x-orchestrator-env: &orchestrator-env
   SERVICE_DESK_ENV: ${APP_ENV:-local}
   ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-18088}
   ORCHESTRATOR_STATE_DB: /app/state/orchestrator.sqlite
-  ORCHESTRATOR_PUBLIC_URL: ${COMPOSE_ORCHESTRATOR_PUBLIC_URL:-http://orchestrator:18088}
+  ORCHESTRATOR_PUBLIC_URL: ${COMPOSE_ORCHESTRATOR_PUBLIC_URL:-http://hostmachine:18088}
   CMDBUILD_BASE_URL: ${CMDBUILD_BASE_URL:-http://hostmachine:8090/cmdbuild}
   SECURITY_AUTH_MODE: ${SECURITY_AUTH_MODE:-dev_header}
   SECURITY_DEV_ACTOR: ${SECURITY_DEV_ACTOR:-admin-1}
   SECURITY_RATE_LIMIT_PER_MINUTE: ${SECURITY_RATE_LIMIT_PER_MINUTE:-600}
   METRICS_ALLOWED_IPS: ${METRICS_ALLOWED_IPS:-127.0.0.1,::1}
-  INTEGRATION_CALLBACK_TOKEN: ${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}
-  INTEGRATION_CALLBACK_TOKEN__N8N: ${INTEGRATION_CALLBACK_TOKEN__N8N:-${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}}
+  SECURITY_CALLBACK_AUTH_MODE: ${SECURITY_CALLBACK_AUTH_MODE:-source_token}
+  CALLBACK_OIDC_ISSUER: ${CALLBACK_OIDC_ISSUER:-}
+  CALLBACK_OIDC_AUDIENCE: ${CALLBACK_OIDC_AUDIENCE:-}
+  CALLBACK_OIDC_ALLOWED_CLIENT_IDS: ${CALLBACK_OIDC_ALLOWED_CLIENT_IDS:-}
+  CALLBACK_OIDC_JWKS_URL: ${CALLBACK_OIDC_JWKS_URL:-}
+  CALLBACK_OIDC_ALLOWED_ALGS: ${CALLBACK_OIDC_ALLOWED_ALGS:-RS256}
+  CALLBACK_OIDC_JWKS_CACHE_SECONDS: ${CALLBACK_OIDC_JWKS_CACHE_SECONDS:-300}
+  CALLBACK_OIDC_REQUIRED_SCOPE: ${CALLBACK_OIDC_REQUIRED_SCOPE:-servicedesk.external_events.write}
+  CALLBACK_OIDC_PROXY_TRUSTED_IPS: ${CALLBACK_OIDC_PROXY_TRUSTED_IPS:-}
+  CALLBACK_OIDC_PROXY_TRUST_HEADER: ${CALLBACK_OIDC_PROXY_TRUST_HEADER:-}
+  CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE: ${CALLBACK_OIDC_PROXY_TRUST_HEADER_VALUE:-}
+  INTEGRATION_CALLBACK_TOKEN: ${INTEGRATION_CALLBACK_TOKEN:-}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_SINKS: ${LOG_SINKS:-stdout,jsonl}
   LOG_JSONL_PATH: ${LOG_JSONL_PATH:-state/logs/servicedesk-events.jsonl}
@@ -28,6 +38,7 @@ x-orchestrator-env: &orchestrator-env
   READYZ_NETWORK_TIMEOUT_SECONDS: ${READYZ_NETWORK_TIMEOUT_SECONDS:-1.5}
   ASYNC_RUNTIME_HEARTBEAT_INTERVAL_SECONDS: ${ASYNC_RUNTIME_HEARTBEAT_INTERVAL_SECONDS:-5}
   ASYNC_RUNTIME_HEARTBEAT_STALE_SECONDS: ${ASYNC_RUNTIME_HEARTBEAT_STALE_SECONDS:-30}
+  ASYNC_RECOVERY_RECEIPT_STALE_SECONDS: ${ASYNC_RECOVERY_RECEIPT_STALE_SECONDS:-120}
   KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
   KAFKA_API_VERSION: ${ORCHESTRATOR_KAFKA_API_VERSION:-2.3}
   KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
@@ -38,17 +49,16 @@ x-orchestrator-env: &orchestrator-env
   KAFKA_SSL_CERT_FILE: ${KAFKA_SSL_CERT_FILE:-}
   KAFKA_SSL_KEY_FILE: ${KAFKA_SSL_KEY_FILE:-}
   KAFKA_SSL_CHECK_HOSTNAME: ${KAFKA_SSL_CHECK_HOSTNAME:-true}
-  TOOL_COMMAND_TOPIC: ${TOOL_COMMAND_TOPIC:-tool.commands}
-  TOOL_COMMAND_WORKER_GROUP_ID: ${TOOL_COMMAND_WORKER_GROUP_ID:-servicedesk-tool-workers}
+  MCP_COMMAND_TOPIC: ${MCP_COMMAND_TOPIC:-mcp.commands}
+  MCP_COMMAND_WORKER_GROUP_ID: ${MCP_COMMAND_WORKER_GROUP_ID:-servicedesk-mcp-workers}
+  MCP_COMMAND_WORKER_OFFSET_RESET: ${MCP_COMMAND_WORKER_OFFSET_RESET:-earliest}
+  MCP_PROVIDER_OPS_BASE_URL: ${MCP_PROVIDER_OPS_BASE_URL:-http://hostmachine:9000/mcp}
+  MCP_PROVIDER_OPS_TOKEN: ${MCP_PROVIDER_OPS_TOKEN:-}
   AGENT_TASK_TOPIC: ${AGENT_TASK_TOPIC:-agent.tasks}
   AGENT_TASK_LEASE_SECONDS: ${AGENT_TASK_LEASE_SECONDS:-60}
   EXTERNAL_EVENT_TOPIC: ${EXTERNAL_EVENT_TOPIC:-external.events}
   EXTERNAL_EVENT_WORKER_GROUP_ID: ${EXTERNAL_EVENT_WORKER_GROUP_ID:-servicedesk-external-event-workers}
   EXTERNAL_EVENT_WORKER_OFFSET_RESET: ${EXTERNAL_EVENT_WORKER_OFFSET_RESET:-earliest}
-  N8N_WEBHOOK_BASE_URL: http://n8n:5678/webhook
-  N8N_HEALTH_URL: http://n8n:5678/healthz
-  N8N_ENVIRONMENT: ${N8N_ENVIRONMENT:-local}
-  N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:?Set N8N_WEBHOOK_TOKEN in .env}
   LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY in .env}
   LITELLM_BASE_URL: ${COMPOSE_LITELLM_BASE_URL:-http://litellm:4000/v1}
   LITELLM_PUBLIC_BASE_URL: ${LITELLM_PUBLIC_BASE_URL:-http://127.0.0.1:${LITELLM_PORT:-4000}/v1}
@@ -77,9 +87,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-servicedesk}
       POSTGRES_USER: ${POSTGRES_USER:-servicedesk}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      N8N_DB_NAME: ${N8N_DB_NAME:-n8n}
-      N8N_DB_USER: ${N8N_DB_USER:-n8n}
-      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD in .env}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
     volumes:
@@ -137,75 +144,12 @@ services:
       timeout: 5s
       retries: 10
 
-  n8n:
-    image: n8nio/n8n:latest
-    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-n8n
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:-n8n}
-      DB_POSTGRESDB_USER: ${N8N_DB_USER:-n8n}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD in .env}
-      N8N_PORT: 5678
-      N8N_HOST: 0.0.0.0
-      N8N_PROTOCOL: http
-      WEBHOOK_URL: http://localhost:${N8N_PORT:-5678}/
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
-      N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN:?Set N8N_WEBHOOK_TOKEN in .env}
-      N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
-      N8N_OPENAPI_DEFAULT_LOCALE: ${N8N_OPENAPI_DEFAULT_LOCALE:-ru}
-      N8N_INTERNAL_WEBHOOK_BASE_URL: ${N8N_INTERNAL_WEBHOOK_BASE_URL:-http://127.0.0.1:5678/webhook}
-      SERVICE_DESK_ENV: ${APP_ENV:-local}
-      APP_ENV: ${APP_ENV:-local}
-      N8N_ENVIRONMENT: ${N8N_ENVIRONMENT:-local}
-      N8N_WORKFLOW_DEBUG: ${N8N_WORKFLOW_DEBUG:-off}
-      ORCHESTRATOR_PUBLIC_URL: ${COMPOSE_ORCHESTRATOR_PUBLIC_URL:-http://orchestrator:18088}
-      CMDBUILD_BASE_URL: ${CMDBUILD_BASE_URL:-http://hostmachine:8090/cmdbuild}
-      INTEGRATION_CALLBACK_TOKEN: ${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}
-      INTEGRATION_CALLBACK_TOKEN__N8N: ${INTEGRATION_CALLBACK_TOKEN__N8N:-${INTEGRATION_CALLBACK_TOKEN:?Set INTEGRATION_CALLBACK_TOKEN in .env}}
-      KAFKA_BOOTSTRAP_SERVERS: ${N8N_KAFKA_BOOTSTRAP_SERVERS:-redpanda:9092}
-      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-PLAINTEXT}
-      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-PLAIN}
-      KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
-      KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
-      KAFKA_SSL_CA_FILE: ${KAFKA_SSL_CA_FILE:-}
-      KAFKA_SSL_CERT_FILE: ${KAFKA_SSL_CERT_FILE:-}
-      KAFKA_SSL_KEY_FILE: ${KAFKA_SSL_KEY_FILE:-}
-      KAFKA_SSL_CHECK_HOSTNAME: ${KAFKA_SSL_CHECK_HOSTNAME:-true}
-      EXTERNAL_EVENT_TOPIC: ${EXTERNAL_EVENT_TOPIC:-external.events}
-      ZABBIX_RUNBOOK_REQUIRED_ORIGINS: ${ZABBIX_RUNBOOK_REQUIRED_ORIGINS:-}
-      ZABBIX_API_URLS_BY_ORIGIN: ${ZABBIX_API_URLS_BY_ORIGIN:-}
-      ZABBIX_API_TOKENS_BY_ORIGIN: ${ZABBIX_API_TOKENS_BY_ORIGIN:-}
-      N8N_DIAGNOSTICS_ENABLED: "false"
-      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
-      GENERIC_TIMEZONE: Europe/Moscow
-      TZ: Europe/Moscow
-    ports:
-      - "127.0.0.1:${N8N_PORT:-5678}:5678"
-    extra_hosts:
-      - "hostmachine:host-gateway"
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - n8n-data:/home/node/.n8n
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
   orchestrator:
     <<: *orchestrator-image
     container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-orchestrator
     restart: unless-stopped
     depends_on:
       redpanda:
-        condition: service_healthy
-      n8n:
         condition: service_healthy
       litellm:
         condition: service_started
@@ -222,6 +166,9 @@ services:
       - "18088"
     ports:
       - "127.0.0.1:${ORCHESTRATOR_PORT:-18088}:18088"
+    extra_hosts:
+      - "hostmachine:host-gateway"
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./state:/app/state
       - ./tmp:/app/tmp
@@ -247,22 +194,18 @@ services:
       - -m
       - apps.orchestrator.app.kafka_runtime
       - publisher
-      - --topic
-      - ${TOOL_COMMAND_TOPIC:-tool.commands}
       - --interval-seconds
       - ${OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
     volumes:
       - ./state:/app/state
       - ./tmp:/app/tmp
 
-  async-tool-worker:
+  async-mcp-worker:
     <<: *orchestrator-image
-    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-tool-worker
+    container_name: ${COMPOSE_PROJECT_NAME:-servicedesk-agents}-async-mcp-worker
     restart: unless-stopped
     depends_on:
       redpanda:
-        condition: service_healthy
-      n8n:
         condition: service_healthy
       orchestrator:
         condition: service_healthy
@@ -272,9 +215,12 @@ services:
       - python
       - -m
       - apps.orchestrator.app.kafka_runtime
-      - worker
+      - mcp-worker
       - --topic
-      - ${TOOL_COMMAND_TOPIC:-tool.commands}
+      - ${MCP_COMMAND_TOPIC:-mcp.commands}
+    extra_hosts:
+      - "hostmachine:host-gateway"
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./state:/app/state
       - ./tmp:/app/tmp
@@ -319,6 +265,9 @@ services:
       - agent-task-worker
       - --topic
       - ${AGENT_TASK_TOPIC:-agent.tasks}
+    extra_hosts:
+      - "hostmachine:host-gateway"
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./state:/app/state
       - ./tmp:/app/tmp
@@ -387,5 +336,4 @@ volumes:
   postgres-data:
   redis-data:
   redpanda-data:
-  n8n-data:
   hf-cache:

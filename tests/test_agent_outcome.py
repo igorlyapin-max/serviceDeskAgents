@@ -62,14 +62,14 @@ class AgentOutcomeTest(unittest.TestCase):
                     {
                         "profile_id": "profile.provider.mail",
                         "status": "pending_live_execution",
-                        "decision": "execute_react_call",
+                        "decision": "execute_capability",
                     }
                 ],
             }
         )
 
         self.assertEqual(outcome["status"], "waiting_external_event")
-        self.assertEqual(outcome["label"], "Ожидает n8n")
+        self.assertEqual(outcome["label"], "Ожидает внешний результат")
 
     def test_resolution_profile_escalation_does_not_create_client_question(self) -> None:
         question = next_slot_question(

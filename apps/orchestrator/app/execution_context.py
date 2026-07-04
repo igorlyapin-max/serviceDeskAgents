@@ -8,13 +8,13 @@ from typing import Any
 
 
 TEMPLATE_REF_RE = re.compile(r"\$\{([^{}]+)\}")
-PARAM_REACT_REF_RE = re.compile(
-    r"^paramReAct\.(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\."
+PARAM_CAPABILITY_REF_RE = re.compile(
+    r"^paramCapability\.(?P<capability_id>[A-Za-z][A-Za-z0-9_.-]*)\."
     r"(?P<kind>input|output)\.(?P<path>[A-Za-z0-9_][A-Za-z0-9_.-]*)$"
 )
-STEP_REF_RE = re.compile(
-    r"^step\.(?P<step_id>step[1-9][0-9]*)\.react\."
-    r"(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\."
+STEP_CAPABILITY_REF_RE = re.compile(
+    r"^step\.(?P<step_id>step[1-9][0-9]*)\.capability\."
+    r"(?P<capability_id>[A-Za-z][A-Za-z0-9_.-]*)\."
     r"(?P<kind>input|output)\.(?P<path>[A-Za-z0-9_][A-Za-z0-9_.-]*)$"
 )
 
@@ -49,8 +49,8 @@ DEFAULT_STAGE_FIELDS = {
     "0": {"input_text", "slots", "slot_values", "normalization"},
     "1": {"attribute_resolution", "resolution_state", "slot_values", "enrichment"},
     "2": {"classification", "route_id", "route", "priority", "confidence"},
-    "3": {"react_plan", "iterations", "stop_conditions"},
-    "4": {"ready_tool_launches", "blocked_tool_launches", "tool_results", "planned_waits"},
+    "3": {"orchestration", "iterations", "stop_conditions"},
+    "4": {"ready_tool_launches", "blocked_tool_launches", "capability_results", "planned_waits"},
     "5": {"final_decision", "client_question", "operator_escalation", "agent_outcome"},
 }
 
@@ -143,6 +143,7 @@ class ExecutionReferenceContext:
     slot_ids: set[str] = field(default_factory=set)
     output_slot_ids: set[str] = field(default_factory=set)
     tools_by_name: dict[str, dict[str, Any]] = field(default_factory=dict)
+    capabilities_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
     steps_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
     channel_fields_by_id: dict[str, set[str]] = field(default_factory=dict)
     allowed_step_ids: set[str] | None = None
@@ -159,6 +160,7 @@ def build_execution_reference_context(
     slots: list[dict[str, Any]] | None = None,
     output_slots: list[str] | None = None,
     tools: list[dict[str, Any]] | None = None,
+    capabilities: list[dict[str, Any]] | None = None,
     steps: list[dict[str, Any]] | None = None,
     allowed_steps: list[dict[str, Any]] | None = None,
     channels: list[dict[str, Any]] | None = None,
@@ -178,6 +180,11 @@ def build_execution_reference_context(
             str(tool.get("tool_name")): tool
             for tool in tools or []
             if tool.get("tool_name")
+        },
+        capabilities_by_id={
+            str(capability.get("capability_id")): capability
+            for capability in capabilities or []
+            if capability.get("capability_id")
         },
         steps_by_id={
             str(step.get("step_id") or f"step{index}"): step
@@ -215,27 +222,27 @@ def _path_label(path: str) -> str:
     return path.replace(".", " -> ")
 
 
-def _tool_path_schema(tool: dict[str, Any], kind: str) -> dict[str, Any]:
-    return tool.get("parameters_schema" if kind == "input" else "result_schema") or {}
+def _capability_path_schema(capability: dict[str, Any], kind: str) -> dict[str, Any]:
+    return capability.get("input_schema" if kind == "input" else "output_schema") or {}
 
 
-def _validate_tool_path(
+def _validate_capability_path(
     *,
     ref: str,
     context: ExecutionReferenceContext,
-    react_call: str,
+    capability_id: str,
     kind: str,
     path: str,
 ) -> str | None:
-    tool = context.tools_by_name.get(react_call)
-    if not tool:
-        return f"Ссылка ${{{ref}}} указывает на неизвестный ReAct-вызов: {react_call}."
-    schema = _tool_path_schema(tool, kind)
+    capability = context.capabilities_by_id.get(capability_id)
+    if not capability:
+        return f"Ссылка ${{{ref}}} указывает на неизвестную capability: {capability_id}."
+    schema = _capability_path_schema(capability, kind)
     if schema_properties(schema) and not schema_declares_path(schema, path):
         human_kind = "входной параметр" if kind == "input" else "поле результата"
         return (
             f"Ссылка ${{{ref}}} указывает на неизвестный {human_kind} "
-            f"ReAct-вызова {react_call}: {_path_label(path)}."
+            f"capability {capability_id}: {_path_label(path)}."
         )
     return None
 
@@ -250,7 +257,7 @@ def validate_template_refs(
     if re.search(r"\bentity:", str(text or ""), flags=re.IGNORECASE):
         errors.append(
             f"{label}: ссылки entity:<name> устарели. "
-            "Используйте step:<step_id>.react.<react_call>.output.<field>."
+            "Используйте ${step.<step_id>.capability.<capability_id>.output.<field>}."
         )
     for ref in template_refs(text):
         parts = [part for part in ref.split(".") if part]
@@ -260,7 +267,7 @@ def validate_template_refs(
         if namespace == "entity":
             errors.append(
                 f"{label}: ссылка ${{{ref}}} использует устаревший тип entity. "
-                "Используйте ${step.<step_id>.react.<react_call>.output.<field>}."
+                "Используйте ${step.<step_id>.capability.<capability_id>.output.<field>}."
             )
             continue
         if namespace == "slot":
@@ -314,26 +321,26 @@ def validate_template_refs(
             elif field_name not in stage_fields:
                 errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестное поле этапа {stage_id}: {field_name}.")
             continue
-        if namespace == "ReAct":
-            react_call = ".".join(parts[1:])
-            if not react_call:
-                errors.append(f"{label}: ссылка ${{{ref}}} должна указывать ReAct.<react_call>.")
-            elif react_call not in context.tools_by_name:
-                errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестный ReAct-вызов: {react_call}.")
+        if namespace == "Capability":
+            capability_id = ".".join(parts[1:])
+            if not capability_id:
+                errors.append(f"{label}: ссылка ${{{ref}}} должна указывать Capability.<capability_id>.")
+            elif capability_id not in context.capabilities_by_id:
+                errors.append(f"{label}: ссылка ${{{ref}}} указывает на неизвестную capability: {capability_id}.")
             continue
-        if namespace == "paramReAct":
-            match = PARAM_REACT_REF_RE.match(ref)
+        if namespace == "paramCapability":
+            match = PARAM_CAPABILITY_REF_RE.match(ref)
             if not match:
                 errors.append(
                     f"{label}: ссылка ${{{ref}}} должна иметь формат "
-                    "${paramReAct.<react_call>.input.<parameter>} или "
-                    "${paramReAct.<react_call>.output.<field>}."
+                    "${paramCapability.<capability_id>.input.<parameter>} или "
+                    "${paramCapability.<capability_id>.output.<field>}."
                 )
                 continue
-            error = _validate_tool_path(
+            error = _validate_capability_path(
                 ref=ref,
                 context=context,
-                react_call=match.group("react_call"),
+                capability_id=match.group("capability_id"),
                 kind=match.group("kind"),
                 path=match.group("path"),
             )
@@ -341,32 +348,31 @@ def validate_template_refs(
                 errors.append(f"{label}: {error}")
             continue
         if namespace == "step":
-            match = STEP_REF_RE.match(ref)
-            if not match:
+            capability_match = STEP_CAPABILITY_REF_RE.match(ref)
+            if not capability_match:
                 errors.append(
                     f"{label}: ссылка ${{{ref}}} должна иметь формат "
-                    "${step.<step_id>.react.<react_call>.input.<parameter>} или "
-                    "${step.<step_id>.react.<react_call>.output.<field>}."
+                    "${step.<step_id>.capability.<capability_id>.input|output.<field>}."
                 )
                 continue
-            step_id = match.group("step_id")
-            react_call = match.group("react_call")
+            step_id = capability_match.group("step_id")
+            capability_id = capability_match.group("capability_id")
             step = context.steps_by_id.get(step_id)
             if not step or (context.allowed_step_ids is not None and step_id not in context.allowed_step_ids):
                 errors.append(f"{label}: ссылка ${{{ref}}} указывает на недоступный предыдущий шаг: {step_id}.")
                 continue
-            if step.get("react_call") and step.get("react_call") != react_call:
+            if step.get("capability_id") and step.get("capability_id") != capability_id:
                 errors.append(
-                    f"{label}: ссылка ${{{ref}}} ожидает ReAct-вызов {react_call} "
-                    f"в {step_id}, но там настроен {step.get('react_call')}."
+                    f"{label}: ссылка ${{{ref}}} ожидает capability {capability_id} "
+                    f"в {step_id}, но там настроена {step.get('capability_id')}."
                 )
                 continue
-            error = _validate_tool_path(
+            error = _validate_capability_path(
                 ref=ref,
                 context=context,
-                react_call=react_call,
-                kind=match.group("kind"),
-                path=match.group("path"),
+                capability_id=capability_id,
+                kind=capability_match.group("kind"),
+                path=capability_match.group("path"),
             )
             if error:
                 errors.append(f"{label}: {error}")
@@ -520,12 +526,12 @@ def resolve_template_ref(ref: str, values: dict[str, Any]) -> Any:
     if namespace in {"case", "wait", "stage"}:
         return _lookup_path(values.get(namespace), parts[1:])
     if namespace == "step":
-        match = STEP_REF_RE.match(ref)
+        match = STEP_CAPABILITY_REF_RE.match(ref)
         if not match:
             return None
         step = (values.get("step") or {}).get(match.group("step_id")) or {}
-        react = (step.get("react") or {}).get(match.group("react_call")) or {}
-        return _lookup_path(react.get(match.group("kind")), match.group("path").split("."))
+        capability = (step.get("capability") or {}).get(match.group("capability_id")) or {}
+        return _lookup_path(capability.get(match.group("kind")), match.group("path").split("."))
     return None
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,15 +68,16 @@ class SlotContinuationConfigStore:
             "output_slots_order": [
                 {
                     "slot_id": "provider_mail_body",
-                    "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                    "source_hint": "${step.step1.capability.provider_channel_repair_monitor.output.email_result.body}",
                     "required_for_success": True,
                 }
             ],
             "step_id": "step1",
-            "tool_name": "n8n_monitor_provider_channel_repair",
+            "tool_name": "provider_channel_repair_monitor",
+            "capability_id": "provider_channel_repair_monitor",
+            "mcp_environment_id": "env.provider_ops",
+            "mcp_tool_name": "monitor_provider_channel_repair",
             "action_type": "action",
-            "endpoint_id": "n8n",
-            "operation_id": "monitor_provider_channel_repair",
             "status": "ready",
             "parameters": {
                 "problem_host": "c2m-ntbook-routerg-047",
@@ -96,10 +98,11 @@ class SlotContinuationConfigStore:
             "target_slot_id": "provider_mail_body",
             "output_slots_order": [],
             "step_id": "step2",
-            "tool_name": "n8n_update_zabbix_problem",
+            "tool_name": "zabbix_problem_update",
+            "capability_id": "zabbix_problem_update",
+            "mcp_environment_id": "env.provider_ops",
+            "mcp_tool_name": "update_zabbix_problem",
             "action_type": "action",
-            "endpoint_id": "n8n",
-            "operation_id": "update_zabbix_problem",
             "status": "ready",
             "parameters": {
                 "problemUrl": "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
@@ -115,10 +118,11 @@ class SlotContinuationConfigStore:
             "target_slot_id": None,
             "output_slots_order": [],
             "step_id": "step3",
-            "tool_name": "n8n_wait_zabbix_problem_status",
+            "tool_name": "zabbix_problem_status_wait",
+            "capability_id": "zabbix_problem_status_wait",
+            "mcp_environment_id": "env.provider_ops",
+            "mcp_tool_name": "wait_zabbix_problem_status",
             "action_type": "action",
-            "endpoint_id": "n8n",
-            "operation_id": "wait_zabbix_problem_status",
             "status": "ready",
             "parameters": {
                 "problem_url": "http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
@@ -147,8 +151,9 @@ class SlotContinuationConfigStore:
                     "expected_effect": "Будет вызвана интеграция.",
                     "requires_state_change": True,
                     "extensions": {
-                        "endpoint_id": launch["endpoint_id"],
-                        "operation_id": launch["operation_id"],
+                        "capability_id": launch["tool_name"],
+                        "mcp_environment_id": launch["mcp_environment_id"],
+                        "mcp_tool_name": launch["mcp_tool_name"],
                         "completion_policy": launch["completion_policy"],
                         "source_profile_id": launch["profile_id"],
                         "source_step_id": launch["step_id"],
@@ -180,7 +185,7 @@ class SlotContinuationConfigStore:
                 },
             },
             "missing_slots": [],
-            "final_decision": "ready_for_react",
+            "final_decision": "ready_for_capability",
             "ready_tool_launches": [monitor_launch, zabbix_launch, zabbix_wait_launch],
             "blocked_tool_launches": [],
             "next_allowed_actions": actions,
@@ -222,17 +227,17 @@ class FollowupWorkflow:
         )
         extensions: dict[str, Any] = {
             "trace": {
-                "react_parameters": action["parameters"],
+                "capability_parameters": action["parameters"],
             }
         }
         if (
             self.processing_store is not None
-            and action["extensions"]["operation_id"] == "wait_zabbix_problem_status"
+            and action["extensions"]["mcp_tool_name"] == "wait_zabbix_problem_status"
         ):
             policy = action["extensions"].get("completion_policy") or {}
             wait = self.processing_store.open_external_wait(
                 case_id or action.get("case_id"),
-                source="n8n",
+                source="provider_ops",
                 event_type=policy.get("expected_event_type") or "wait_zabbix_problem_status_completed",
                 reason="Ожидание восстановления Zabbix после обновления события.",
                 deadline_seconds=policy.get("max_wait_seconds"),
@@ -242,13 +247,14 @@ class FollowupWorkflow:
                     "resume_policy": policy.get("timeout_action"),
                 },
                 origin={
-                    "kind": "react_call",
-                    "react_call": action["tool_name"],
-                    "endpoint_id": action["extensions"]["endpoint_id"],
-                    "operation_id": action["extensions"]["operation_id"],
+                    "kind": "capability",
+                    "capability_id": action["extensions"]["capability_id"],
+                    "mcp_environment_id": action["extensions"]["mcp_environment_id"],
+                    "mcp_tool_name": action["extensions"]["mcp_tool_name"],
                     "source_profile_id": action["extensions"]["source_profile_id"],
                     "source_step_id": action["extensions"]["source_step_id"],
                     "source_slot_schema_id": action["extensions"]["source_slot_schema_id"],
+                    "source_output_slots_order": action["extensions"].get("source_output_slots_order") or [],
                     "result_transport": policy.get("result_transport"),
                     "result_topic": policy.get("result_topic"),
                 },
@@ -268,9 +274,9 @@ class FollowupWorkflow:
                 "invocation_id": "inv-followup-zabbix",
                 "action_id": action["action_id"],
                 "tool_name": action["tool_name"],
-                "endpoint_id": action["extensions"]["endpoint_id"],
-                "adapter_type": "n8n_webhook",
-                "operation_id": action["extensions"]["operation_id"],
+                "endpoint_id": action["extensions"]["mcp_environment_id"],
+                "adapter_type": "mcp",
+                "operation_id": action["extensions"]["mcp_tool_name"],
                 "status": "success",
                 "policy_rule_id": policy_result["policy_rule_id"],
                 "duration_ms": 10,
@@ -331,6 +337,27 @@ class ExternalEventsTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def mark_external_event_receipt_stale_processing(self, idempotency_key: str) -> None:
+        receipt = self.processing_store.external_event_receipt(idempotency_key)
+        self.assertIsNotNone(receipt)
+        assert receipt is not None
+        receipt["receipt_status"] = "processing"
+        receipt["updated_at"] = "2000-01-01T00:00:00Z"
+        with self.processing_store._connect() as connection:
+            connection.execute(
+                """
+                update external_event_receipts
+                set receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                """,
+                (
+                    self.processing_store._to_json(receipt),
+                    receipt["updated_at"],
+                    idempotency_key,
+                ),
+            )
+
     def external_event(
         self,
         wait: dict,
@@ -347,7 +374,7 @@ class ExternalEventsTest(unittest.TestCase):
             "ticket_id": wait["ticket_id"],
             "wait_id": wait["wait_id"],
             "correlation_id": wait["correlation_id"],
-            "source": "n8n",
+            "source": wait.get("source") or wait.get("channel_id") or (wait.get("payload") or {}).get("source") or "mcp",
             "event_type": event_type,
             "status": status,
             "received_at": utc_now(),
@@ -385,7 +412,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_contract_validates_required_fields(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
             wait_type="timer_wait",
@@ -398,19 +425,38 @@ class ExternalEventsTest(unittest.TestCase):
         with self.assertRaises(ContractValidationError):
             self.contracts.require_valid("external_event", invalid)
 
-    def test_external_wait_origin_tracks_react_call_and_redacts_parameters(self) -> None:
+    def test_external_event_contract_allows_dotted_capability_event_type(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="mcp",
+            event_type="provider_channel_repair_monitor.completed",
+            reason="Проверить результат capability во внешнем MCP.",
+            wait_type="external_event_wait",
+            deadline_seconds=3600,
+        )
+        event = self.external_event(
+            wait,
+            event_id="evt-provider-capability-completed",
+            event_type="provider_channel_repair_monitor.completed",
+            result={"provider_mail_body": "Ваша заявка зарегистрирована за номером МТС000000000000001"},
+        )
+        event["source"] = "mcp"
+
+        self.contracts.require_valid("external_event", event)
+
+    def test_external_wait_origin_tracks_capability_and_redacts_parameters(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="mcp",
             event_type="runbook_completed",
-            reason="Ожидание завершения ранбука.",
+            reason="Ожидание результата capability.",
             deadline_seconds=86400,
             origin={
-                "kind": "react_call",
-                "react_call": "start_systemcenter_runbook",
+                "kind": "capability",
+                "capability_id": "start_systemcenter_runbook",
                 "launch_id": "launch.password_reset.runbook",
-                "endpoint_id": "n8n",
-                "operation_id": "start_systemcenter_runbook",
+                "mcp_environment_id": "env.provider_ops",
+                "mcp_tool_name": "start_systemcenter_runbook",
                 "parameters": {
                     "user_login": "ivanov",
                     "api_token": "open-secret",
@@ -418,10 +464,10 @@ class ExternalEventsTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(wait["origin"]["kind"], "react_call")
-        self.assertEqual(wait["origin"]["react_call"], "start_systemcenter_runbook")
-        self.assertEqual(wait["origin"]["endpoint_id"], "n8n")
-        self.assertEqual(wait["origin"]["operation_id"], "start_systemcenter_runbook")
+        self.assertEqual(wait["origin"]["kind"], "capability")
+        self.assertEqual(wait["origin"]["capability_id"], "start_systemcenter_runbook")
+        self.assertEqual(wait["origin"]["mcp_environment_id"], "env.provider_ops")
+        self.assertEqual(wait["origin"]["mcp_tool_name"], "start_systemcenter_runbook")
         self.assertEqual(wait["origin"]["parameters"]["user_login"], "ivanov")
         self.assertEqual(wait["origin"]["parameters"]["api_token"], "параметр скрыт")
         self.assertEqual(wait["origin"]["correlation_id"], wait["correlation_id"])
@@ -429,19 +475,37 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_result_validates_against_operation_async_contract(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="mcp",
             event_type="start_systemcenter_runbook_completed",
-            reason="Ожидание завершения ранбука.",
+            reason="Ожидание результата capability.",
             deadline_seconds=86400,
             origin={
-                "kind": "react_call",
-                "react_call": "start_systemcenter_runbook",
+                "kind": "capability",
+                "capability_id": "start_systemcenter_runbook",
                 "launch_id": "launch.password_reset.runbook",
-                "endpoint_id": "n8n",
-                "operation_id": "start_systemcenter_runbook",
+                "mcp_environment_id": "env.provider_ops",
+                "mcp_tool_name": "start_systemcenter_runbook",
                 "parameters": {
                     "runbook_code": "password_reset",
                     "user_login": "ivanov",
+                },
+                "contract_snapshot": {
+                    "schema_version": "1.0",
+                    "capability_id": "start_systemcenter_runbook",
+                    "mcp_environment_id": "env.provider_ops",
+                    "mcp_tool_name": "start_systemcenter_runbook",
+                    "event_type": "start_systemcenter_runbook_completed",
+                    "async_event_contract": {
+                        "statuses": ["success", "error", "timeout", "cancelled"],
+                        "result_schema": {
+                            "type": "object",
+                            "required": ["runbook_status", "message"],
+                            "properties": {
+                                "runbook_status": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                    },
                 },
             },
         )
@@ -466,19 +530,20 @@ class ExternalEventsTest(unittest.TestCase):
     def test_progress_event_without_progress_schema_does_not_use_terminal_schema(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="mcp",
             event_type="monitor_provider_channel_repair_completed",
             reason="Ожидание результата мониторинга провайдера.",
             deadline_seconds=86400,
             origin={
-                "kind": "react_call",
-                "react_call": "n8n_monitor_provider_channel_repair",
-                "endpoint_id": "n8n",
-                "operation_id": "monitor_provider_channel_repair",
+                "kind": "capability",
+                "capability_id": "provider_channel_repair_monitor",
+                "mcp_environment_id": "env.provider_ops",
+                "mcp_tool_name": "monitor_provider_channel_repair",
                 "contract_snapshot": {
                     "schema_version": "1.0",
-                    "endpoint_id": "n8n",
-                    "operation_id": "monitor_provider_channel_repair",
+                    "capability_id": "provider_channel_repair_monitor",
+                    "mcp_environment_id": "env.provider_ops",
+                    "mcp_tool_name": "monitor_provider_channel_repair",
                     "event_type": "monitor_provider_channel_repair_completed",
                     "async_event_contract": {
                         "contract_status": "valid",
@@ -512,7 +577,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_success_external_event_closes_wait_and_queues_resume_task(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
             wait_type="timer_wait",
@@ -534,6 +599,13 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertTrue(
             any(item["event_type"] == "external_event_resume_requested" for item in detail["outbox"])
         )
+        self.assertFalse(any(item["event_type"] == "external_event_received" for item in detail["outbox"]))
+        self.assertFalse(
+            any(
+                item["event_type"] == "wait_opened" and item.get("topic") == "external.events"
+                for item in detail["outbox"]
+            )
+        )
 
         duplicate = self.processing_store.record_external_event(event)
         self.assertTrue(duplicate["duplicate"])
@@ -541,10 +613,223 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertNotIn("case", duplicate)
         self.assertNotIn("external_event", duplicate)
 
+    def test_second_terminal_event_cannot_overwrite_completed_wait(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        stale_wait = copy.deepcopy(wait)
+        first_event = self.external_event(wait, event_id="evt-provider-1")
+        second_event = self.external_event(wait, event_id="evt-provider-2")
+        first_result = self.processing_store.record_external_event(first_event)
+        safe_second_event = self.processing_store._external_event_for_storage(second_event)
+        second_summary = self.processing_store._external_event_summary(safe_second_event)
+
+        with self.assertRaises(ProcessingConflict):
+            self.processing_store._apply_terminal_external_event(
+                wait=stale_wait,
+                run=self.processing_store.latest_run(wait["case_id"]),
+                event=second_event,
+                event_summary=second_summary,
+                safe_event=safe_second_event,
+                now=utc_now(),
+            )
+
+        stored_wait = self.processing_store.require_wait(wait["wait_id"])
+        self.assertEqual(stored_wait["completion_event_id"], first_event["event_id"])
+        self.assertEqual(stored_wait["completed_at"], first_result["wait"]["completed_at"])
+
+    def test_recovery_overview_reports_stale_processing_receipts(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait)
+        self.processing_store._claim_external_event_receipt(event)
+        self.mark_external_event_receipt_stale_processing(event["idempotency_key"])
+        with self.processing_store._connect() as connection:
+            connection.execute(
+                """
+                insert into tool_command_receipts (
+                    idempotency_key, command_id, case_id, wait_id, correlation_id,
+                    status, worker_id, receipt_json, created_at, updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "tool-stuck-1",
+                    "cmd-stuck-1",
+                    self.case["case_id"],
+                    wait["wait_id"],
+                    wait["correlation_id"],
+                    "processing",
+                    "worker-stopped",
+                    self.processing_store._to_json(
+                        {
+                            "schema_version": "1.0",
+                            "idempotency_key": "tool-stuck-1",
+                            "command_id": "cmd-stuck-1",
+                            "case_id": self.case["case_id"],
+                            "wait_id": wait["wait_id"],
+                            "correlation_id": wait["correlation_id"],
+                            "status": "processing",
+                            "worker_id": "worker-stopped",
+                            "created_at": "2000-01-01T00:00:00Z",
+                            "updated_at": "2000-01-01T00:00:00Z",
+                        }
+                    ),
+                    "2000-01-01T00:00:00Z",
+                    "2000-01-01T00:00:00Z",
+                ),
+            )
+
+        overview = self.processing_store.overview()
+        recovery = overview["recovery"]
+
+        self.assertEqual(recovery["status"], "needs_attention")
+        self.assertEqual(recovery["stale_external_event_receipts"][0]["recovery_action"], "redeliver_same_external_event")
+        self.assertEqual(
+            recovery["stale_tool_command_receipts"][0]["recovery_action"],
+            "manual_verify_external_executor_before_retry",
+        )
+
+    def test_recovery_overview_does_not_hide_processing_external_receipts_behind_completed_rows(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        stale_at = "2000-01-01T00:00:00Z"
+        with self.processing_store._connect() as connection:
+            for index in range(30):
+                receipt = {
+                    "schema_version": "1.0",
+                    "receipt_status": "completed",
+                    "idempotency_key": f"completed-{index:02d}",
+                    "event_id": f"evt-completed-{index:02d}",
+                    "wait_id": wait["wait_id"],
+                    "event_type": "provider_followup_due",
+                    "source": "provider_ops",
+                    "case_id": self.case["case_id"],
+                    "correlation_id": wait["correlation_id"],
+                    "status": "success",
+                    "payload_hash": "hash",
+                    "created_at": stale_at,
+                    "updated_at": stale_at,
+                    "result": {"accepted": True},
+                }
+                connection.execute(
+                    """
+                    insert into external_event_receipts (
+                        idempotency_key, source, case_id, correlation_id, status,
+                        receipt_json, created_at, updated_at
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt["idempotency_key"],
+                        receipt["source"],
+                        receipt["case_id"],
+                        receipt["correlation_id"],
+                        receipt["status"],
+                        self.processing_store._to_json(receipt),
+                        stale_at,
+                        stale_at,
+                    ),
+                )
+        event = self.external_event(wait)
+        self.processing_store._claim_external_event_receipt(event)
+        self.mark_external_event_receipt_stale_processing(event["idempotency_key"])
+
+        recovery = self.processing_store.overview()["recovery"]
+
+        self.assertTrue(
+            any(
+                item["idempotency_key"] == event["idempotency_key"]
+                for item in recovery["stale_external_event_receipts"]
+            )
+        )
+
+    def test_stale_processing_external_event_receipt_can_be_reclaimed(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait)
+        self.processing_store._claim_external_event_receipt(event)
+        self.mark_external_event_receipt_stale_processing(event["idempotency_key"])
+
+        result = self.processing_store.record_external_event(event)
+
+        self.assertFalse(result["duplicate"])
+        self.assertEqual(result["wait"]["status"], "completed")
+        receipt = self.processing_store.external_event_receipt(event["idempotency_key"])
+        self.assertEqual(receipt["receipt_status"], "completed")
+
+    def test_external_event_receipt_completion_uses_claim_fence(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait)
+        claim = self.processing_store._claim_external_event_receipt(event)
+        competing_claim = copy.deepcopy(claim)
+        competing_claim["claim_token"] = "claim-competing"
+        competing_claim["updated_at"] = utc_now()
+        with self.processing_store._connect() as connection:
+            connection.execute(
+                """
+                update external_event_receipts
+                set receipt_json = ?,
+                    updated_at = ?
+                where idempotency_key = ?
+                """,
+                (
+                    self.processing_store._to_json(competing_claim),
+                    competing_claim["updated_at"],
+                    competing_claim["idempotency_key"],
+                ),
+            )
+
+        with self.assertRaises(ExternalEventIdempotencyConflict):
+            self.processing_store._complete_external_event_receipt(
+                event,
+                {"schema_version": "1.0", "accepted": True},
+                expected_receipt=claim,
+            )
+
+    def test_stale_processing_external_event_receipt_recovers_closed_wait(self) -> None:
+        wait = self.processing_store.open_external_wait(
+            self.case["case_id"],
+            source="provider_ops",
+            event_type="provider_followup_due",
+            reason="Проверить состояние у провайдера через час.",
+        )
+        event = self.external_event(wait)
+        result = self.processing_store.record_external_event(event)
+        self.mark_external_event_receipt_stale_processing(event["idempotency_key"])
+
+        duplicate = self.processing_store.record_external_event(event)
+
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["wait"]["wait_id"], result["wait"]["wait_id"])
+        self.assertEqual(duplicate["resume_task"]["task_id"], result["resume_task"]["task_id"])
+        receipt = self.processing_store.external_event_receipt(event["idempotency_key"])
+        self.assertEqual(receipt["receipt_status"], "completed")
+
     def test_agent_task_worker_processes_external_event_resume_task(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -570,21 +855,21 @@ class ExternalEventsTest(unittest.TestCase):
     def test_resume_task_materializes_external_event_output_slots(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="mcp",
             event_type="monitor_provider_channel_repair_completed",
             reason="Ожидание результата мониторинга провайдера.",
             origin={
-                "kind": "react_call",
-                "react_call": "n8n_monitor_provider_channel_repair",
-                "endpoint_id": "n8n",
-                "operation_id": "monitor_provider_channel_repair",
+                "kind": "capability",
+                "capability_id": "provider_channel_repair_monitor",
+                "mcp_environment_id": "env.provider_ops",
+                "mcp_tool_name": "monitor_provider_channel_repair",
                 "source_profile_id": "profile.provider.mail",
                 "source_step_id": "step1",
                 "source_slot_schema_id": "slot.provider",
                 "source_output_slots_order": [
                     {
                         "slot_id": "provider_mail_body",
-                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                        "source_hint": "${step.step1.capability.provider_channel_repair_monitor.output.email_result.body}",
                         "required_for_success": True,
                     }
                 ],
@@ -622,21 +907,21 @@ class ExternalEventsTest(unittest.TestCase):
         self.processing_store.attach_workflow(followup_workflow)
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="mcp",
             event_type="monitor_provider_channel_repair_completed",
             reason="Ожидание результата мониторинга провайдера.",
             origin={
-                "kind": "react_call",
-                "react_call": "n8n_monitor_provider_channel_repair",
-                "endpoint_id": "n8n",
-                "operation_id": "monitor_provider_channel_repair",
+                "kind": "capability",
+                "capability_id": "provider_channel_repair_monitor",
+                "mcp_environment_id": "env.provider_ops",
+                "mcp_tool_name": "monitor_provider_channel_repair",
                 "source_profile_id": "profile.provider.mail",
                 "source_step_id": "step1",
                 "source_slot_schema_id": "slot.provider",
                 "source_output_slots_order": [
                     {
                         "slot_id": "provider_mail_body",
-                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
+                        "source_hint": "${step.step1.capability.provider_channel_repair_monitor.output.email_result.body}",
                         "required_for_success": True,
                     }
                 ],
@@ -670,7 +955,7 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertEqual(len(followup_workflow.calls), 2)
         self.assertEqual(
             followup_workflow.calls[0]["action"]["tool_name"],
-            "n8n_update_zabbix_problem",
+            "zabbix_problem_update",
         )
         self.assertEqual(
             followup_workflow.calls[0]["action"]["parameters"]["message"],
@@ -679,7 +964,7 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertTrue(followup_workflow.calls[0]["approved_by_operator"])
         self.assertEqual(
             followup_workflow.calls[1]["action"]["tool_name"],
-            "n8n_wait_zabbix_problem_status",
+            "zabbix_problem_status_wait",
         )
         self.assertEqual(
             followup_workflow.calls[1]["action"]["parameters"]["problem_url"],
@@ -694,11 +979,11 @@ class ExternalEventsTest(unittest.TestCase):
         self.assertEqual(len(continuation["tool_dispatch"]["skipped"]), 1)
         self.assertEqual(
             continuation["tool_dispatch"]["dispatched"][0]["tool_name"],
-            "n8n_update_zabbix_problem",
+            "zabbix_problem_update",
         )
         self.assertEqual(
             continuation["tool_dispatch"]["dispatched"][1]["tool_name"],
-            "n8n_wait_zabbix_problem_status",
+            "zabbix_problem_status_wait",
         )
         self.assertTrue(continuation["tool_dispatch"]["dispatched"][1]["wait_id"])
         self.assertEqual(
@@ -739,7 +1024,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_progress_external_event_keeps_wait_open(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -754,7 +1039,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_large_external_event_result_is_compacted_in_wait_state(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -776,7 +1061,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_redacts_secret_fields_before_persistence(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -796,7 +1081,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_redacts_tokens_inside_generic_strings(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -819,7 +1104,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_preserves_contact_and_ticket_text_before_persistence(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -846,7 +1131,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_source_must_match_wait_source(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -859,7 +1144,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_transport_must_match_wait_policy(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
             payload={
@@ -875,7 +1160,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_idempotency_key_rejects_different_event(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -890,7 +1175,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_external_event_idempotency_key_rejects_same_metadata_with_different_payload(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )
@@ -907,7 +1192,7 @@ class ExternalEventsTest(unittest.TestCase):
         correlation_id = f"{self.case['case_id']}:custom-correlation"
         self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
             correlation_id=correlation_id,
@@ -916,7 +1201,7 @@ class ExternalEventsTest(unittest.TestCase):
         with self.assertRaises(ProcessingConflict):
             self.processing_store.open_external_wait(
                 self.case["case_id"],
-                source="n8n",
+                source="provider_ops",
                 event_type="provider_followup_due",
                 reason="Повторная постановка с тем же correlation_id.",
                 correlation_id=correlation_id,
@@ -925,7 +1210,7 @@ class ExternalEventsTest(unittest.TestCase):
     def test_unknown_correlation_is_rejected(self) -> None:
         wait = self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через час.",
         )

@@ -19,26 +19,26 @@ def slot_schema() -> dict:
     }
 
 
-def react_tools() -> list[dict]:
+def capabilities() -> list[dict]:
     return [
         {
-            "tool_name": "get_user_login",
-            "parameters_schema": {
+            "capability_id": "get_user_login",
+            "input_schema": {
                 "type": "object",
                 "properties": {"user_fio": {"type": "string"}},
             },
-            "result_schema": {
+            "output_schema": {
                 "type": "object",
                 "properties": {"user_login": {"type": "string"}},
             },
         },
         {
-            "tool_name": "get_manager_email",
-            "parameters_schema": {
+            "capability_id": "get_manager_email",
+            "input_schema": {
                 "type": "object",
                 "properties": {"login": {"type": "string"}},
             },
-            "result_schema": {
+            "output_schema": {
                 "type": "object",
                 "properties": {"manager_email": {"type": "string"}},
             },
@@ -51,8 +51,8 @@ class ExecutionContextTest(unittest.TestCase):
         context = build_execution_reference_context(
             slot_schema=slot_schema(),
             output_slots=["user_login"],
-            tools=react_tools(),
-            steps=[{"step_id": "step1", "react_call": "get_user_login"}],
+            capabilities=capabilities(),
+            steps=[{"step_id": "step1", "capability_id": "get_user_login"}],
             channels=[
                 {
                     "channel_id": "service_desk",
@@ -72,8 +72,8 @@ class ExecutionContextTest(unittest.TestCase):
         errors = validate_template_refs(
             (
                 "Слот ${slot.user_fio}; "
-                "первый результат ${step.step1.react.get_user_login.output.0.user_login}; "
-                "результат ${step.step1.react.get_user_login.output.user_login}; "
+                "первый результат ${step.step1.capability.get_user_login.output.0.user_login}; "
+                "результат ${step.step1.capability.get_user_login.output.user_login}; "
                 "case ${case.scenario_id}; wait ${wait.correlation_id}; "
                 "канал ${channel.service_desk.task_topic}; ключ ${channel.service_desk.task_key}; "
                 "этап ${stage.5.final_decision}."
@@ -88,18 +88,18 @@ class ExecutionContextTest(unittest.TestCase):
         context = build_execution_reference_context(
             slot_schema=slot_schema(),
             output_slots=["user_login"],
-            tools=react_tools(),
+            capabilities=capabilities(),
             steps=[
-                {"step_id": "step1", "react_call": "get_user_login"},
-                {"step_id": "step2", "react_call": "get_manager_email"},
+                {"step_id": "step1", "capability_id": "get_user_login"},
+                {"step_id": "step2", "capability_id": "get_manager_email"},
             ],
-            allowed_steps=[{"step_id": "step1", "react_call": "get_user_login"}],
+            allowed_steps=[{"step_id": "step1", "capability_id": "get_user_login"}],
         )
 
         errors = validate_template_refs(
             (
                 "legacy ${entity.users.login}; "
-                "future ${step.step2.react.get_manager_email.output.manager_email}"
+                "future ${step.step2.capability.get_manager_email.output.manager_email}"
             ),
             context,
             label="profile.step",
@@ -108,17 +108,34 @@ class ExecutionContextTest(unittest.TestCase):
         self.assertTrue(any("entity" in error for error in errors))
         self.assertTrue(any("недоступный предыдущий шаг" in error for error in errors))
 
+    def test_validate_refs_rejects_unknown_contract_namespaces(self) -> None:
+        context = build_execution_reference_context(
+            slot_schema=slot_schema(),
+            output_slots=["user_login"],
+            capabilities=capabilities(),
+            steps=[{"step_id": "step1", "capability_id": "get_user_login"}],
+        )
+
+        errors = validate_template_refs(
+            "${OldContract.get_user_login} ${paramOld.get_user_login.output.user_login} "
+            "${step.step1.operation.get_user_login.output.user_login}",
+            context,
+            label="profile.step",
+        )
+
+        self.assertGreaterEqual(len(errors), 3)
+
     def test_render_template_uses_public_runtime_values(self) -> None:
         rendered = render_template(
             "Логин ${slot.user_login}; секрет ${case.api_token}; итог ${stage.5.final_decision}",
             {
                 "slot": {"user_login": {"value": "ivanov", "status": "filled"}},
                 "case": {"api_token": "secret-token"},
-                "stage": {"5": {"final_decision": "ready_for_react"}},
+                "stage": {"5": {"final_decision": "ready_for_capability"}},
             },
         )
 
-        self.assertEqual(rendered, "Логин ivanov; секрет ; итог ready_for_react")
+        self.assertEqual(rendered, "Логин ivanov; секрет ; итог ready_for_capability")
 
     def test_render_template_uses_channel_values(self) -> None:
         rendered = render_template(

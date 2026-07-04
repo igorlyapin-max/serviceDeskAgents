@@ -127,6 +127,11 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 4000
+            },
+            "capability_step_assist": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000
             }
           }
         }

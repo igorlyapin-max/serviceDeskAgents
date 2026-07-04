@@ -55,8 +55,8 @@
               "behavior_principles",
               "slot_schemas",
               "classification_confidence",
-              "react_planning",
-              "tool_rules",
+              "orchestration",
+              "capability_rules",
               "escalation_response"
             ],
             "properties": {
@@ -72,10 +72,10 @@
               "classification_confidence": {
                 "$ref": "#/$defs/block"
               },
-              "react_planning": {
+              "orchestration": {
                 "$ref": "#/$defs/block"
               },
-              "tool_rules": {
+              "capability_rules": {
                 "$ref": "#/$defs/block"
               },
               "escalation_response": {

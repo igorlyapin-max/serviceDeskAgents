@@ -57,7 +57,7 @@ class ExternalEventsApiTest(unittest.TestCase):
             os.environ,
             {
                 "APP_ENV": "test",
-                "INTEGRATION_CALLBACK_TOKEN__N8N": "api-callback-token",
+                "INTEGRATION_CALLBACK_TOKEN__PROVIDER_OPS": "api-callback-token",
                 "SECURITY_RATE_LIMIT_PER_MINUTE": "0",
                 "ORCHESTRATOR_STATE_DB": str(self.db_path),
                 "LOG_SINKS": "stdout",
@@ -86,7 +86,6 @@ class ExternalEventsApiTest(unittest.TestCase):
         )
         self.debug_runtime = DebugRuntime(self.workflow, self.config_store, self.processing_store)
         self.workflow.capture_recorder = self.debug_runtime
-        self.workflow.integration_dispatcher.capture_recorder = self.debug_runtime
         self.main_app.workflow = self.workflow
         self.main_app.config_store = self.config_store
         self.main_app.processing_store = self.processing_store
@@ -112,7 +111,7 @@ class ExternalEventsApiTest(unittest.TestCase):
     def open_wait(self, *, result_transport: str) -> dict:
         return self.processing_store.open_external_wait(
             self.case["case_id"],
-            source="n8n",
+            source="provider_ops",
             event_type="provider_followup_due",
             reason="Проверить состояние у провайдера через внешний endpoint.",
             wait_type="external_event_wait",
@@ -132,7 +131,7 @@ class ExternalEventsApiTest(unittest.TestCase):
             "ticket_id": wait["ticket_id"],
             "wait_id": wait["wait_id"],
             "correlation_id": wait["correlation_id"],
-            "source": "n8n",
+            "source": "provider_ops",
             "event_type": "provider_followup_due",
             "status": "success",
             "received_at": utc_now(),
@@ -146,7 +145,7 @@ class ExternalEventsApiTest(unittest.TestCase):
             {
                 "type": "http",
                 "method": "POST",
-                "path": "/external-events/n8n",
+                "path": "/external-events/provider_ops",
                 "headers": [(b"x-servicedesk-callback-token", b"api-callback-token")],
                 "query_string": b"",
                 "client": ("127.0.0.1", 50000),
@@ -157,9 +156,9 @@ class ExternalEventsApiTest(unittest.TestCase):
 
     def post_external_event(self, event: dict) -> dict:
         request = self.callback_request()
-        context = self.main_app.external_event_context_dependency("n8n", request)
+        context = self.main_app.external_event_context_dependency("provider_ops", request)
         return self.main_app.external_event(
-            "n8n",
+            "provider_ops",
             self.main_app.ExternalEventRequest(**event),
             request,
             context,

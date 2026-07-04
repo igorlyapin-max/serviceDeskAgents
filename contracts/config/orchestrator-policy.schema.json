@@ -36,9 +36,9 @@
           "policy_id",
           "display_name",
           "max_iterations",
-          "consecutive_tool_errors_to_escalate",
+          "consecutive_capability_errors_to_escalate",
           "stop_conditions",
-          "allowed_react_action_groups"
+          "allowed_orchestration_action_groups"
         ],
         "properties": {
           "policy_id": {
@@ -54,7 +54,7 @@
             "minimum": 1,
             "maximum": 20
           },
-          "consecutive_tool_errors_to_escalate": {
+          "consecutive_capability_errors_to_escalate": {
             "type": "integer",
             "minimum": 1,
             "maximum": 10
@@ -65,16 +65,16 @@
               "type": "string",
               "enum": [
                 "all_required_slots_filled",
-                "tool_success",
+                "capability_success",
                 "clarification_required",
                 "handoff_required",
                 "iteration_limit",
-                "consecutive_tool_errors"
+                "consecutive_capability_errors"
               ]
             },
             "uniqueItems": true
           },
-          "allowed_react_action_groups": {
+          "allowed_orchestration_action_groups": {
             "type": "array",
             "items": {
               "type": "string",
@@ -153,8 +153,8 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "react_output",
+              "enum": [
+              "capability_output",
               "step_output",
               "wait",
               "channel"

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://servicedeskagents.local/contracts/config/capability-binding-catalog.schema.json",
+  "title": "Capability Binding Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "bindings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "binding_id",
+          "capability_id",
+          "environment_id",
+          "mcp_tool_name",
+          "execution_mode",
+          "status",
+          "input_mapping",
+          "output_mapping",
+          "async_context_mapping"
+        ],
+        "properties": {
+          "binding_id": {
+            "$ref": "#/$defs/id"
+          },
+          "capability_id": {
+            "$ref": "#/$defs/id"
+          },
+          "environment_id": {
+            "$ref": "#/$defs/id"
+          },
+          "mcp_tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "sync",
+              "async"
+            ]
+          },
+          "status": {
+            "$ref": "#/$defs/status"
+          },
+          "input_mapping": {
+            "$ref": "#/$defs/mapping"
+          },
+          "output_mapping": {
+            "$ref": "#/$defs/mapping"
+          },
+          "async_context_mapping": {
+            "$ref": "#/$defs/mapping"
+          },
+          "extensions": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "active",
+        "planned",
+        "disabled"
+      ]
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 240
+      }
+    }
+  }
+}

@@ -608,19 +608,22 @@ class ConfigDraftValidationTest(unittest.TestCase):
                 created_by="admin-1",
             )
             profile_payload = custom_profile_payload()
-            profile_payload["profiles"][0]["output_slots_order"][0]["source_hint"] = "message"
+            profile_payload["profiles"][0]["output_slots_order"][0]["source_hint"] = "provider_ticket_number"
             profile_payload["profiles"][0]["enrichment_steps"] = [
                 {
                     "step_id": "step1",
                     "step_name": "Проверить статус",
-                    "react_call": "check_zabbix_status",
-                    "parameter_mapping": {
-                        "target_ref": "slot:incident_number",
+                    "capability_id": "provider_channel_repair_monitor",
+                    "mcp_environment_id": "env.provider_ops",
+                    "input_mapping": {
+                        "problem_url": "constant:http://zabbix/problem",
+                        "service_request": "slot:incident_number",
                     },
+                    "output_mapping": {"incident_number": "provider_ticket_number"},
                     "on_error": "continue_to_llm",
                     "configuration_instruction": (
                         "Используй ${slot.incident_number} как вход "
-                        "${paramReAct.check_zabbix_status.input.target_ref}."
+                        "${paramCapability.provider_channel_repair_monitor.input.service_request}."
                     ),
                 }
             ]
@@ -634,6 +637,111 @@ class ConfigDraftValidationTest(unittest.TestCase):
             validated = store.validate_draft(profile_draft["draft_id"])
 
             self.assertEqual(validated["validation"]["status"], "valid", validated["validation"]["errors"])
+
+    def test_attribute_resolution_step_output_mapping_is_limited_to_selected_output_slots(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_multi_slot_payload(),
+                created_by="admin-1",
+            )
+            profile_payload = custom_multi_output_profile_payload()
+            profile = profile_payload["profiles"][0]
+            profile["output_slots_order"] = [profile["output_slots_order"][0]]
+            profile["enrichment_steps"] = [
+                {
+                    "step_id": "step1",
+                    "step_name": "Получить ответ провайдера",
+                    "capability_id": "provider_channel_repair_monitor",
+                    "mcp_environment_id": "env.provider_ops",
+                    "input_mapping": {
+                        "problem_url": "constant:http://zabbix/problem",
+                        "service_request": "constant:SR-1",
+                    },
+                    "output_mapping": {
+                        "provider_mail_body": "provider_mail_body",
+                        "provider_mail_subject": "provider_mail_subject",
+                        "provider_ticket_number": "provider_ticket_number",
+                        "polling_diagnostic": "polling_diagnostic",
+                        "zabbix_status": "zabbix_status",
+                    },
+                    "on_error": "continue_to_llm",
+                }
+            ]
+            profile_draft = create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=profile_payload,
+                created_by="admin-1",
+            )
+
+            validated = store.validate_draft(profile_draft["draft_id"])
+
+            self.assertEqual(
+                profile_draft["payload"]["profiles"][0]["enrichment_steps"][0]["output_mapping"],
+                {"provider_mail_body": "provider_mail_body"},
+            )
+            self.assertEqual(validated["validation"]["status"], "valid", validated["validation"]["errors"])
+            validated["payload"]["profiles"][0]["enrichment_steps"][0]["output_mapping"] = {
+                "provider_mail_body": "provider_mail_body",
+                "provider_mail_subject": "provider_mail_subject",
+                "provider_ticket_number": "provider_ticket_number",
+                "polling_diagnostic": "polling_diagnostic",
+                "zabbix_status": "zabbix_status",
+            }
+            store._save_draft(validated)
+
+            repaired = store.validate_draft(profile_draft["draft_id"])
+
+            self.assertEqual(repaired["validation"]["status"], "valid", repaired["validation"]["errors"])
+            self.assertEqual(
+                repaired["payload"]["profiles"][0]["enrichment_steps"][0]["output_mapping"],
+                {"provider_mail_body": "provider_mail_body"},
+            )
+
+    def test_attribute_resolution_profile_normalizes_legacy_parameter_mapping(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            profile_payload = custom_profile_payload()
+            profile_payload["profiles"][0]["output_slots_order"][0]["source_hint"] = "provider_ticket_number"
+            profile_payload["profiles"][0]["enrichment_steps"] = [
+                {
+                    "step_id": "step1",
+                    "step_name": "Проверить статус",
+                    "capability_id": "provider_channel_repair_monitor",
+                    "mcp_environment_id": "env.provider_ops",
+                    "input_mapping": {
+                        "problem_url": "constant:http://zabbix/problem",
+                        "service_request": "slot:incident_number",
+                    },
+                    "output_mapping": {"incident_number": "provider_ticket_number"},
+                    "on_error": "continue_to_llm",
+                    "parameter_mapping": {},
+                }
+            ]
+
+            profile_draft = create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=profile_payload,
+                created_by="admin-1",
+            )
+            validated = store.validate_draft(profile_draft["draft_id"])
+            normalized = store._normalize_payload("attribute_resolution_profiles", profile_payload)
+
+            self.assertEqual(validated["validation"]["status"], "valid", validated["validation"]["errors"])
+            self.assertNotIn(
+                "parameter_mapping",
+                normalized["profiles"][0]["enrichment_steps"][0],
+            )
 
     def test_attribute_resolution_profile_draft_still_rejects_unknown_slot_template_ref(self) -> None:
         with TemporaryDirectory() as tempdir:
@@ -849,6 +957,54 @@ class ConfigDraftValidationTest(unittest.TestCase):
             validated = store.validate_payload("attribute_resolution_profiles", profile_payload)
 
             self.assertEqual(validated["status"], "valid", validated["errors"])
+
+    def test_attribute_resolution_profile_empty_completion_policy_uses_capability_default(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            profile_payload = custom_profile_payload()
+            profile = profile_payload["profiles"][0]
+            profile.pop("target_slot_id", None)
+            profile["use_llm_after_steps"] = False
+            profile["output_slots_order"] = []
+            profile["enrichment_steps"] = [
+                {
+                    "step_id": "step1",
+                    "step_name": "Ждать восстановления Zabbix",
+                    "capability_id": "zabbix_problem_status_wait",
+                    "mcp_environment_id": "mcp.provider_ops",
+                    "completion_policy": {},
+                    "input_mapping": {
+                        "problem_url": "constant:http://zabbix/tr_events.php?eventid=1",
+                        "poll_interval_minutes": "constant:1",
+                        "timeout_minutes": "constant:10",
+                    },
+                    "output_mapping": {},
+                    "on_error": "continue_to_llm",
+                }
+            ]
+            profile_draft = create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=profile_payload,
+                created_by="admin-1",
+            )
+
+            normalized_step = profile_draft["payload"]["profiles"][0]["enrichment_steps"][0]
+            self.assertEqual(normalized_step["completion_policy"]["mode"], "external_event")
+            self.assertEqual(
+                normalized_step["completion_policy"]["expected_event_type"],
+                "zabbix_problem_status_wait.completed",
+            )
+
+            validated = store.validate_draft(profile_draft["draft_id"])
+
+            self.assertEqual(validated["validation"]["status"], "valid", validated["validation"]["errors"])
 
     def test_activate_draft_deletes_working_drafts_for_same_domain_operator(self) -> None:
         with TemporaryDirectory() as tempdir:

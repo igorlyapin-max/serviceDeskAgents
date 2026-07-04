@@ -1,35 +1,40 @@
 ---
 name: servicedesk-n8n-runbooks
-description: "Use in /home/lsk/projects/serviceDeskAgents when creating, reviewing, importing, or wiring n8n runbook workflows, Kafka tool commands, and external-event callbacks for this repository."
+description: "Use in /home/lsk/projects/serviceDeskAgents only when a ServiceDesk capability is implemented inside the separate ../n8n project; n8n is external MCP implementation detail, not a ServiceDeskAgents endpoint."
 ---
 
 # ServiceDeskAgents n8n Runbooks
 
-Use this project-local skill after the global `n8n-runbook-conventions` rules. This file contains current stand facts for this repository.
+Use this skill only after `servicedesk-async-mcp-contract`.
 
-## Current Stand
+`ServiceDeskAgents` no longer owns n8n workflows, n8n webhook endpoints, `tool.commands`, ReAct operation bindings, or `n8n_*` scenario contracts. New scenario/profile work must use:
 
-- Default outbound command topic: `tool.commands`.
-- Default inbound external result topic: `external.events`.
-- Kafka/Redpanda from host: `127.0.0.1:19092`.
-- Kafka/Redpanda from docker network: `redpanda:9092`.
-- Env: `KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092`, `TOOL_COMMAND_TOPIC=tool.commands`, `EXTERNAL_EVENT_TOPIC=external.events`, `AGENT_TASK_TOPIC=agent.tasks`.
-- n8n webhook base URL: `N8N_WEBHOOK_BASE_URL=http://127.0.0.1:5678/webhook`.
-- Orchestrator callback base from host tools: `http://127.0.0.1:18088`.
-- Orchestrator callback base from dockerized n8n: `ORCHESTRATOR_PUBLIC_URL=http://hostmachine:18088`.
-- Long-running n8n callback: `POST /external-events/n8n` with `X-ServiceDesk-Callback-Token`.
+- `capabilities`;
+- `mcp_environments`;
+- `capability_bindings`;
+- `mcp.commands`;
+- `external.events`;
+- `agent.tasks`.
 
-## Workflow Contract
+If a capability is physically implemented in n8n, that n8n workflow belongs to the separate project `../n8n`. Changes to actual workflow JSON, publish/import helpers, credentials, and n8n runtime checks must be made there, not by reintroducing n8n domains into this repository.
 
-- Outbound flow: `ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook`.
-- Inbound flow: `n8n -> POST /external-events/n8n` or `n8n -> Kafka external.events` -> `wait_state update -> agent.tasks continuation`.
-- n8n payload must carry `case_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `idempotency_key_base`, `result_transport`, `result_topic`, and runbook business parameters such as `runbook_code`.
-- Keep result delivery and transport security separate: `result_transport` in `invocation.extensions.async_callback` selects `http_callback`, `kafka_event`, or `both` for one run; `transport_security` in endpoint/OpenAPI/workflow metadata only describes how HTTP or Kafka is protected.
-- Each returned ExternalEvent must use a stable per-event `idempotency_key`, for example `<idempotency_key_base>:<event_id>`.
-- Kafka result delivery is accepted only for waits with `result_transport=kafka_event|both` and only from the expected `result_topic`.
-- n8n must return external events only; it must not close or escalate cases directly.
-- Long-running polling runbooks must emit compact `progress` ExternalEvent diagnostics on each polling cycle before waiting again. For provider/email polling on this stand include `service_request`, `reply_mailbox_address`, `mailbox_indexed_count`, `match_count`, `poll_iteration`, `last_poll_at`, `next_poll_at`, and the n8n execution/correlation identifiers when available.
+## Rules
+
+- Do not add `integration_endpoints`, `tools`, `n8n_workflows`, `/tools/dispatch`, `/integrations/callbacks/{endpoint_id}`, `paramReAct`, or `ReAct.n8n_*` back to ServiceDeskAgents.
+- Do not expose n8n workflow ids, webhook paths, node names, or `email_result.body` style fields to ServiceDesk scenarios.
+- Express runbook behavior as a capability contract with canonical input/output schemas and `async_event_contracts`.
+- External MCP must return accepted ack for async execution and terminal/progress `ExternalEvent` results.
+- For local/dev auth, use MCP environment token references. For production, use OIDC as described by `servicedesk-async-mcp-contract`.
+
+## When Editing Runbooks
+
+1. Update ServiceDesk capability/binding schemas in this repository only if the public contract changes.
+2. Update the actual n8n workflow in `../n8n`.
+3. Keep n8n-specific fields mapped inside the external MCP implementation.
+4. Validate ServiceDesk with MCP/capability tests; validate n8n with the `../n8n` project tooling.
 
 ## Source Of Truth
 
-Read `references/current-stand.md` for exact repo paths and operator commands before changing workflows or documentation.
+- ServiceDesk async contract: `.agents/skills/servicedesk-async-mcp-contract/references/async-contract.md`.
+- MCP execution environment contract: `.agents/skills/servicedesk-async-mcp-contract/references/mcp-execution-environment.md`.
+- Runbook developer guide: `docs/runbooks/ASYNC_MCP_RUNBOOK_DEVELOPER_GUIDE.md`.

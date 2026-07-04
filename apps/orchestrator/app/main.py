@@ -21,14 +21,17 @@ from .config_registry import (
     ConfigRegistryError,
     ConfigStore,
     ConfigVersionNotFound,
-    endpoint_operation_usage_refs,
-    tool_usage_refs,
+    runtime_model_routing,
 )
 from .contracts import ContractRegistry, ContractValidationError
 from .debug_runtime import DebugRuntime, DebugRuntimeError, redact_text
 from .local_env import LocalEnvError, set_local_env_value
 from .metrics import metrics
-from .openapi_contracts import OpenApiContractError, preview_openapi_contract
+from .mcp_execution import (
+    McpExecutionError,
+    build_discovery_import_payloads,
+    discover_mcp_capability_candidates,
+)
 from .processing import ExternalEventIdempotencyConflict, ProcessingConflict, ProcessingNotFound, ProcessingStore
 from .runtime_guardrails import (
     RuntimeConfigurationError,
@@ -81,15 +84,6 @@ class TicketAnalyzeRequest(BaseModel):
     ticket_id: str | None = Field(default=None)
     case_id: str | None = Field(default=None)
     decision_override: dict[str, Any] | None = Field(default=None)
-
-
-class ToolDispatchRequest(BaseModel):
-    action: dict[str, Any] = Field()
-    policy_result: dict[str, Any] = Field()
-    approved_by_operator: bool = Field(default=False)
-    case_id: str | None = Field(default=None)
-    ticket_id: str | None = Field(default=None)
-    operator_id: str | None = Field(default=None)
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -171,27 +165,28 @@ class AdminConfigRollbackRequest(BaseModel):
     operator_id: str = Field()
 
 
-class AdminN8nWorkflowOperationRequest(BaseModel):
-    operator_id: str = Field()
-    execution_id: str | None = Field(default=None)
-
-
-class AdminOpenApiContractPreviewRequest(BaseModel):
-    operator_id: str = Field(default="admin-1")
-    endpoint_id: str | None = Field(default=None)
-    endpoint: dict[str, Any] | None = Field(default=None)
-    contract_source: dict[str, Any] | None = Field(default=None)
-    lang: str | None = Field(default=None)
-
-
 class AdminAttributeResolutionStepCompileRequest(BaseModel):
     operator_id: str = Field(default="admin-1")
     instruction: str = Field(default="", max_length=4000)
     scenario_id: str | None = Field(default=None)
     slot_schema_id: str | None = Field(default=None)
-    react_call: str | None = Field(default=None)
+    capability_id: str | None = Field(default=None)
     step_name: str | None = Field(default=None)
     previous_steps: list[dict[str, Any]] | None = Field(default=None)
+    profile_context: dict[str, Any] | None = Field(default=None)
+
+
+class AdminMcpDiscoveryRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    timeout_seconds: float = Field(default=30, ge=1, le=120)
+    attempts: int = Field(default=2, ge=1, le=5)
+
+
+class AdminMcpDiscoveryImportRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    capability_ids: list[str] | None = Field(default=None)
+    timeout_seconds: float = Field(default=30, ge=1, le=120)
+    attempts: int = Field(default=2, ge=1, le=5)
 
 
 class AdminScenarioSimulationRequest(BaseModel):
@@ -284,26 +279,6 @@ class DebugEndpointCaptureMarkBrokenRequest(BaseModel):
     reason: str | None = Field(default=None)
 
 
-class IntegrationCallbackRequest(BaseModel):
-    schema_version: str = Field(default="1.0")
-    case_id: str | None = Field(default=None)
-    ticket_id: str | None = Field(default=None)
-    invocation_id: str = Field()
-    action_id: str = Field()
-    tool_name: str = Field()
-    endpoint_id: str = Field()
-    adapter_type: str = Field()
-    operation_id: str = Field()
-    status: str = Field()
-    policy_rule_id: str = Field()
-    duration_ms: int | None = Field(default=None)
-    attempts: int | None = Field(default=None)
-    output: dict[str, Any] | None = Field(default=None)
-    error: dict[str, Any] | None = Field(default=None)
-    received_at: str | None = Field(default=None)
-    extensions: dict[str, Any] | None = Field(default=None)
-
-
 class ExternalEventRequest(BaseModel):
     schema_version: str = Field(default="1.0")
     event_id: str = Field()
@@ -332,7 +307,6 @@ workflow.attach_processing_store(processing_store)
 processing_store.attach_workflow(workflow)
 debug_runtime = DebugRuntime(workflow, config_store, processing_store)
 workflow.capture_recorder = debug_runtime
-workflow.integration_dispatcher.capture_recorder = debug_runtime
 security = SecurityManager(workflow.contracts)
 audit_store = AuditStore(workflow.contracts)
 OPERATOR_UI_ROOT = Path(__file__).resolve().parents[2] / "operator-ui" / "static"
@@ -391,6 +365,8 @@ async def request_context_and_security_headers(request: Request, call_next):
     https_enabled = https_enabled or is_production_environment()
     for header, value in security_headers(https_enabled=https_enabled).items():
         response.headers.setdefault(header, value)
+    if request.url.path == "/admin/static/app.js":
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -415,6 +391,21 @@ def model_to_dict(model: BaseModel) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def ticket_debug_shape(ticket_input: dict[str, Any]) -> dict[str, Any]:
+    description = ticket_input.get("description")
+    original_problem = ticket_input.get("original_problem")
+    return {
+        "field_names": sorted(str(key) for key in ticket_input.keys()),
+        "scenario": ticket_input.get("scenario"),
+        "channel_id": ticket_input.get("channel_id"),
+        "priority": ticket_input.get("priority"),
+        "has_description": bool(description),
+        "description_length": len(str(description or "")),
+        "has_original_problem": bool(original_problem),
+        "original_problem_length": len(str(original_problem or "")),
+    }
 
 
 def client_ip(request: Request) -> str | None:
@@ -506,94 +497,6 @@ def permission_dependency(
             ) from error
 
     return dependency
-
-
-def callback_context_dependency(
-    endpoint_id: str,
-    request: Request,
-) -> SecurityContext:
-    try:
-        context = security.callback_context(
-            request.headers,
-            endpoint_id=endpoint_id,
-            ip_address=client_ip(request),
-            request_id=request_id(request),
-        )
-        security.check_rate_limit(context)
-        security.require_permission(context, "callbacks.write")
-        return context
-    except CallbackTokenInvalid as error:
-        audit_store.record(
-            security.anonymous_context(
-                actor_id=f"endpoint:{endpoint_id}",
-                ip_address=client_ip(request),
-                request_id=request_id(request),
-            ),
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            outcome="denied",
-            request_method=request.method,
-            request_path=request.url.path,
-            status_code=403,
-            details={"message": str(error)},
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "callback_token_invalid",
-                "message": str(error),
-            },
-        ) from error
-    except RateLimitExceeded as error:
-        audit_store.record(
-            security.anonymous_context(
-                actor_id=f"endpoint:{endpoint_id}",
-                ip_address=client_ip(request),
-                request_id=request_id(request),
-            ),
-            action="security.rate_limit",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            outcome="denied",
-            request_method=request.method,
-            request_path=request.url.path,
-            status_code=429,
-            details={"message": str(error)},
-        )
-        raise HTTPException(
-            status_code=429,
-            detail={
-                "code": "rate_limit_exceeded",
-                "message": str(error),
-            },
-        ) from error
-    except PermissionDenied as error:
-        audit_store.record(
-            security.anonymous_context(
-                actor_id=f"endpoint:{endpoint_id}",
-                ip_address=client_ip(request),
-                request_id=request_id(request),
-            ),
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            outcome="denied",
-            request_method=request.method,
-            request_path=request.url.path,
-            status_code=403,
-            details={"message": str(error)},
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "permission_denied",
-                "message": str(error),
-            },
-        ) from error
 
 
 def external_event_context_dependency(
@@ -732,42 +635,6 @@ def audit_error(
         status_code=status_code,
         details={"message": message},
     )
-
-
-def existing_callback_result(payload: dict[str, Any]) -> dict[str, Any] | None:
-    invocation_id = payload.get("invocation_id")
-    if not invocation_id:
-        return None
-    receipt = workflow.case_store.callback_receipt(invocation_id)
-    if receipt:
-        result = receipt.get("result", {})
-        if isinstance(result, dict):
-            duplicate = dict(result)
-            duplicate.setdefault("schema_version", "1.0")
-            duplicate.setdefault("accepted", True)
-            duplicate["duplicate"] = True
-            return duplicate
-    record = workflow.case_store.by_correlation("invocation_id", invocation_id)
-    if not record:
-        return None
-    tool_result = next(
-        (
-            item
-            for item in record.get("tool_results", [])
-            if item.get("invocation_id") == invocation_id
-        ),
-        None,
-    )
-    if not tool_result:
-        return None
-    return {
-        "schema_version": "1.0",
-        "accepted": True,
-        "duplicate": True,
-        "case": record,
-        "tool_result": tool_result,
-        "workflow_state": record.get("current_workflow_state"),
-    }
 
 
 def require_config_permission(
@@ -972,7 +839,6 @@ def build_config_regression_workflow(
         processing_store=workflow.processing_store,
     )
     regression_workflow.capture_recorder = workflow.capture_recorder
-    regression_workflow.integration_dispatcher.capture_recorder = workflow.capture_recorder
     for domain, payload in active_overrides.items():
         regression_workflow.apply_config_payload(domain, payload)
     return regression_workflow
@@ -1480,202 +1346,6 @@ def debug_async_delivery(
     )
 
 
-@app.get("/debug/integration-operations")
-def debug_integration_operations(
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="debug.integration_operations.read",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    return config_store.active_payload("integration_endpoints")
-
-
-@app.post("/debug/endpoint-captures/start")
-def debug_endpoint_capture_start(
-    request: DebugEndpointCaptureStartRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="debug.endpoint_captures.start",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    try:
-        result = debug_runtime.start_capture_session(model_to_dict(request))
-        audit_success(
-            context,
-            http_request,
-            action="debug.endpoint_captures.start",
-            resource_type="integration_endpoint",
-            resource_id=f"{request.endpoint_id}/{request.operation_id}",
-            permission="tools.manage",
-            details={"operator_id": request.operator_id, "session_id": result["session"]["session_id"]},
-        )
-        return result
-    except (DebugRuntimeError, ConfigRegistryError) as error:
-        raise debug_error_response(error) from error
-
-
-@app.post("/debug/endpoint-captures/stop")
-def debug_endpoint_capture_stop(
-    request: DebugEndpointCaptureStopRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="debug.endpoint_captures.stop",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    try:
-        result = debug_runtime.stop_capture_session(request.session_id)
-        audit_success(
-            context,
-            http_request,
-            action="debug.endpoint_captures.stop",
-            resource_type="integration_endpoint",
-            resource_id=request.session_id,
-            permission="tools.manage",
-            details={"operator_id": request.operator_id},
-        )
-        return result
-    except DebugRuntimeError as error:
-        raise debug_error_response(error) from error
-
-
-@app.get("/debug/endpoint-captures")
-def debug_endpoint_captures(
-    limit: int = Query(default=100, ge=1, le=200),
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="debug.endpoint_captures.read",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    return debug_runtime.list_captures(limit=limit)
-
-
-@app.get("/debug/endpoint-captures/{capture_id}")
-def debug_endpoint_capture_detail(
-    capture_id: str,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="debug.endpoint_captures.detail.read",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    try:
-        return debug_runtime.capture_detail(capture_id)
-    except DebugRuntimeError as error:
-        raise debug_error_response(error) from error
-
-
-@app.post("/debug/endpoint-captures/{capture_id}/sanitize")
-def debug_endpoint_capture_sanitize(
-    capture_id: str,
-    request: DebugEndpointCaptureSanitizeRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="debug.endpoint_captures.sanitize",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    try:
-        result = debug_runtime.sanitize_capture(capture_id)
-        audit_success(
-            context,
-            http_request,
-            action="debug.endpoint_captures.sanitize",
-            resource_type="integration_endpoint",
-            resource_id=capture_id,
-            permission="tools.manage",
-            details={"operator_id": request.operator_id},
-        )
-        return result
-    except DebugRuntimeError as error:
-        raise debug_error_response(error) from error
-
-
-@app.post("/debug/endpoint-captures/{capture_id}/create-mock")
-def debug_endpoint_capture_create_mock(
-    capture_id: str,
-    request: DebugEndpointCaptureCreateMockRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="debug.endpoint_captures.create_mock",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    try:
-        result = debug_runtime.create_mock_from_capture(capture_id, model_to_dict(request))
-        audit_success(
-            context,
-            http_request,
-            action="debug.endpoint_captures.create_mock",
-            resource_type="integration_endpoint",
-            resource_id=capture_id,
-            permission="tools.manage",
-            details={
-                "operator_id": request.operator_id,
-                "version_id": result["config_version"]["version_id"],
-            },
-        )
-        return result
-    except (DebugRuntimeError, ConfigRegistryError) as error:
-        raise debug_error_response(error) from error
-
-
-@app.post("/debug/endpoint-captures/{capture_id}/mark-contract-broken")
-def debug_endpoint_capture_mark_contract_broken(
-    capture_id: str,
-    request: DebugEndpointCaptureMarkBrokenRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="debug.endpoint_captures.mark_contract_broken",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    try:
-        result = debug_runtime.mark_capture_contract_broken(capture_id, model_to_dict(request))
-        audit_success(
-            context,
-            http_request,
-            action="debug.endpoint_captures.mark_contract_broken",
-            resource_type="integration_endpoint",
-            resource_id=capture_id,
-            permission="tools.manage",
-            details={
-                "operator_id": request.operator_id,
-                "version_id": result["config_version"]["version_id"],
-            },
-        )
-        return result
-    except (DebugRuntimeError, ConfigRegistryError) as error:
-        raise debug_error_response(error) from error
-
-
 @app.get("/admin")
 def admin_ui() -> FileResponse:
     return ui_index_response(ADMIN_UI_ROOT / "index.html")
@@ -1740,7 +1410,7 @@ def analyze_ticket(
             case_id=case_id,
             verbose_fields={
                 "error": safe_error_text,
-                "ticket_input": ticket_input,
+                "ticket_input_shape": ticket_debug_shape(ticket_input),
             },
         )
         audit_error(
@@ -1852,191 +1522,6 @@ def get_case_timeline(
                 "message": f"Кейс не найден: {case_id}",
             },
         ) from error
-
-
-@app.post("/tools/dispatch")
-def dispatch_tool(
-    request: ToolDispatchRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="tools.dispatch",
-            resource_type="tool",
-        )
-    ),
-) -> dict[str, Any]:
-    if request.approved_by_operator:
-        audit_error(
-            context,
-            http_request,
-            action="tools.dispatch",
-            resource_type="tool",
-            resource_id=request.action.get("tool_name"),
-            permission="tools.manage",
-            status_code=400,
-            message="Действия с согласованием оператора должны выполняться через approval endpoint.",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "approval_endpoint_required",
-                "message": "Действия с согласованием оператора должны выполняться через /approvals/{approval_id}/decision.",
-            },
-        )
-    try:
-        result = workflow.dispatch_tool(
-            request.action,
-            request.policy_result,
-            case_id=request.case_id,
-            ticket_id=request.ticket_id,
-            approved_by_operator=request.approved_by_operator,
-            operator_id=request.operator_id,
-        )
-        audit_success(
-            context,
-            http_request,
-            action="tools.dispatch",
-            resource_type="tool",
-            resource_id=result["invocation"]["tool_name"],
-            permission="tools.manage",
-            details={
-                "case_id": result["invocation"].get("case_id"),
-                "invocation_id": result["invocation"].get("invocation_id"),
-                "status": result["tool_result"].get("status"),
-            },
-        )
-        return result
-    except ContractValidationError as error:
-        audit_error(
-            context,
-            http_request,
-            action="tools.dispatch",
-            resource_type="tool",
-            resource_id=request.action.get("tool_name"),
-            permission="tools.manage",
-            status_code=400,
-            message="Вызов инструмента не прошел валидацию контракта.",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "contract_name": error.contract_name,
-                "errors": error.errors,
-            },
-        ) from error
-
-
-@app.post("/integrations/callbacks/{endpoint_id}")
-def integration_callback(
-    endpoint_id: str,
-    request: IntegrationCallbackRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(callback_context_dependency),
-) -> dict[str, Any]:
-    payload = {
-        key: value
-        for key, value in model_to_dict(request).items()
-        if value is not None
-    }
-    if payload["endpoint_id"] != endpoint_id:
-        audit_error(
-            context,
-            http_request,
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            status_code=400,
-            message="endpoint_id в callback не совпадает с URL path.",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "endpoint_id_mismatch",
-                "message": "endpoint_id в callback должен совпадать с URL path.",
-            },
-        )
-    try:
-        duplicate = existing_callback_result(payload)
-        if duplicate:
-            metrics.increment("callback_duplicates_total", {"endpoint_id": endpoint_id})
-            audit_success(
-                context,
-                http_request,
-                action="callbacks.receive",
-                resource_type="integration_endpoint",
-                resource_id=endpoint_id,
-                permission="callbacks.write",
-                details={
-                    "case_id": duplicate["case"].get("case_id"),
-                    "invocation_id": payload.get("invocation_id"),
-                    "status": payload.get("status"),
-                    "duplicate": True,
-                },
-            )
-            return duplicate
-        result = workflow.handle_integration_callback(payload)
-        processing_store.record_integration_callback(result)
-        workflow.case_store.record_callback_receipt(
-            invocation_id=payload["invocation_id"],
-            endpoint_id=endpoint_id,
-            result=result,
-        )
-        audit_success(
-            context,
-            http_request,
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            details={
-                "case_id": result["case"].get("case_id"),
-                "invocation_id": payload.get("invocation_id"),
-                "status": payload.get("status"),
-            },
-        )
-        return result
-    except CaseNotFound as error:
-        audit_error(
-            context,
-            http_request,
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            status_code=404,
-            message=str(error),
-        )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "case_not_found",
-                "message": f"Кейс не найден по корреляции callback: {error}",
-            },
-        ) from error
-    except (ContractValidationError, ValueError) as error:
-        audit_error(
-            context,
-            http_request,
-            action="callbacks.receive",
-            resource_type="integration_endpoint",
-            resource_id=endpoint_id,
-            permission="callbacks.write",
-            status_code=400,
-            message=str(error),
-        )
-        if isinstance(error, ContractValidationError):
-            detail = {
-                "contract_name": error.contract_name,
-                "errors": error.errors,
-            }
-        else:
-            detail = {
-                "code": "callback_rejected",
-                "message": str(error),
-            }
-        raise HTTPException(status_code=400, detail=detail) from error
 
 
 @app.post("/external-events/{source}")
@@ -2823,161 +2308,6 @@ def admin_catalog(
     return workflow.catalog_inventory()
 
 
-@app.get("/admin/catalog/tools")
-def admin_tools_catalog(
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="admin.catalog.tools.read",
-            resource_type="tool",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    return workflow.contracts.tool_catalog
-
-
-@app.get("/admin/catalog/integration-endpoints")
-def admin_integration_endpoint_catalog(
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="admin.catalog.integration_endpoints.read",
-            resource_type="integration_endpoint",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    return workflow.contracts.integration_endpoint_catalog
-
-
-def openapi_import_impact_warnings(
-    *,
-    endpoint: dict[str, Any],
-    result: dict[str, Any],
-) -> list[str]:
-    warnings: list[str] = []
-    endpoint_id = endpoint.get("endpoint_id")
-    imported_operations = result.get("operations") or {}
-    proposed_tools = (result.get("proposed_react_calls") or {}).get("tools") or {}
-    active_tools = config_store.active_payload("tools")
-    active_workflows = config_store.active_payload("n8n_workflows")
-    active_resolution = config_store.active_payload("attribute_resolution_profiles")
-    active_channels = config_store.active_payload("interaction_channels")
-    active_tool_by_name = {
-        tool.get("tool_name"): tool
-        for tool in active_tools.get("tools", [])
-    }
-
-    for operation_id, imported_operation in imported_operations.items():
-        current_operation = (endpoint.get("operations") or {}).get(operation_id)
-        if current_operation and current_operation != imported_operation:
-            refs = endpoint_operation_usage_refs(endpoint_id, operation_id, active_tools, active_workflows)
-            if refs:
-                warnings.append(
-                    f"Операция {endpoint_id}/{operation_id} уже используется ({', '.join(refs)}) "
-                    "и будет обновлена из OpenAPI; проверьте связанные ReAct-вызовы и сценарии."
-                )
-
-    for operation_id in sorted(set((endpoint.get("operations") or {}).keys()) - set(imported_operations.keys())):
-        refs = endpoint_operation_usage_refs(endpoint_id, operation_id, active_tools, active_workflows)
-        if refs:
-            warnings.append(
-                f"OpenAPI больше не содержит используемую операцию {endpoint_id}/{operation_id}; "
-                f"UI сохранит ее при импорте, потому что есть связи: {', '.join(refs)}."
-            )
-
-    for tool_name, proposed_tool in proposed_tools.items():
-        current_tool = active_tool_by_name.get(tool_name)
-        if current_tool and current_tool != proposed_tool:
-            refs = tool_usage_refs(tool_name, active_resolution, active_channels)
-            if refs:
-                warnings.append(
-                    f"ReAct-вызов {tool_name} уже используется ({', '.join(refs)}) "
-                    "и будет обновлен из OpenAPI; это может потребовать проверки профилей разрешения."
-                )
-            else:
-                warnings.append(f"ReAct-вызов {tool_name} уже существует и будет обновлен из OpenAPI.")
-    return warnings
-
-
-@app.post("/admin/integration-endpoints/openapi/preview")
-def admin_integration_endpoint_openapi_preview(
-    payload: AdminOpenApiContractPreviewRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(context_or_raise),
-) -> dict[str, Any]:
-    permission = require_config_permission(
-        context,
-        http_request,
-        domain="integration_endpoints",
-        mode="manage",
-        action="admin.integration_endpoints.openapi.preview",
-    )
-    if not payload.endpoint_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "endpoint_required",
-                "message": "Для preview OpenAPI передайте endpoint_id сохраненного endpoint.",
-            },
-        )
-    active_endpoints = config_store.active_payload("integration_endpoints").get("endpoints", [])
-    endpoint = next((dict(item) for item in active_endpoints if item.get("endpoint_id") == payload.endpoint_id), {})
-    if not endpoint:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "endpoint_not_found",
-                "message": f"Endpoint не найден: {payload.endpoint_id}. Сохраните endpoint перед импортом OpenAPI.",
-            },
-        )
-    if payload.contract_source:
-        endpoint["contract_source"] = payload.contract_source
-    if payload.lang:
-        endpoint.setdefault("contract_source", {})["lang"] = payload.lang
-    try:
-        result = preview_openapi_contract(endpoint, endpoint.get("contract_source") or {})
-        impact_warnings = openapi_import_impact_warnings(endpoint=endpoint, result=result)
-        result["impact_warnings"] = impact_warnings
-        if impact_warnings:
-            result["warnings"] = [*(result.get("warnings") or []), *impact_warnings]
-    except OpenApiContractError as error:
-        audit_error(
-            context,
-            http_request,
-            action="admin.integration_endpoints.openapi.preview",
-            resource_type="integration_endpoint",
-            resource_id=endpoint.get("endpoint_id"),
-            permission=permission,
-            status_code=400,
-            message=str(error),
-        )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "openapi_contract_error",
-                "message": str(error),
-            },
-        ) from error
-    audit_success(
-        context,
-        http_request,
-        action="admin.integration_endpoints.openapi.preview",
-        resource_type="integration_endpoint",
-        resource_id=endpoint.get("endpoint_id"),
-        permission=permission,
-        details={
-            "operator_id": payload.operator_id,
-            "operation_count": len(result.get("operations", {})),
-            "warning_count": len(result.get("warnings", [])),
-            "source_url": result.get("source_url"),
-            "contract_language": result.get("contract_language"),
-        },
-    )
-    return result
-
-
 @app.get("/admin/catalog/workflow")
 def admin_workflow_catalog(
     context: SecurityContext = Depends(
@@ -3230,18 +2560,6 @@ def assistant_slot_schema(
     return slot_schema
 
 
-def assistant_tools_for_scenario(scenario_id: str | None = None) -> list[dict[str, Any]]:
-    tools = config_store.active_payload("tools").get("tools", [])
-    if not scenario_id:
-        return tools
-    scenarios = config_store.active_payload("service_scenarios").get("scenarios", [])
-    scenario = next((item for item in scenarios if item.get("scenario_id") == scenario_id), None)
-    allowed_names = set((scenario or {}).get("allowed_react_call_names") or [])
-    if not allowed_names:
-        return tools
-    return [tool for tool in tools if tool.get("tool_name") in allowed_names]
-
-
 @app.post("/admin/config-assistant/attribute-resolution-step/compile")
 def admin_config_assistant_attribute_resolution_step_compile(
     request: AdminAttributeResolutionStepCompileRequest,
@@ -3263,11 +2581,15 @@ def admin_config_assistant_attribute_resolution_step_compile(
         result = compile_attribute_resolution_step(
             instruction=request.instruction,
             slot_schema=slot_schema,
-            tools=assistant_tools_for_scenario(request.scenario_id),
-            react_call=request.react_call,
+            tools=[],
+            capabilities=config_store.active_payload("capabilities").get("capabilities", []),
+            capability_id=request.capability_id,
+            capability_bindings=config_store.active_payload("capability_bindings").get("bindings", []),
+            model_config=runtime_model_routing(config_store.active_payload("model_routing")),
             step_name=request.step_name,
             previous_steps=request.previous_steps,
-            integration_endpoints=config_store.active_payload("integration_endpoints").get("endpoints", []),
+            profile_context=request.profile_context,
+            integration_endpoints=[],
         )
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
@@ -3280,7 +2602,7 @@ def admin_config_assistant_attribute_resolution_step_compile(
         permission=permission,
         details={
             "operator_id": request.operator_id,
-            "react_call": result.get("references", {}).get("react_call"),
+            "capability_id": result.get("references", {}).get("capability_id"),
             "validation_error_count": len(result.get("validation_errors", [])),
             "warning_count": len(result.get("warnings", [])),
         },
@@ -3311,6 +2633,182 @@ def admin_config_active(
     )
     try:
         return config_store.active_config(domain)
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+
+
+@app.post("/admin/config/mcp-environments/{environment_id}/discover")
+def admin_discover_mcp_environment(
+    environment_id: str,
+    request: AdminMcpDiscoveryRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = require_config_permission(
+        context,
+        http_request,
+        domain="mcp_environments",
+        mode="manage",
+        action="admin.config.mcp_environment.discover",
+    )
+    try:
+        environments = config_store.active_payload("mcp_environments").get("environments", [])
+        environment = next((item for item in environments if item.get("environment_id") == environment_id), None)
+        if not environment:
+            raise ConfigRegistryError(f"MCP environment не найден: {environment_id}.")
+        discovery_policy = environment.get("discovery_policy") or {}
+        if discovery_policy.get("mode") != "mcp_tools":
+            raise ConfigRegistryError(
+                f"MCP environment {environment_id} не разрешает tools/list discovery."
+            )
+        result = discover_mcp_capability_candidates(
+            environment=environment,
+            timeout_seconds=request.timeout_seconds,
+            attempts=request.attempts,
+        )
+        audit_success(
+            context,
+            http_request,
+            action="admin.config.mcp_environment.discover",
+            resource_type="config",
+            resource_id=environment_id,
+            permission=permission,
+            details={
+                "operator_id": request.operator_id,
+                "candidate_count": len(result.get("capability_candidates", [])),
+                "ignored_tool_count": len(result.get("ignored_tools", [])),
+            },
+        )
+        return result
+    except McpExecutionError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.config.mcp_environment.discover",
+            resource_type="config",
+            resource_id=environment_id,
+            permission=permission,
+            message=str(error),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "mcp_discovery_failed",
+                "message": str(error),
+            },
+        ) from error
+    except ConfigRegistryError as error:
+        raise config_error_response(error) from error
+
+
+@app.post("/admin/config/mcp-environments/{environment_id}/discover/import-drafts")
+def admin_import_mcp_discovery_drafts(
+    environment_id: str,
+    request: AdminMcpDiscoveryImportRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permissions = [
+        require_config_permission(
+            context,
+            http_request,
+            domain=domain,
+            mode="manage",
+            action="admin.config.mcp_environment.discovery_import",
+        )
+        for domain in ("mcp_environments", "capabilities", "capability_bindings")
+    ]
+    try:
+        environments_payload = config_store.active_payload("mcp_environments")
+        environments = environments_payload.get("environments", [])
+        environment = next((item for item in environments if item.get("environment_id") == environment_id), None)
+        if not environment:
+            raise ConfigRegistryError(f"MCP environment не найден: {environment_id}.")
+        discovery_policy = environment.get("discovery_policy") or {}
+        if discovery_policy.get("mode") != "mcp_tools":
+            raise ConfigRegistryError(
+                f"MCP environment {environment_id} не разрешает tools/list discovery."
+            )
+        discovery = discover_mcp_capability_candidates(
+            environment=environment,
+            timeout_seconds=request.timeout_seconds,
+            attempts=request.attempts,
+        )
+        candidates = discovery.get("capability_candidates", [])
+        if request.capability_ids:
+            requested = set(request.capability_ids)
+            candidates = [
+                candidate
+                for candidate in candidates
+                if (candidate.get("capability") or {}).get("capability_id") in requested
+            ]
+            found = {(candidate.get("capability") or {}).get("capability_id") for candidate in candidates}
+            missing = sorted(requested - found)
+            if missing:
+                raise McpExecutionError(f"Discovery candidates not found: {', '.join(missing)}.")
+        import_payloads = build_discovery_import_payloads(
+            active_capabilities=config_store.active_payload("capabilities"),
+            active_environments=environments_payload,
+            active_bindings=config_store.active_payload("capability_bindings"),
+            environment_id=environment_id,
+            candidates=candidates,
+        )
+        drafts = [
+            config_store.create_draft(
+                domain=domain,
+                payload=payload,
+                created_by=request.operator_id,
+            )
+            for domain, payload in import_payloads["payloads"].items()
+        ]
+        draft_ids = [draft["draft_id"] for draft in drafts]
+        validation = config_store.validate_draft_bundle(draft_ids)
+        audit_success(
+            context,
+            http_request,
+            action="admin.config.mcp_environment.discovery_import",
+            resource_type="config",
+            resource_id=environment_id,
+            permission=",".join(permissions),
+            details={
+                "operator_id": request.operator_id,
+                "draft_ids": draft_ids,
+                "imported_capability_ids": import_payloads.get("imported_capability_ids", []),
+                "validation_status": validation.get("status"),
+            },
+        )
+        return {
+            "schema_version": "1.0",
+            "environment_id": environment_id,
+            "draft_ids": draft_ids,
+            "drafts": drafts,
+            "validation": validation,
+            "import": {
+                "imported_capability_ids": import_payloads.get("imported_capability_ids", []),
+                "imported_binding_ids": import_payloads.get("imported_binding_ids", []),
+            },
+            "discovery": {
+                "tools_checked": discovery.get("tools_checked"),
+                "ignored_tools": discovery.get("ignored_tools", []),
+            },
+        }
+    except McpExecutionError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.config.mcp_environment.discovery_import",
+            resource_type="config",
+            resource_id=environment_id,
+            permission=",".join(permissions),
+            message=str(error),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "mcp_discovery_import_failed",
+                "message": str(error),
+            },
+        ) from error
     except ConfigRegistryError as error:
         raise config_error_response(error) from error
 
@@ -3941,90 +3439,6 @@ def admin_rollback_config_version(
         return result
     except (ConfigVersionNotFound, ConfigRegistryError) as error:
         raise config_error_response(error) from error
-
-
-@app.get("/admin/n8n/workflows")
-def admin_n8n_workflows(
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.read",
-            action="admin.n8n.workflows.read",
-            resource_type="n8n_workflow",
-        )
-    ),
-) -> dict[str, Any]:
-    _ = context
-    return workflow.n8n_workflow_catalog()
-
-
-@app.post("/admin/n8n/workflows/{workflow_id}/restart")
-def admin_restart_n8n_workflow(
-    workflow_id: str,
-    request: AdminN8nWorkflowOperationRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="admin.n8n.workflow.restart",
-            resource_type="n8n_workflow",
-        )
-    ),
-) -> dict[str, Any]:
-    audit_success(
-        context,
-        http_request,
-        action="admin.n8n.workflow.restart",
-        resource_type="n8n_workflow",
-        resource_id=workflow_id,
-        permission="tools.manage",
-        details={
-            "operator_id": request.operator_id,
-            "execution_id": request.execution_id,
-            "status": "unsupported_in_mvp",
-        },
-    )
-    return {
-        "schema_version": "1.0",
-        "accepted": False,
-        "workflow_id": workflow_id,
-        "status": "unsupported",
-        "message": "Перезапуск workflow требует рабочего n8n management API и остается отключенным в локальном MVP.",
-    }
-
-
-@app.post("/admin/n8n/workflows/{workflow_id}/cancel")
-def admin_cancel_n8n_workflow(
-    workflow_id: str,
-    request: AdminN8nWorkflowOperationRequest,
-    http_request: Request,
-    context: SecurityContext = Depends(
-        permission_dependency(
-            "tools.manage",
-            action="admin.n8n.workflow.cancel",
-            resource_type="n8n_workflow",
-        )
-    ),
-) -> dict[str, Any]:
-    audit_success(
-        context,
-        http_request,
-        action="admin.n8n.workflow.cancel",
-        resource_type="n8n_workflow",
-        resource_id=workflow_id,
-        permission="tools.manage",
-        details={
-            "operator_id": request.operator_id,
-            "execution_id": request.execution_id,
-            "status": "unsupported_in_mvp",
-        },
-    )
-    return {
-        "schema_version": "1.0",
-        "accepted": False,
-        "workflow_id": workflow_id,
-        "status": "unsupported",
-        "message": "Отмена workflow требует рабочего n8n management API и остается отключенной в локальном MVP.",
-    }
 
 
 @app.post("/admin/evaluations/promote-feedback")

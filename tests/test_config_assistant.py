@@ -1,1826 +1,693 @@
 from __future__ import annotations
 
 import copy
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from apps.orchestrator.app.config_assistant import (
-    compile_attribute_resolution_step,
-)
-from apps.orchestrator.app.config_registry import (
-    ConfigStore,
-    apply_schema_parameter_defaults,
-    new_version_id,
-    normalize_attribute_resolution_profile,
-    operation_response_items,
-    resolved_dry_run_parameters,
-    utc_now,
-)
+from apps.orchestrator.app.config_assistant import build_capability_step_assist_prompt, compile_attribute_resolution_step
+from apps.orchestrator.app.config_registry import ConfigStore
 from apps.orchestrator.app.contracts import ContractRegistry
 
 
-def password_slot_schema() -> dict:
+def slot_schema() -> dict:
     return {
-        "slot_schema_id": "slot.password_reset",
-        "scenario_id": "password_reset",
+        "slot_schema_id": "slot.provider_channel_repair",
         "slots": [
             {
-                "slot_id": "user_fio",
-                "display_name": "Фамилия Имя Отчество",
-                "required": True,
+                "slot_id": "problem_url",
+                "display_name": "Ссылка на проблему",
+                "description": "URL исходной проблемы мониторинга.",
             },
             {
-                "slot_id": "user_login",
-                "display_name": "Логин пользователя",
-                "required": True,
+                "slot_id": "zabbix_url",
+                "display_name": "Ссылка Zabbix",
+                "description": "URL события Zabbix из письма мониторинга.",
+                "extraction_instruction": "Извлеки Original problem URL.",
+                "examples": ["Original problem: http://zabbix/tr_events.php?eventid=1"],
             },
+            {"slot_id": "host", "display_name": "Хост", "description": "Имя проблемного роутера."},
+            {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
         ],
     }
 
 
-def get_user_login_tool() -> dict:
+def capability() -> dict:
     return {
-        "tool_name": "get_user_login",
-        "display_name": "Найти логин пользователя",
-        "action_type": "read_only",
-        "parameters_schema": {
+        "capability_id": "provider_channel_repair_monitor",
+        "display_name": "Мониторинг ремонта канала провайдера",
+        "status": "active",
+        "description": "Запускает внешний MCP исполнитель и возвращает результат провайдера.",
+        "contract_version": "1.0",
+        "execution_modes": ["async"],
+        "input_schema": {
             "type": "object",
-            "required": ["user_fio"],
+            "required": ["problem_url", "service_request"],
             "properties": {
-                "user_fio": {
-                    "type": "string",
-                    "title": "ФИО пользователя",
-                }
+                "problem_url": {"type": "string", "description": "URL проблемы в Zabbix."},
+                "service_request": {"type": "string", "description": "Номер обращения ServiceDesk."},
+                "problem_host": {"type": "string", "description": "Host/router identifier."},
+                "from": {"type": "string"},
+                "reply_to": {"type": "string"},
+                "poll_interval_minutes": {"type": "integer", "default": 1, "minimum": 1},
+                "timeout_minutes": {"type": "integer", "default": 20, "minimum": 1},
             },
         },
-        "result_schema": {
+        "output_schema": {
             "type": "object",
-            "required": ["user_login"],
             "properties": {
-                "user_login": {
-                    "type": "string",
-                    "title": "Логин пользователя",
-                }
+                "provider_mail_body": {"type": "string"},
+                "provider_mail_subject": {"type": "string"},
+                "provider_ticket_number": {"type": "string"},
+                "polling_diagnostic": {"type": "object"},
+                "zabbix_status": {"type": "string"},
             },
         },
-    }
-
-
-def get_manager_email_tool() -> dict:
-    return {
-        "tool_name": "get_manager_email",
-        "display_name": "Найти email руководителя",
-        "action_type": "read_only",
-        "parameters_schema": {
-            "type": "object",
-            "required": ["login"],
-            "properties": {
-                "login": {
-                    "type": "string",
-                    "title": "Логин пользователя",
-                }
-            },
-        },
-        "result_schema": {
-            "type": "object",
-            "required": ["manager_email"],
-            "properties": {
-                "manager_email": {
-                    "type": "string",
-                    "title": "Email руководителя",
-                }
-            },
-        },
-    }
-
-
-def wait_for_email_by_ticket_tool() -> dict:
-    return {
-        "tool_name": "n8n_wait_for_email_by_ticket",
-        "display_name": "Дождаться письма по номеру заявки",
-        "action_type": "read_only",
-        "parameters_schema": {
-            "type": "object",
-            "required": ["ticket_number"],
-            "properties": {
-                "ticket_number": {"type": "string", "title": "Номер заявки"},
-                "poll_interval_minutes": {"type": "integer", "title": "Интервал опроса"},
-                "timeout_minutes": {"type": "integer", "title": "Таймаут"},
-            },
-        },
-        "result_schema": {
-            "type": "object",
-            "required": ["ticket_number"],
-            "properties": {
-                "ticket_number": {"type": "string", "title": "Номер заявки"},
-                "body": {"type": "string", "title": "Тело письма"},
-                "subject": {"type": "string", "title": "Тема письма"},
-                "status": {"type": "string", "title": "Статус"},
-            },
-        },
-    }
-
-
-def wait_for_email_by_ticket_openapi_tool() -> dict:
-    tool = copy.deepcopy(wait_for_email_by_ticket_tool())
-    tool["parameters_schema"] = {
-        "type": "object",
-        "required": ["ticket_number", "poll_interval_minutes", "timeout_minutes"],
-        "additionalProperties": True,
-        "properties": {
-            "invocation": {
-                "type": "object",
-                "additionalProperties": True,
-                "title": "invocation",
-            },
-            "ticket_number": {
-                "type": "string",
-                "title": "ticket number",
-            },
-            "ticketNumber": {
-                "type": "string",
-                "title": "ticketNumber",
-                "description": "Alias, принимаемый workflow для ticket_number.",
-            },
-            "poll_interval_minutes": {
-                "type": "integer",
-                "title": "poll interval minutes",
-            },
-            "pollIntervalMinutes": {
-                "type": "integer",
-                "title": "pollIntervalMinutes",
-                "description": "Alias accepted by the workflow for poll_interval_minutes.",
-            },
-            "timeout_minutes": {
-                "type": "integer",
-                "title": "timeout minutes",
-            },
-            "timeoutMinutes": {
-                "type": "integer",
-                "title": "timeoutMinutes",
-                "description": "Alias, принимаемый workflow для timeout_minutes.",
-            },
-        },
-    }
-    tool["result_schema"] = {
-        "oneOf": [
-            {
-                "type": "object",
-                "required": ["runbook_status", "message", "async_delivery"],
-                "properties": {
-                    "runbook_status": {"type": "string", "title": "runbook status"},
-                    "message": {"type": "string", "title": "message"},
-                    "async_delivery": {"type": "boolean", "title": "async delivery"},
+        "async_event_contracts": {
+            "provider_channel_repair_monitor.completed": {
+                "statuses": ["success", "error", "timeout", "cancelled", "progress"],
+                "result_schema": {
+                    "type": "object",
+                    "properties": {
+                        "provider_mail_body": {"type": "string"},
+                    },
                 },
-            },
-            {
-                "type": "object",
-                "required": ["status", "ticket_number", "match_count"],
-                "properties": {
-                    "status": {"type": "string", "title": "status"},
-                    "ticket_number": {"type": "string", "title": "ticket number"},
-                    "body": {"type": ["string", "null"], "title": "body"},
-                    "subject": {"type": ["string", "null"], "title": "subject"},
-                    "match_count": {"type": "integer", "title": "match count"},
-                },
-            },
-        ]
-    }
-    return tool
-
-
-def wait_zabbix_problem_status_tool() -> dict:
-    return {
-        "tool_name": "n8n_wait_zabbix_problem_status",
-        "display_name": "Дождаться восстановления Zabbix problem",
-        "action_type": "read_only",
-        "parameters_schema": {
-            "type": "object",
-            "additionalProperties": True,
-            "properties": {
-                "problem_url": {"type": "string", "format": "uri"},
-                "problemUrl": {"type": "string", "format": "uri"},
-                "poll_interval_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
-                "pollIntervalMinutes": {"type": "integer", "minimum": 1, "maximum": 60},
-                "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 240},
-                "timeoutMinutes": {"type": "integer", "minimum": 1, "maximum": 240},
-                "request_id": {"type": "string"},
-            },
-            "allOf": [
-                {"anyOf": [{"required": ["problemUrl"]}, {"required": ["problem_url"]}]},
-                {"anyOf": [{"required": ["poll_interval_minutes"]}, {"required": ["pollIntervalMinutes"]}]},
-                {"anyOf": [{"required": ["timeout_minutes"]}, {"required": ["timeoutMinutes"]}]},
-            ],
+            }
         },
-        "result_schema": {
+        "default_completion_policy": {
+            "mode": "external_event",
+            "expected_event_type": "provider_channel_repair_monitor.completed",
+            "timeout_action": "escalate_operator",
+            "max_wait_seconds": 3600,
+        },
+    }
+
+
+def binding() -> dict:
+    return {
+        "binding_id": "binding.provider_channel_repair_monitor.mcp_provider_ops",
+        "capability_id": "provider_channel_repair_monitor",
+        "environment_id": "mcp.provider_ops",
+        "status": "active",
+        "execution_mode": "async",
+        "mcp_tool_name": "provider.channel.repair.monitor",
+        "input_mapping": {
+            "problem_url": "problem_url",
+            "service_request": "service_request",
+            "problem_host": "problem_host",
+            "from": "from",
+            "reply_to": "reply_to",
+            "poll_interval_minutes": "poll_interval_minutes",
+            "timeout_minutes": "timeout_minutes",
+        },
+        "output_mapping": {
+            "provider_mail_body": "provider_mail_body",
+        },
+    }
+
+
+def zabbix_wait_capability() -> dict:
+    return {
+        "capability_id": "zabbix_problem_status_wait",
+        "display_name": "Ожидание восстановления проблемы Zabbix",
+        "status": "active",
+        "description": "Ожидает восстановления проблемы Zabbix.",
+        "contract_version": "1.0",
+        "execution_modes": ["async"],
+        "input_schema": {
+            "type": "object",
+            "required": ["problem_url", "poll_interval_minutes", "timeout_minutes"],
+            "properties": {
+                "problem_url": {"type": "string", "description": "URL проблемы Zabbix."},
+                "poll_interval_minutes": {"type": "integer", "default": 1},
+                "timeout_minutes": {"type": "integer", "default": 20},
+            },
+        },
+        "output_schema": {
             "type": "object",
             "properties": {
                 "status": {"type": "string"},
-                "zabbix_status": {"type": "string"},
-                "message": {"type": "string"},
             },
         },
-    }
-
-
-def provider_mail_slot_payload() -> dict:
-    return {
-        "schema_version": "1.0",
-        "slot_schemas": [
-            {
-                "slot_schema_id": "slot.provider_mail",
-                "display_name": "Слоты письма провайдера",
-                "stages": [
-                    {
-                        "stage_id": "stage.provider",
-                        "display_name": "Провайдер",
-                        "order": 1,
-                        "slots": [
-                            {
-                                "slot_id": "provider_mail_body",
-                                "display_name": "Тело письма провайдера",
-                                "priority_group": "what",
-                                "required": True,
-                                "fill_method": "resolution_profile",
-                                "resolution_profile_id": "profile.provider_mail",
-                            },
-                            {
-                                "slot_id": "provider_mail_subject",
-                                "display_name": "Тема письма провайдера",
-                                "priority_group": "what",
-                                "required": False,
-                                "fill_method": "resolution_profile",
-                                "resolution_profile_id": "profile.provider_mail",
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-
-
-def provider_mail_endpoint_payload() -> dict:
-    return {
-        "schema_version": "1.0",
-        "endpoints": [
-            {
-                "endpoint_id": "mock",
-                "display_name": "Mock",
-                "adapter_type": "mock",
-                "enabled": True,
-                "auth": {"type": "none"},
-                "operations": {
-                    "wait_for_email_by_ticket": {
-                        "operation_id": "wait_for_email_by_ticket",
-                        "display_name": "Ждать письмо",
-                        "method": "POST",
-                        "path": "/mock/wait",
-                        "timeout_seconds": 30,
-                        "contract_status": "valid",
-                        "request_schema": {
-                            "type": "object",
-                            "properties": {
-                                "ticket_number": {"type": "string"},
-                            },
-                            "required": ["ticket_number"],
-                            "additionalProperties": True,
-                        },
-                        "response_schema": wait_for_email_by_ticket_tool()["result_schema"],
-                        "mock_output": {
-                            "ticket_number": "T-1",
-                            "body": "Тело письма",
-                            "subject": "Тема письма",
-                            "status": "OK",
-                        },
-                    },
-                    "monitor_provider_channel_repair": {
-                        "operation_id": "monitor_provider_channel_repair",
-                        "display_name": "Мониторить ремонт",
-                        "method": "POST",
-                        "path": "/mock/monitor",
-                        "timeout_seconds": 30,
-                        "contract_status": "valid",
-                        "request_schema": {
-                            "type": "object",
-                            "properties": {
-                                "host": {"type": "string"},
-                            },
-                            "required": ["host"],
-                            "additionalProperties": True,
-                        },
-                        "response_schema": {
-                            "type": "object",
-                            "required": ["runbook_status", "message", "async_delivery"],
-                            "properties": {
-                                "runbook_status": {"type": "string"},
-                                "message": {"type": "string"},
-                                "async_delivery": {"type": "boolean"},
-                            },
-                            "additionalProperties": True,
-                        },
-                        "mock_output": {
-                            "runbook_status": "accepted",
-                            "message": "Принято",
-                            "async_delivery": True,
-                        },
+        "async_event_contracts": {
+            "zabbix_problem_status_wait.completed": {
+                "display_name": "Результат ожидания восстановления Zabbix",
+                "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+                "result_schema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
                     },
                 },
-            }
-        ],
-    }
-
-
-def provider_mail_tool_payload() -> dict:
-    wait_tool = wait_for_email_by_ticket_tool()
-    wait_tool["endpoint_bindings"] = [
-        {
-            "endpoint_id": "mock",
-            "operation_id": "wait_for_email_by_ticket",
-            "parameter_mapping": {"ticket_number": "react:ticket_number"},
-            "result_mapping": {
-                "ticket_number": "ticket_number",
-                "body": "body",
-                "subject": "subject",
-                "status": "status",
-            },
-        }
-    ]
-    monitor_tool = {
-        "tool_name": "n8n_monitor_provider_channel_repair",
-        "display_name": "Мониторить ремонт канала",
-        "description": "Тестовый мониторинг ремонта канала.",
-        "action_type": "read_only",
-        "parameters_schema": {
-            "type": "object",
-            "required": ["host"],
-            "properties": {"host": {"type": "string"}},
-            "additionalProperties": True,
-        },
-        "result_schema": provider_mail_endpoint_payload()["endpoints"][0]["operations"]["monitor_provider_channel_repair"]["response_schema"],
-        "endpoint_bindings": [
-            {
-                "endpoint_id": "mock",
-                "operation_id": "monitor_provider_channel_repair",
-                "parameter_mapping": {"host": "react:host"},
-                "result_mapping": {
-                    "runbook_status": "runbook_status",
-                    "message": "message",
-                    "async_delivery": "async_delivery",
-                },
-            }
-        ],
-    }
-    return {"schema_version": "1.0", "tools": [wait_tool, monitor_tool]}
-
-
-def provider_monitor_terminal_result_schema() -> dict:
-    return {
-        "type": "object",
-        "required": ["runbook_status", "message"],
-        "properties": {
-            "runbook_status": {"type": "string"},
-            "message": {"type": "string"},
-            "email_result": {
-                "type": ["object", "null"],
-                "properties": {
-                    "ticket_number": {"type": "string"},
-                    "body": {"type": ["string", "null"]},
-                    "subject": {"type": ["string", "null"]},
-                    "match_count": {"type": "integer"},
-                },
-                "additionalProperties": True,
             },
         },
-        "additionalProperties": True,
-    }
-
-
-def provider_monitor_endpoint_payload() -> dict:
-    payload = provider_mail_endpoint_payload()
-    operation = payload["endpoints"][0]["operations"]["monitor_provider_channel_repair"]
-    operation["request_schema"] = {
-        "type": "object",
-        "required": ["problemUrl", "service_request", "from", "replyTo"],
-        "properties": {
-            "problem_host": {"type": "string"},
-            "router_ref": {"type": "string"},
-            "problemUrl": {"type": "string"},
-            "service_request": {"type": "string"},
-            "from": {"type": "string"},
-            "replyTo": {"type": "string"},
-            "poll_interval_minutes": {"type": "integer", "default": 1},
-            "timeout_minutes": {"type": "integer", "default": 60},
-            "cc": {"type": "array", "items": {"type": "string"}},
-            "bcc": {"type": "array", "items": {"type": "string"}},
-            "request_id": {"type": "string"},
-            "template_id": {"type": "string"},
-        },
-        "anyOf": [
-            {"required": ["problem_host"]},
-            {"required": ["router_ref"]},
-        ],
-        "additionalProperties": True,
-    }
-    operation["async_event_contracts"] = {
-        "monitor_provider_channel_repair_completed": {
-            "display_name": "Результат мониторинга ремонта канала",
-            "statuses": ["progress", "success", "error", "timeout", "cancelled"],
-            "result_schema": provider_monitor_terminal_result_schema(),
-            "contract_version": "1.0",
-            "contract_status": "valid",
+        "default_completion_policy": {
+            "mode": "external_event",
+            "expected_event_type": "zabbix_problem_status_wait.completed",
+            "timeout_action": "escalate_operator",
+            "max_wait_seconds": 86400,
         },
     }
-    operation["extensions"] = {
-        "result_delivery": {
-            "default_transport": "kafka_event",
-            "default_result_topic": "external.events",
-        },
-    }
-    return payload
 
 
-def provider_monitor_tool() -> dict:
-    endpoint = provider_monitor_endpoint_payload()["endpoints"][0]
-    operation = endpoint["operations"]["monitor_provider_channel_repair"]
+def zabbix_wait_binding() -> dict:
     return {
-        "tool_name": "n8n_monitor_provider_channel_repair",
-        "display_name": "Мониторить ремонт канала",
-        "action_type": "read_only",
-        "parameters_schema": operation["request_schema"],
-        "result_schema": operation["response_schema"],
-        "endpoint_bindings": [
-            {
-                "endpoint_id": endpoint["endpoint_id"],
-                "operation_id": operation["operation_id"],
-                "parameter_mapping": {
-                    "problem_host": "react:problem_host",
-                    "router_ref": "react:router_ref",
-                    "problemUrl": "react:problemUrl",
-                    "service_request": "react:service_request",
-                    "from": "react:from",
-                    "replyTo": "react:replyTo",
-                },
-                "result_mapping": {
-                    "email_result.body": "email_result.body",
-                    "email_result.subject": "email_result.subject",
-                },
-            }
-        ],
-    }
-
-
-def provider_mail_resolution_profile(body_hint: str, subject_hint: str) -> dict:
-    return {
-        "profile_id": "profile.provider_mail",
-        "display_name": "Получить письмо провайдера",
+        "binding_id": "binding.zabbix_problem_status_wait.mcp_provider_ops",
+        "capability_id": "zabbix_problem_status_wait",
+        "environment_id": "mcp.provider_ops",
         "status": "active",
-        "description": "Проверочный многошаговый профиль.",
-        "slot_schema_id": "slot.provider_mail",
-        "target_slot_id": "provider_mail_body",
-        "use_llm_after_steps": False,
-        "enrichment_steps": [
-            {
-                "step_id": "step1",
-                "step_name": "Дождаться письма",
-                "react_call": "n8n_wait_for_email_by_ticket",
-                "endpoint_id": "mock",
-                "operation_id": "wait_for_email_by_ticket",
-                "parameter_mapping": {"ticket_number": "constant:T-1"},
-                "configuration_instruction": "Дождись письма провайдера.",
-                "on_error": "continue_to_llm",
-            },
-            {
-                "step_id": "step2",
-                "step_name": "Мониторить ремонт",
-                "react_call": "n8n_monitor_provider_channel_repair",
-                "endpoint_id": "mock",
-                "operation_id": "monitor_provider_channel_repair",
-                "parameter_mapping": {"host": "constant:router-1"},
-                "configuration_instruction": "Мониторь ремонт канала.",
-                "on_error": "continue_to_llm",
-            },
-        ],
-        "output_slots_order": [
-            {
-                "slot_id": "provider_mail_body",
-                "order": 1,
-                "required_for_success": True,
-                "source_hint": body_hint,
-                "fallback": "operator_handoff",
-            },
-            {
-                "slot_id": "provider_mail_subject",
-                "order": 2,
-                "required_for_success": False,
-                "source_hint": subject_hint,
-                "fallback": "leave_empty",
-            },
-        ],
-        "llm_resolution_script": {
-            "script_text": "Заполни выходные слоты.",
-            "response_contract": {
-                "decision": "fill",
-                "filled_slots": {},
-                "confidence": 1,
-                "next_question": "",
-                "reason": "",
-            },
+        "execution_mode": "async",
+        "mcp_tool_name": "zabbix.problem.status.wait",
+        "input_mapping": {
+            "problem_url": "problem_url",
+            "poll_interval_minutes": "poll_interval_minutes",
+            "timeout_minutes": "timeout_minutes",
         },
-        "human_resolution_policy": {
-            "action": "escalate_operator",
-            "message_template": "Передайте обращение оператору.",
+        "output_mapping": {
+            "status": "status",
         },
-        "max_attempts": 1,
     }
 
 
-class ConfigAssistantTest(unittest.TestCase):
-    def force_active_payload(self, store: ConfigStore, domain: str, payload: dict) -> None:
-        activated_at = utc_now()
-        version = {
-            "schema_version": "1.0",
-            "version_id": new_version_id(),
-            "domain": domain,
-            "payload": copy.deepcopy(payload),
-            "source_draft_id": "test-force-active",
-            "activated_by": "test",
-            "activated_at": activated_at,
-            "validation": {"schema_version": "1.0", "status": "forced"},
-            "regression": {"schema_version": "1.0", "status": "skipped"},
-        }
-        with store._connect() as connection:
-            connection.execute(
-                """
-                insert into config_versions (
-                    version_id,
-                    domain,
-                    version_json,
-                    source_draft_id,
-                    activated_by,
-                    activated_at
-                )
-                values (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    version["version_id"],
-                    domain,
-                    store._to_json(version),
-                    version["source_draft_id"],
-                    version["activated_by"],
-                    version["activated_at"],
-                ),
-            )
-            connection.execute(
-                """
-                insert or replace into config_active (
-                    domain,
-                    version_id,
-                    activated_at
-                )
-                values (?, ?, ?)
-                """,
-                (domain, version["version_id"], activated_at),
-            )
-
-    def test_attribute_resolution_step_compiles_step_and_result_contract(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                'Шаг: Найти пользователя в AD. Вызови get_user_login. '
-                'В параметр user_fio передай слот "Фамилия Имя Отчество". '
-                "Если ошибка, эскалируй оператору."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="get_user_login",
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["step_name"], "Найти пользователя в AD")
-        self.assertEqual(structure["parameter_mapping"], {"user_fio": "slot:user_fio"})
-        self.assertNotIn("result_entity_name", structure)
-        self.assertEqual(structure["on_error"], "escalate_operator")
-        self.assertEqual(structure["generated_structure_metadata"]["result_fields"][0]["field_id"], "user_login")
-        self.assertNotIn("result_fields", structure)
-
-    def test_attribute_resolution_step_rejects_legacy_entity_reference(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови get_manager_email. "
-                "В параметр login передай entity:users.0.user_login. "
-                "Если ошибка, эскалируй оператору."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_manager_email_tool()],
-            react_call="get_manager_email",
-            previous_steps=[{
-                "step_id": "step1",
-                "react_call": "get_user_login",
-            }],
-        )
-
-        structure = result["structure"]
-        self.assertTrue(any("entity:<name>" in error for error in result["validation_errors"]))
-        self.assertFalse(any(value.startswith("entity:") for value in structure["parameter_mapping"].values()))
-        self.assertNotIn("result_entity_name", structure)
-
-    def test_attribute_resolution_profile_migrates_legacy_entity_references(self) -> None:
-        profile = {
-            "profile_id": "profile.password.login",
-            "display_name": "Поиск логина",
-            "status": "active",
-            "description": "Тестовый профиль разрешения атрибута.",
-            "slot_schema_id": "slot.password_reset",
-            "target_slot_id": "manager_email",
-            "enrichment_steps": [
-                {
-                    "step_id": "step1",
-                    "step_name": "Найти пользователя",
-                    "react_call": "get_user_login",
-                    "parameter_mapping": {"user_fio": "slot:user_fio"},
-                    "result_entity_name": "users",
-                    "result_entity_description": "Пользователи AD.",
-                    "on_error": "continue_to_llm",
-                },
-                {
-                    "step_id": "step2",
-                    "step_name": "Найти руководителя",
-                    "react_call": "get_manager_email",
-                    "parameter_mapping": {"login": "entity:users.0.user_login"},
-                    "on_error": "continue_to_llm",
-                },
-            ],
-            "output_slots_order": [
-                {
-                    "slot_id": "manager_email",
-                    "order": 1,
-                    "required_for_success": True,
-                    "source_hint": "manager_email",
-                    "fallback": "ask_clarification",
-                }
-            ],
-            "llm_resolution_script": {
-                "script_text": "Используй ${entity.users.0.user_login} и entity:users.user_id.",
-                "response_contract": {
-                    "decision": "fill",
-                    "filled_slots": {},
-                    "confidence": 1,
-                    "next_question": "",
-                    "reason": "",
+def zabbix_update_capability() -> dict:
+    return {
+        "capability_id": "zabbix_problem_update",
+        "display_name": "Обновить проблему Zabbix",
+        "status": "active",
+        "description": "Добавляет комментарий в проблему Zabbix.",
+        "contract_version": "1.0",
+        "execution_modes": ["sync"],
+        "input_schema": {
+            "type": "object",
+            "required": ["problem_url", "message"],
+            "properties": {
+                "problem_url": {"type": "string", "description": "URL проблемы Zabbix."},
+                "message": {
+                    "type": "string",
+                    "description": "Текст комментария, который нужно записать в проблему Zabbix.",
                 },
             },
-            "human_resolution_policy": {
-                "action": "ask_client",
-                "message_template": "Уточните пользователя.",
+        },
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "Статус выполнения обновления."},
+                "message": {"type": "string", "description": "Сообщение, переданное в Zabbix."},
             },
-            "max_attempts": 1,
-        }
+        },
+    }
 
-        normalized = normalize_attribute_resolution_profile(profile)
 
-        self.assertNotIn("result_entity_name", normalized["enrichment_steps"][0])
-        self.assertEqual(
-            normalized["enrichment_steps"][1]["parameter_mapping"],
-            {"login": "step:step1.react.get_user_login.output.users.0.user_login"},
-        )
-        self.assertIn(
-            "${step.step1.react.get_user_login.output.users.0.user_login}",
-            normalized["llm_resolution_script"]["script_text"],
-        )
-        self.assertIn(
-            "step:step1.react.get_user_login.output.users.user_id",
-            normalized["llm_resolution_script"]["script_text"],
-        )
-        self.assertNotIn("entity:", normalized["llm_resolution_script"]["script_text"])
+def zabbix_update_binding() -> dict:
+    return {
+        "binding_id": "binding.zabbix_problem_update.mcp_provider_ops",
+        "capability_id": "zabbix_problem_update",
+        "environment_id": "mcp.provider_ops",
+        "status": "active",
+        "execution_mode": "sync",
+        "mcp_tool_name": "zabbix.problem.update",
+        "input_mapping": {
+            "problem_url": "problem_url",
+            "message": "message",
+        },
+        "output_mapping": {
+            "status": "status",
+            "message": "message",
+        },
+    }
 
-    def test_attribute_resolution_profile_normalizes_template_source_hints(self) -> None:
-        profile = {
-            "profile_id": "profile.custom.attribute_copy",
-            "display_name": "Получить письмо провайдера",
-            "status": "active",
-            "description": "Тест нормализации полей результата.",
-            "slot_schema_id": "slot.provider_case",
-            "target_slot_id": "provider_mail_body",
-            "use_llm_after_steps": False,
-            "enrichment_steps": [
-                {
-                    "step_id": "step1",
-                    "step_name": "Дождаться письма",
-                    "react_call": "n8n_wait_for_email_by_ticket",
-                    "parameter_mapping": {"ticket_number": "case:ticket_id"},
-                    "configuration_instruction": (
-                        "результат ${paramReAct.n8n_wait_for_email_by_ticket.output.body}-> provider_mail_body "
-                        "${paramReAct.n8n_wait_for_email_by_ticket.output.subject} ->provider_mail_subject"
-                    ),
-                    "on_error": "continue_to_llm",
-                }
-            ],
-            "output_slots_order": [
-                {
-                    "slot_id": "provider_mail_body",
-                    "order": 1,
-                    "required_for_success": True,
-                    "source_hint": "${paramReAct.n8n_wait_for_email_by_ticket.output.ticket_number}",
-                    "fallback": "operator_handoff",
-                },
-                {
-                    "slot_id": "provider_mail_subject",
-                    "order": 2,
-                    "required_for_success": False,
-                    "source_hint": "${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-                    "fallback": "leave_empty",
-                },
-            ],
-            "llm_resolution_script": {
-                "script_text": "Заполни выходные слоты.",
-                "response_contract": {
-                    "decision": "fill",
-                    "filled_slots": {},
-                    "confidence": 1,
-                    "next_question": "",
-                    "reason": "",
-                },
-            },
-            "human_resolution_policy": {
-                "action": "escalate_operator",
-                "message_template": "Передайте обращение оператору.",
-            },
-            "max_attempts": 1,
-        }
 
-        normalized = normalize_attribute_resolution_profile(profile)
-
-        self.assertEqual(normalized["output_slots_order"][0]["source_hint"], "body")
-        self.assertEqual(normalized["output_slots_order"][1]["source_hint"], "subject")
-
-    def test_attribute_resolution_step_compiles_step_reference_token(self) -> None:
+class ConfigAssistantMcpOnlyTest(unittest.TestCase):
+    def test_compiles_capability_step(self) -> None:
         result = compile_attribute_resolution_step(
             instruction=(
-                "Шаг: Найти руководителя. Вызови ${ReAct.get_manager_email}. "
-                "Передай ${step.step1.react.get_user_login.output.user_login} "
-                "в ${paramReAct.get_manager_email.input.login}. "
-                "Результат сохрани как manager."
+                "Выполни ${Capability.provider_channel_repair_monitor}. "
+                "${paramCapability.provider_channel_repair_monitor.input.problem_url}<-${slot.problem_url} "
+                "${paramCapability.provider_channel_repair_monitor.input.service_request}<-${case.ticket_id} "
+                "${paramCapability.provider_channel_repair_monitor.input.from}<-monitor@example.test "
+                "результат ${paramCapability.provider_channel_repair_monitor.output.provider_mail_body}->provider_mail_body"
             ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool(), get_manager_email_tool()],
-            previous_steps=[{
-                "step_id": "step1",
-                "step_name": "Найти пользователя",
-                "react_call": "get_user_login",
-            }],
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
         )
 
+        self.assertEqual(result["validation_errors"], [])
         structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["step_id"], "step2")
-        self.assertEqual(
-            structure["parameter_mapping"],
-            {"login": "step:step1.react.get_user_login.output.user_login"},
-        )
-        self.assertNotIn("result_entity_name", structure)
+        self.assertEqual(structure["capability_id"], "provider_channel_repair_monitor")
+        self.assertNotIn("tool_name", structure)
+        self.assertEqual(structure["mcp_environment_id"], "mcp.provider_ops")
+        self.assertEqual(structure["input_mapping"]["problem_url"], "slot:problem_url")
+        self.assertEqual(structure["output_mapping"]["provider_mail_body"], "provider_mail_body")
 
-    def test_attribute_resolution_step_compiles_template_reference_tokens(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Шаг: Найти руководителя. Вызови ${ReAct.get_manager_email}. "
-                "Передай ${step.step1.react.get_user_login.output.0.user_login} "
-                "в ${paramReAct.get_manager_email.input.login}. "
-                "Если ошибка, эскалируй оператору."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool(), get_manager_email_tool()],
-            previous_steps=[{
-                "step_id": "step1",
-                "react_call": "get_user_login",
-            }],
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["react_call"], "get_manager_email")
-        self.assertEqual(structure["parameter_mapping"], {"login": "step:step1.react.get_user_login.output.0.user_login"})
-        self.assertNotIn("result_entity_name", structure)
-
-    def test_attribute_resolution_step_infers_react_call_from_parameter_reference(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Шаг: Найти руководителя. "
-                "Передай ${step.step1.react.get_user_login.output.user_login} "
-                "в ${paramReAct.get_manager_email.input.login}. "
-                "Если ошибка, эскалируй оператору."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool(), get_manager_email_tool()],
-            previous_steps=[{"step_id": "step1", "react_call": "get_user_login"}],
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["react_call"], "get_manager_email")
-        self.assertEqual(structure["parameter_mapping"], {"login": "step:step1.react.get_user_login.output.user_login"})
-
-    def test_attribute_resolution_step_explicit_react_overrides_current_and_parses_case_and_constants(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.n8n_wait_for_email_by_ticket}. "
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.ticket_number}<-${case.ticket_id}\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.poll_interval_minutes}<-1\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.timeout_minutes}<-15\n"
-                "Результат ${paramReAct.n8n_wait_for_email_by_ticket.output.ticket_number}->${slot.user_login}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_manager_email_tool(), wait_for_email_by_ticket_tool()],
-            react_call="get_manager_email",
-        )
-
-        structure = result["structure"]
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["react_call"], "n8n_wait_for_email_by_ticket")
-        self.assertEqual(
-            structure["parameter_mapping"],
-            {
-                "ticket_number": "case:ticket_id",
-                "poll_interval_minutes": "constant:1",
-                "timeout_minutes": "constant:15",
-            },
-        )
-
-    def test_attribute_resolution_step_parses_same_line_react_constants(self) -> None:
-        slot_schema = {
-            "slot_schema_id": "slot.zabbix_wait",
-            "slots": [
-                {"slot_id": "zabbix_url", "display_name": "Zabbix problem URL", "required": True},
-            ],
-        }
-
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.n8n_wait_zabbix_problem_status} используй "
-                "${paramReAct.n8n_wait_zabbix_problem_status.input.problem_url}<-${slot.zabbix_url} "
-                "${paramReAct.n8n_wait_zabbix_problem_status.input.poll_interval_minutes}<-1 "
-                "${paramReAct.n8n_wait_zabbix_problem_status.input.timeout_minutes}<-10"
-            ),
-            slot_schema=slot_schema,
-            tools=[wait_zabbix_problem_status_tool()],
-        )
-
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(
-            result["structure"]["parameter_mapping"],
-            {
-                "problem_url": "slot:zabbix_url",
-                "poll_interval_minutes": "constant:1",
-                "timeout_minutes": "constant:10",
-            },
-        )
-        self.assertFalse(any("request_id" in warning for warning in result["warnings"]), result["warnings"])
-
-    def test_attribute_resolution_step_returns_output_mapping_hints_for_plain_slot_targets(self) -> None:
-        slot_schema = {
-            "slot_schema_id": "slot.provider_case",
-            "slots": [
-                {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
-                {"slot_id": "provider_mail_subject", "display_name": "Тема письма провайдера"},
-            ],
-        }
-
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.n8n_wait_for_email_by_ticket}. "
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.ticket_number}<-${case.ticket_id}\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.poll_interval_minutes}<-1\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.timeout_minutes}<-15\n"
-                "результат ${paramReAct.n8n_wait_for_email_by_ticket.output.body}-> provider_mail_body "
-                "${paramReAct.n8n_wait_for_email_by_ticket.output.subject} ->provider_mail_subject"
-            ),
-            slot_schema=slot_schema,
-            tools=[wait_for_email_by_ticket_tool()],
-        )
-
-        self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(
-            result["references"]["output_mapping_hints"],
-            [
-                {
-                    "target": "provider_mail_body",
-                    "field": "body",
-                    "source_ref": "${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
+    def test_llm_assist_compiles_natural_language_capability_step(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "provider": "fake",
+                "model": "fake-model",
+                "duration_ms": 7,
+                "redaction": {"redacted": False, "markers": []},
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "step_name": "Отправить письмо провайдеру",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_host": "slot:host",
+                        "problem_url": "slot:zabbix_url",
+                        "from": "constant:automation-test@local.test",
+                        "reply_to": "constant:automation-test@local.test",
+                        "poll_interval_minutes": "constant:1",
+                        "timeout_minutes": "constant:20",
+                    },
+                    "output_mapping": {
+                        "provider_mail_body": "provider_mail_body",
+                    },
                 },
-                {
-                    "target": "provider_mail_subject",
-                    "field": "subject",
-                    "source_ref": "${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-                },
-            ],
-        )
+            }
 
-    def test_attribute_resolution_step_uses_canonical_react_parameters_and_reads_oneof_result_schema(self) -> None:
+        instruction = (
+            "возьми capability по отправке почты провайдера, заполни соответствующими "
+            "входными данными, используй частоту опроса 1 минуту и таймаут 20, "
+            "результат запиши в соответствующий слот"
+        )
         result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.n8n_wait_for_email_by_ticket}. "
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.ticket_number}<-${case.ticket_id}\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.poll_interval_minutes}<-1\n"
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.timeout_minutes}<-15\n"
-                "Результат ${paramReAct.n8n_wait_for_email_by_ticket.output.ticket_number}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[wait_for_email_by_ticket_openapi_tool()],
+            instruction=instruction,
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            llm_assist_invoker=fake_llm_assist,
         )
 
-        structure = result["structure"]
-        result_field_ids = [
-            field["field_id"]
-            for field in structure["generated_structure_metadata"]["result_fields"]
-        ]
         self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(
-            structure["parameter_mapping"],
-            {
-                "ticket_number": "case:ticket_id",
-                "poll_interval_minutes": "constant:1",
-                "timeout_minutes": "constant:15",
-            },
+        structure = result["structure"]
+        self.assertEqual(structure["capability_id"], "provider_channel_repair_monitor")
+        self.assertEqual(structure["step_name"], "Отправить письмо провайдеру")
+        self.assertEqual(structure["configuration_instruction"], instruction)
+        self.assertEqual(structure["input_mapping"]["service_request"], "case:ticket_id")
+        self.assertEqual(structure["input_mapping"]["problem_host"], "slot:host")
+        self.assertEqual(structure["input_mapping"]["problem_url"], "slot:zabbix_url")
+        self.assertEqual(structure["input_mapping"]["from"], "constant:automation-test@local.test")
+        self.assertEqual(structure["input_mapping"]["reply_to"], "constant:automation-test@local.test")
+        self.assertEqual(structure["input_mapping"]["poll_interval_minutes"], "constant:1")
+        self.assertEqual(structure["input_mapping"]["timeout_minutes"], "constant:20")
+        self.assertEqual(structure["output_mapping"]["provider_mail_body"], "provider_mail_body")
+        self.assertEqual(structure["generated_structure_metadata"]["mode"], "llm_assist")
+        self.assertIn("llm_assist", result["references"])
+
+    def test_llm_assist_runs_when_capability_is_preselected(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_llm_assist(**kwargs: object) -> dict:
+            captured.update(kwargs)
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_url": "slot:zabbix_url",
+                    },
+                    "output_mapping": {"provider_mail_body": "provider_mail_body"},
+                },
+            }
+
+        result = compile_attribute_resolution_step(
+            instruction="заполни соответствующими входными данными",
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_id="provider_channel_repair_monitor",
+            capability_bindings=[binding()],
+            llm_assist_invoker=fake_llm_assist,
         )
-        self.assertIn("ticket_number", result_field_ids)
-        self.assertIn("status", result_field_ids)
-        self.assertIn("runbook_status", result_field_ids)
-        self.assertEqual(result["references"]["output_mapping_hints"], [])
-        self.assertNotIn("value", result_field_ids)
-        self.assertFalse(
-            any("Контракт результата ReAct-вызова пустой" in warning for warning in result["warnings"]),
+
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(captured["capability_id"], "provider_channel_repair_monitor")
+        self.assertEqual(result["structure"]["generated_structure_metadata"]["mode"], "llm_assist")
+
+    def test_llm_assist_filters_outputs_not_selected_by_profile(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_url": "slot:zabbix_url",
+                    },
+                    "output_mapping": {
+                        "provider_mail_body": "provider_mail_body",
+                        "provider_mail_subject": "provider_mail_subject",
+                        "provider_ticket_number": "provider_ticket_number",
+                    },
+                },
+            }
+
+        result = compile_attribute_resolution_step(
+            instruction="результат запиши в соответствующий слот профиля",
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_id="provider_channel_repair_monitor",
+            capability_bindings=[binding()],
+            profile_context={
+                "target_slot_id": "provider_mail_body",
+                "output_slot_ids": ["provider_mail_body"],
+                "output_slots_order": [{"slot_id": "provider_mail_body", "order": 1}],
+            },
+            llm_assist_invoker=fake_llm_assist,
+        )
+
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(result["structure"]["output_mapping"], {"provider_mail_body": "provider_mail_body"})
+        self.assertTrue(
+            any("provider_mail_subject" in warning and "не записано в слот" in warning for warning in result["warnings"]),
             result["warnings"],
         )
-        self.assertFalse(any("invocation" in warning for warning in result["warnings"]), result["warnings"])
-        self.assertFalse(any("ticketNumber" in warning for warning in result["warnings"]), result["warnings"])
-        self.assertFalse(any("pollIntervalMinutes" in warning for warning in result["warnings"]), result["warnings"])
-        self.assertFalse(any("timeoutMinutes" in warning for warning in result["warnings"]), result["warnings"])
 
-    def test_attribute_resolution_step_compiles_provider_monitor_external_event_body_mapping(self) -> None:
-        slot_schema = {
-            "slot_schema_id": "slot.provider_channel_repair",
-            "slots": [
-                {"slot_id": "problem_host", "display_name": "Проблемный хост"},
-                {"slot_id": "problem_url", "display_name": "Ссылка на проблему"},
-                {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
-            ],
-        }
+    def test_explicit_output_mapping_to_missing_profile_slot_fails(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_url": "slot:zabbix_url",
+                    },
+                    "output_mapping": {"provider_mail_body": "provider_mail_body"},
+                },
+            }
 
         result = compile_attribute_resolution_step(
             instruction=(
-                "Вызови ${ReAct.n8n_monitor_provider_channel_repair}. "
-                "${paramReAct.n8n_monitor_provider_channel_repair.input.problem_host}<-${slot.problem_host}\n"
-                "${paramReAct.n8n_monitor_provider_channel_repair.input.problemUrl}<-${slot.problem_url}\n"
-                "${paramReAct.n8n_monitor_provider_channel_repair.input.service_request}<-${case.ticket_id}\n"
-                "${paramReAct.n8n_monitor_provider_channel_repair.input.from}<-monitor@example.test\n"
-                "${paramReAct.n8n_monitor_provider_channel_repair.input.replyTo}<-monitor@example.test\n"
-                "результат ${paramReAct.n8n_monitor_provider_channel_repair.output.email_result.body}-> provider_mail_body"
+                "Выполни ${Capability.provider_channel_repair_monitor}. "
+                "результат ${paramCapability.provider_channel_repair_monitor.output.provider_mail_subject}->provider_mail_subject"
             ),
-            slot_schema=slot_schema,
-            tools=[provider_monitor_tool()],
-            integration_endpoints=provider_monitor_endpoint_payload()["endpoints"],
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_id="provider_channel_repair_monitor",
+            capability_bindings=[binding()],
+            profile_context={
+                "target_slot_id": "provider_mail_body",
+                "output_slot_ids": ["provider_mail_body"],
+                "output_slots_order": [{"slot_id": "provider_mail_body", "order": 1}],
+            },
+            llm_assist_invoker=fake_llm_assist,
         )
 
-        structure = result["structure"]
-        result_field_ids = [
-            field["field_id"]
-            for field in structure["generated_structure_metadata"]["result_fields"]
-        ]
+        self.assertEqual(result["structure"], {})
+        self.assertTrue(
+            any("provider_mail_subject" in error and "не найден" in error for error in result["validation_errors"]),
+            result["validation_errors"],
+        )
+
+    def test_llm_assist_does_not_override_preselected_capability(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "zabbix_problem_status_wait",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_url": "slot:zabbix_url",
+                    },
+                    "output_mapping": {"provider_mail_body": "provider_mail_body"},
+                },
+            }
+
+        result = compile_attribute_resolution_step(
+            instruction="возьми capability по отправке почты провайдера и заполни соответствующими входными данными",
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability(), zabbix_wait_capability()],
+            capability_id="provider_channel_repair_monitor",
+            capability_bindings=[binding(), zabbix_wait_binding()],
+            llm_assist_invoker=fake_llm_assist,
+        )
+
         self.assertEqual(result["validation_errors"], [])
-        self.assertEqual(structure["endpoint_id"], "mock")
-        self.assertEqual(structure["operation_id"], "monitor_provider_channel_repair")
+        self.assertEqual(result["structure"]["capability_id"], "provider_channel_repair_monitor")
+        self.assertTrue(
+            any("zabbix_problem_status_wait" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+
+    def test_capability_step_prompt_filters_to_preselected_capability(self) -> None:
+        messages = build_capability_step_assist_prompt(
+            instruction="заполни соответствующими входными данными",
+            slot_schema=slot_schema(),
+            capabilities=[capability(), zabbix_wait_capability()],
+            capability_bindings=[binding(), zabbix_wait_binding()],
+            previous_steps=[],
+            capability_id="provider_channel_repair_monitor",
+            profile_context={"capability_id": "provider_channel_repair_monitor"},
+        )
+        payload = json.loads(messages[1]["content"])
+
+        self.assertEqual(payload["constraints"]["selected_capability_id"], "provider_channel_repair_monitor")
+        self.assertEqual([item["capability_id"] for item in payload["capabilities"]], ["provider_channel_repair_monitor"])
+
+    def test_compiles_action_only_zabbix_wait_step_with_completion_policy(self) -> None:
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Выполни ${Capability.zabbix_problem_status_wait}. "
+                "${paramCapability.zabbix_problem_status_wait.input.problem_url}<-${slot.zabbix_url} "
+                "${paramCapability.zabbix_problem_status_wait.input.poll_interval_minutes}<-1 "
+                "${paramCapability.zabbix_problem_status_wait.input.timeout_minutes}<-10"
+            ),
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[zabbix_wait_capability()],
+            capability_bindings=[zabbix_wait_binding()],
+            profile_context={
+                "target_slot_id": "",
+                "output_slot_ids": [],
+                "output_slots_order": [],
+            },
+        )
+
+        self.assertEqual(result["validation_errors"], [])
+        structure = result["structure"]
+        self.assertEqual(structure["capability_id"], "zabbix_problem_status_wait")
+        self.assertEqual(structure["output_mapping"], {})
+        self.assertEqual(structure["completion_policy"]["mode"], "external_event")
         self.assertEqual(
             structure["completion_policy"]["expected_event_type"],
-            "monitor_provider_channel_repair_completed",
+            "zabbix_problem_status_wait.completed",
         )
-        self.assertEqual(structure["completion_policy"]["result_transport"], "kafka_event")
-        self.assertIn("problem_host", structure["parameter_mapping"])
-        self.assertNotIn("router_ref", structure["parameter_mapping"])
-        self.assertIn("email_result.body", result_field_ids)
-        self.assertIn("email_result.subject", result_field_ids)
-        self.assertEqual(
-            result["references"]["output_mapping_hints"],
-            [{
-                "target": "provider_mail_body",
-                "field": "email_result.body",
-                "source_ref": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
-            }],
-        )
+        self.assertEqual(structure["completion_policy"]["max_wait_seconds"], 86400)
 
-    def test_config_store_normalizes_n8n_wait_react_contract_without_endpoint_alias_loss(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            polluted_tool = wait_for_email_by_ticket_openapi_tool()
-
-            endpoints_payload = store.active_payload("integration_endpoints")
-            n8n_endpoint = next(item for item in endpoints_payload["endpoints"] if item["endpoint_id"] == "n8n")
-            n8n_endpoint["operations"]["wait_for_email_by_ticket"] = {
-                "display_name": "Дождаться письма по номеру заявки",
-                "description": "Тестовая endpoint-операция с alias-полями OpenAPI.",
-                "method": "POST",
-                "path": "/webhook/email/wait",
-                "request_schema": copy.deepcopy(polluted_tool["parameters_schema"]),
-                "response_schema": copy.deepcopy(polluted_tool["result_schema"]),
-                "async_event_contracts": {},
-                "contract_version": "1.0",
-                "contract_status": "valid",
-                "timeout_seconds": 30,
-            }
-            self.force_active_payload(store, "integration_endpoints", endpoints_payload)
-
-            tools_payload = store.active_payload("tools")
-            polluted_tool.update(
-                {
-                    "action_type": "read_only",
-                    "endpoint_bindings": [
-                        {
-                            "endpoint_id": "n8n",
-                            "operation_id": "wait_for_email_by_ticket",
-                            "parameter_mapping": {
-                                "invocation": "react:invocation",
-                                "ticket_number": "react:ticket_number",
-                                "ticketNumber": "react:ticketNumber",
-                                "poll_interval_minutes": "react:poll_interval_minutes",
-                                "pollIntervalMinutes": "react:pollIntervalMinutes",
-                                "timeout_minutes": "react:timeout_minutes",
-                                "timeoutMinutes": "react:timeoutMinutes",
-                            },
-                            "result_mapping": {
-                                "ticket_number": "ticket_number",
-                                "status": "status",
-                            },
-                        }
-                    ],
-                    "policy": copy.deepcopy(tools_payload["tools"][0]["policy"]),
-                    "contract_version": "1.0",
-                    "contract_status": "valid",
-                }
-            )
-            tools_payload["tools"].append(polluted_tool)
-            self.force_active_payload(store, "tools", tools_payload)
-
-            normalized_tool = next(
-                item
-                for item in store.active_payload("tools")["tools"]
-                if item["tool_name"] == "n8n_wait_for_email_by_ticket"
-            )
-            normalized_properties = set(normalized_tool["parameters_schema"]["properties"])
-            normalized_mapping = normalized_tool["endpoint_bindings"][0]["parameter_mapping"]
-            endpoint_operation = next(
-                item
-                for item in store.active_payload("integration_endpoints")["endpoints"]
-                if item["endpoint_id"] == "n8n"
-            )["operations"]["wait_for_email_by_ticket"]
-
-        self.assertEqual(
-            normalized_properties,
-            {"ticket_number", "poll_interval_minutes", "timeout_minutes"},
-        )
-        self.assertEqual(
-            normalized_mapping,
-            {
-                "ticket_number": "react:ticket_number",
-                "poll_interval_minutes": "react:poll_interval_minutes",
-                "timeout_minutes": "react:timeout_minutes",
-            },
-        )
-        self.assertIn("ticketNumber", endpoint_operation["request_schema"]["properties"])
-        self.assertIn("pollIntervalMinutes", endpoint_operation["request_schema"]["properties"])
-
-    def test_attribute_resolution_step_rejects_multiple_react_calls_in_one_step(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.get_user_login}. "
-                "Передай ${slot.user_fio} в ${paramReAct.get_manager_email.input.login}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool(), get_manager_email_tool()],
-        )
-
-        self.assertTrue(
-            any("только один ReAct-вызов" in error for error in result["validation_errors"]),
-            result["validation_errors"],
-        )
-
-    def test_attribute_resolution_step_does_not_create_unknown_output_slot(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Вызови ${ReAct.n8n_wait_for_email_by_ticket}. "
-                "${paramReAct.n8n_wait_for_email_by_ticket.input.ticket_number}<-${case.ticket_id}. "
-                "Результат ${paramReAct.n8n_wait_for_email_by_ticket.output.ticket_number}->${slot.incident_number}."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[wait_for_email_by_ticket_tool()],
-        )
-
-        self.assertTrue(
-            any("неизвестный слот: incident_number" in error for error in result["validation_errors"]),
-            result["validation_errors"],
-        )
-        self.assertNotIn("incident_number", [slot["slot_id"] for slot in password_slot_schema()["slots"]])
-
-    def test_resolved_dry_run_parameters_reads_case_fields(self) -> None:
-        parameters = resolved_dry_run_parameters(
-            {
-                "ticket_number": "case:ticket_id",
-                "poll_interval_minutes": "constant:1",
-            },
-            provided={"ticket_id": "SR-42"},
-            slot_values={},
-            enrichment_step_results={},
-        )
-
-        self.assertEqual(parameters["ticket_number"], "SR-42")
-        self.assertEqual(parameters["poll_interval_minutes"], "1")
-
-    def test_schema_parameter_defaults_coerce_numeric_constants(self) -> None:
-        parameters, applied_defaults = apply_schema_parameter_defaults(
-            {
-                "type": "object",
-                "required": ["poll_interval_minutes", "timeout_minutes"],
-                "properties": {
-                    "poll_interval_minutes": {"type": "integer"},
-                    "timeout_minutes": {"type": "integer", "default": 15},
-                },
-            },
-            {"poll_interval_minutes": "1"},
-        )
-
-        self.assertEqual(parameters["poll_interval_minutes"], 1)
-        self.assertEqual(parameters["timeout_minutes"], 15)
-        self.assertEqual(applied_defaults, {"timeout_minutes": 15})
-
-    def test_attribute_resolution_step_rejects_parameter_reference_from_other_react_call(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction=(
-                "Шаг: Найти руководителя. Вызови ${ReAct.get_manager_email}. "
-                "Передай ${slot.user_fio} в ${paramReAct.get_user_login.input.user_fio}. "
-                "Результат сохрани как manager."
-            ),
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool(), get_manager_email_tool()],
-        )
-
-        self.assertTrue(any("текущий профиль/шаг использует get_manager_email" in error for error in result["validation_errors"]))
-
-    def test_explicit_unknown_react_call_is_not_replaced_by_first_tool(self) -> None:
-        result = compile_attribute_resolution_step(
-            instruction="Вызови missing_call и сохрани результат как users.",
-            slot_schema=password_slot_schema(),
-            tools=[get_user_login_tool()],
-            react_call="missing_call",
-        )
-
-        self.assertEqual(result["structure"]["react_call"], "missing_call")
-        self.assertTrue(result["validation_errors"])
-        self.assertEqual(result["references"]["input_parameters"], [])
-
-    def test_config_store_rejects_unknown_step_output_field(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            payload = store.active_payload("attribute_resolution_profiles")
-            profile = next(item for item in payload["profiles"] if item["profile_id"] == "profile.password_reset.login_from_ad")
-            profile["enrichment_steps"].append(
-                {
-                    "step_id": "step2",
-                    "step_name": "Повторный поиск",
-                    "react_call": "search_ad_users",
-                    "parameter_mapping": {
-                        "login": "step:step1.react.search_ad_users.output.no_such_field"
-                    },
-                    "on_error": "continue_to_llm",
-                }
-            )
-
-            validation = store.validate_payload("attribute_resolution_profiles", payload)
-
-            self.assertEqual(validation["status"], "invalid")
-            self.assertTrue(
-                any("no_such_field" in error for error in validation["errors"]),
-                validation["errors"],
-            )
-
-    def test_config_store_rejects_slot_from_other_schema(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            payload = store.active_payload("attribute_resolution_profiles")
-            profile = next(item for item in payload["profiles"] if item["profile_id"] == "profile.password_reset.login_from_ad")
-            profile["enrichment_steps"][0]["parameter_mapping"]["login"] = "slot:device_name"
-
-            validation = store.validate_payload("attribute_resolution_profiles", payload)
-
-            self.assertEqual(validation["status"], "invalid")
-            self.assertTrue(
-                any("device_name" in error and "выбранной схемы" in error for error in validation["errors"]),
-                validation["errors"],
-            )
-
-    def test_config_store_accepts_output_hint_from_non_last_step(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "valid", validation["errors"])
-
-    def test_config_store_rejects_resolution_step_missing_required_react_parameter(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            tools = provider_mail_tool_payload()
-            monitor_tool = next(item for item in tools["tools"] if item["tool_name"] == "n8n_monitor_provider_channel_repair")
-            monitor_tool["parameters_schema"]["required"] = [
-                "host",
-                "poll_interval_minutes",
-                "timeout_minutes",
-            ]
-            monitor_tool["parameters_schema"]["properties"]["poll_interval_minutes"] = {"type": "integer"}
-            monitor_tool["parameters_schema"]["properties"]["timeout_minutes"] = {"type": "integer"}
-            self.force_active_payload(store, "tools", tools)
-            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "invalid")
-            self.assertTrue(
-                any("poll_interval_minutes" in error for error in validation["errors"])
-                and any("timeout_minutes" in error for error in validation["errors"]),
-                validation["errors"],
-            )
-
-    def test_config_store_accepts_resolution_step_required_react_defaults(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            tools = provider_mail_tool_payload()
-            monitor_tool = next(item for item in tools["tools"] if item["tool_name"] == "n8n_monitor_provider_channel_repair")
-            monitor_tool["parameters_schema"]["required"] = [
-                "host",
-                "poll_interval_minutes",
-                "timeout_minutes",
-            ]
-            monitor_tool["parameters_schema"]["properties"]["poll_interval_minutes"] = {"type": "integer", "default": 1}
-            monitor_tool["parameters_schema"]["properties"]["timeout_minutes"] = {"type": "integer", "default": 15}
-            self.force_active_payload(store, "tools", tools)
-            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-            launch = store._profile_step_launch(
-                profile=profile,
-                step=profile["enrichment_steps"][1],
-                tool_by_name={item["tool_name"]: item for item in tools["tools"]},
-                endpoint_by_id={item["endpoint_id"]: item for item in provider_mail_endpoint_payload()["endpoints"]},
-                delivery_defaults={},
-            )
-
-            self.assertEqual(validation["status"], "valid", validation["errors"])
-            self.assertEqual(launch["parameter_bindings"]["poll_interval_minutes"], "constant:1")
-            self.assertEqual(launch["parameter_bindings"]["timeout_minutes"], "constant:15")
-
-    def test_config_store_rejects_plain_output_hint_from_wrong_last_step(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
-            profile = provider_mail_resolution_profile(body_hint="ticket_number", subject_hint="subject")
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "invalid")
-            output_error = next(
-                (
-                    error
-                    for error in validation["errors"]
-                    if "Тема письма провайдера" in error and "subject" in error
-                ),
-                "",
-            )
-            self.assertIn('Профиль "Получить письмо провайдера" (profile.provider_mail)', output_error)
-            self.assertIn("Выходные слоты и порядок заполнения -> строка 2", output_error)
-            self.assertIn('"Тема письма провайдера" (provider_mail_subject)', output_error)
-            self.assertIn('шаг 2 "Мониторить ремонт" (step2)', output_error)
-            self.assertIn(
-                'ReAct-вызов "Мониторить ремонт канала" (n8n_monitor_provider_channel_repair)',
-                output_error,
-            )
-            self.assertIn("Доступные поля результата: async_delivery, message, runbook_status", output_error)
-
-    def test_config_store_validates_output_hint_against_endpoint_response_contract(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            endpoints = provider_mail_endpoint_payload()
-            endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]["response_schema"] = {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": True,
-            }
-            self.force_active_payload(store, "integration_endpoints", endpoints)
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "invalid")
-            output_error = next(
-                (
-                    error
-                    for error in validation["errors"]
-                    if "Тело письма провайдера" in error and "body" in error
-                ),
-                "",
-            )
-            self.assertIn('Профиль "Получить письмо провайдера" (profile.provider_mail)', output_error)
-            self.assertIn('шаг 1 "Дождаться письма" (step1)', output_error)
-            self.assertIn("контракт не содержит именованных полей", output_error)
-
-    def test_config_store_validates_external_event_output_hint_against_async_contract(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            endpoints = provider_mail_endpoint_payload()
-            operation = endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]
-            operation["response_schema"] = {
-                "type": "object",
-                "required": ["runbook_status", "async_delivery"],
-                "properties": {
-                    "runbook_status": {"const": "accepted"},
-                    "async_delivery": {"const": True},
-                },
-                "additionalProperties": True,
-            }
-            operation["mock_output"] = {
-                "runbook_status": "accepted",
-                "async_delivery": True,
-            }
-            operation["async_event_contracts"] = {
-                "wait_for_email_by_ticket_completed": {
-                    "display_name": "Письмо найдено",
-                    "description": "Финальный результат ожидания письма.",
-                    "statuses": ["progress", "success", "error", "timeout", "cancelled"],
-                    "result_schema": wait_for_email_by_ticket_tool()["result_schema"],
-                    "contract_version": "1.0",
-                    "contract_status": "valid",
-                }
-            }
-            self.force_active_payload(store, "integration_endpoints", endpoints)
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-            profile["enrichment_steps"][0]["completion_policy"] = {
-                "mode": "external_event",
-                "expected_event_type": "wait_for_email_by_ticket_completed",
-                "max_wait_seconds": 900,
-                "timeout_action": "escalate_operator",
-                "result_transport": "kafka_event",
-            }
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "valid", validation["errors"])
-
-    def test_config_store_accepts_provider_monitor_nested_email_result_hint(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            slot_payload = {
-                "schema_version": "1.0",
-                "slot_schemas": [
-                    {
-                        "slot_schema_id": "slot.provider_channel_repair",
-                        "display_name": "Слоты мониторинга провайдера",
-                        "slots": [
-                            {"slot_id": "provider_mail_body", "display_name": "Тело письма провайдера"},
-                            {"slot_id": "provider_mail_subject", "display_name": "Тема письма провайдера"},
-                        ],
-                    }
-                ],
-            }
-            profile = {
-                "profile_id": "profile.provider_monitor_mail",
-                "display_name": "Получить ответ провайдера",
-                "status": "active",
-                "description": "Проверочный профиль чтения terminal email_result.",
-                "slot_schema_id": "slot.provider_channel_repair",
+    def test_capability_step_prompt_marks_selected_output_slots(self) -> None:
+        messages = build_capability_step_assist_prompt(
+            instruction="заполни соответствующими входными данными",
+            slot_schema=slot_schema(),
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            previous_steps=[],
+            capability_id="provider_channel_repair_monitor",
+            profile_context={
+                "capability_id": "provider_channel_repair_monitor",
                 "target_slot_id": "provider_mail_body",
-                "use_llm_after_steps": False,
-                "enrichment_steps": [
-                    {
-                        "step_id": "step1",
-                        "step_name": "Мониторить ремонт канала",
-                        "react_call": "n8n_monitor_provider_channel_repair",
-                        "endpoint_id": "mock",
-                        "operation_id": "monitor_provider_channel_repair",
-                        "completion_policy": {
-                            "mode": "external_event",
-                            "expected_event_type": "monitor_provider_channel_repair_completed",
-                            "max_wait_seconds": 86400,
-                            "timeout_action": "escalate_operator",
-                            "result_transport": "kafka_event",
-                            "result_topic": "external.events",
-                        },
-                        "parameter_mapping": {
-                            "problem_host": "constant:c2m-ntbook-routerg-047",
-                            "problemUrl": "constant:http://localhost:8081/tr_events.php?triggerid=61119&eventid=90528",
-                            "service_request": "constant:МТС000000000000001",
-                            "from": "constant:monitor@example.test",
-                            "replyTo": "constant:monitor@example.test",
-                        },
-                        "configuration_instruction": "Мониторить ремонт канала провайдера.",
-                        "on_error": "escalate_operator",
-                    }
-                ],
-                "output_slots_order": [
-                    {
-                        "slot_id": "provider_mail_body",
-                        "order": 1,
-                        "required_for_success": True,
-                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.body}",
-                        "on_missing": "continue",
+                "output_slot_ids": ["provider_mail_body"],
+                "output_slots_order": [{"slot_id": "provider_mail_body", "order": 1}],
+            },
+        )
+        payload = json.loads(messages[1]["content"])
+
+        self.assertTrue(payload["constraints"]["requires_output_mapping"])
+        self.assertEqual(payload["constraints"]["selected_output_slot_ids"], ["provider_mail_body"])
+        self.assertEqual(
+            [slot["slot_id"] for slot in payload["selected_output_slots"]],
+            ["provider_mail_body"],
+        )
+        self.assertEqual(
+            payload["response_schema"]["output_mapping"],
+            {"<selected_target_slot_id>": "<capability_output_field>"},
+        )
+
+    def test_llm_assist_allows_action_only_profile_without_output_warning(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "zabbix_problem_update",
+                    "step_name": "Обновить Zabbix",
+                    "input_mapping": {
+                        "problem_url": "slot:zabbix_url",
+                        "message": "slot:provider_mail_body",
                     },
-                    {
-                        "slot_id": "provider_mail_subject",
-                        "order": 2,
-                        "required_for_success": False,
-                        "source_hint": "${step.step1.react.n8n_monitor_provider_channel_repair.output.email_result.subject}",
-                        "on_missing": "continue",
+                },
+            }
+
+        result = compile_attribute_resolution_step(
+            instruction="добавь комментарий в Zabbix из письма провайдера",
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[zabbix_update_capability()],
+            capability_id="zabbix_problem_update",
+            capability_bindings=[zabbix_update_binding()],
+            profile_context={
+                "profile_id": "profile.zabbix_update",
+                "target_slot_id": None,
+                "output_slot_ids": [],
+                "output_slots_order": [],
+            },
+            llm_assist_invoker=fake_llm_assist,
+        )
+
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(result["structure"]["output_mapping"], {})
+        self.assertFalse(
+            any("не вернул output_mapping" in warning for warning in result["warnings"]),
+            result["warnings"],
+        )
+        self.assertFalse(result["references"]["llm_assist"]["requires_output_mapping"])
+        self.assertTrue(
+            any("outputs: none" in assumption for assumption in result["references"]["llm_assist"]["assumptions"]),
+            result["references"]["llm_assist"]["assumptions"],
+        )
+
+    def test_llm_assist_preserves_explicit_refs_as_constraints(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "input_mapping": {
+                        "service_request": "slot:host",
+                        "problem_url": "slot:problem_url",
                     },
-                ],
-            }
-            self.force_active_payload(store, "slot_schemas", slot_payload)
-            self.force_active_payload(store, "tools", {"schema_version": "1.0", "tools": [provider_monitor_tool()]})
-            self.force_active_payload(store, "integration_endpoints", provider_monitor_endpoint_payload())
-
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "valid", validation["errors"])
-
-    def test_config_store_rejects_external_event_contract_from_other_operation(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            endpoints = provider_mail_endpoint_payload()
-            endpoints["endpoints"][0]["operations"]["wait_for_email_by_ticket"]["async_event_contracts"] = {
-                "wait_for_email_by_ticket_completed": {
-                    "display_name": "Письмо найдено",
-                    "statuses": ["success", "error", "timeout"],
-                    "result_schema": wait_for_email_by_ticket_tool()["result_schema"],
-                    "contract_version": "1.0",
-                    "contract_status": "valid",
-                }
-            }
-            self.force_active_payload(store, "integration_endpoints", endpoints)
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-            profile["enrichment_steps"][1]["completion_policy"] = {
-                "mode": "external_event",
-                "expected_event_type": "wait_for_email_by_ticket_completed",
-                "max_wait_seconds": 900,
-                "timeout_action": "escalate_operator",
-                "result_transport": "kafka_event",
+                    "output_mapping": {"provider_mail_body": "provider_mail_body"},
+                },
             }
 
-            validation = store.validate_payload(
-                "attribute_resolution_profiles",
-                {"schema_version": "1.0", "profiles": [profile]},
-            )
-
-            self.assertEqual(validation["status"], "invalid")
-            error = next(
-                (
-                    item
-                    for item in validation["errors"]
-                    if "wait_for_email_by_ticket_completed" in item
-                    and "mock/monitor_provider_channel_repair" in item
-                ),
-                "",
-            )
-            self.assertIn("endpoint-операция mock/monitor_provider_channel_repair", error)
-            self.assertIn("не содержит async_event_contracts", error)
-
-    def test_attribute_resolution_direct_mapping_reads_output_from_referenced_step(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            self.force_active_payload(store, "slot_schemas", provider_mail_slot_payload())
-            self.force_active_payload(store, "tools", provider_mail_tool_payload())
-            self.force_active_payload(store, "integration_endpoints", provider_mail_endpoint_payload())
-            profile = provider_mail_resolution_profile(
-                body_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.body}",
-                subject_hint="${step.step1.react.n8n_wait_for_email_by_ticket.output.subject}",
-            )
-
-            result = store.simulate_attribute_resolution_profile(
-                profile=profile,
-                slot_schema=provider_mail_slot_payload()["slot_schemas"][0],
-                provided={},
-                simulation_options={
-                    "allow_llm": False,
-                    "allow_readonly_integrations": True,
-                    "allow_mock_integrations": True,
-                },
-                effective_thresholds={
-                    "auto_accept_confidence": 0.85,
-                    "clarification_confidence": 0.70,
-                    "operator_handoff_confidence": 0.50,
-                    "min_extraction_confidence": 0.70,
-                },
-                execution_trace=[],
-                slot_values={},
-            )
-
-            self.assertEqual(result["status"], "filled", result)
-            self.assertEqual(result["output_values"]["provider_mail_body"], "Тело письма")
-            self.assertEqual(result["output_values"]["provider_mail_subject"], "Тема письма")
-
-    def test_attribute_resolution_can_fill_directly_without_llm(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            profile = copy.deepcopy(
-                next(
-                    item
-                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
-                    if item["profile_id"] == "profile.password_reset.login_from_ad"
-                )
-            )
-            profile["use_llm_after_steps"] = False
-            slot_schema = next(
-                item
-                for item in store.active_payload("slot_schemas")["slot_schemas"]
-                if item["slot_schema_id"] == "slot.password_reset"
-            )
-            trace: list[dict] = []
-
-            result = store.simulate_attribute_resolution_profile(
-                profile=profile,
-                slot_schema=slot_schema,
-                provided={},
-                simulation_options={
-                    "allow_llm": False,
-                    "allow_readonly_integrations": True,
-                    "allow_mock_integrations": True,
-                },
-                effective_thresholds={
-                    "auto_accept_confidence": 0.85,
-                    "clarification_confidence": 0.70,
-                    "operator_handoff_confidence": 0.50,
-                    "min_extraction_confidence": 0.70,
-                },
-                execution_trace=trace,
-                slot_values={},
-            )
-
-            self.assertEqual(result["resolution_mode"], "direct_mapping")
-            self.assertIsNone(result["llm_decision"])
-            self.assertEqual(result["status"], "filled")
-            self.assertEqual(result["output_values"]["user_login"], "ivanov")
-            self.assertEqual(result["output_values"]["user_id"], "u-1001")
-
-    def test_attribute_resolution_direct_mapping_can_continue_without_value(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            profile = copy.deepcopy(
-                next(
-                    item
-                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
-                    if item["profile_id"] == "profile.password_reset.login_from_ad"
-                )
-            )
-            profile["use_llm_after_steps"] = False
-            profile["output_slots_order"] = [
-                {
-                    "slot_id": "user_login",
-                    "order": 1,
-                    "required_for_success": True,
-                    "source_hint": "missing_field",
-                    "fallback": "leave_empty",
-                }
-            ]
-            slot_schema = next(
-                item
-                for item in store.active_payload("slot_schemas")["slot_schemas"]
-                if item["slot_schema_id"] == "slot.password_reset"
-            )
-
-            result = store.simulate_attribute_resolution_profile(
-                profile=profile,
-                slot_schema=slot_schema,
-                provided={},
-                simulation_options={
-                    "allow_llm": False,
-                    "allow_readonly_integrations": True,
-                    "allow_mock_integrations": True,
-                },
-                effective_thresholds={
-                    "auto_accept_confidence": 0.85,
-                    "clarification_confidence": 0.70,
-                    "operator_handoff_confidence": 0.50,
-                    "min_extraction_confidence": 0.70,
-                },
-                execution_trace=[],
-                slot_values={},
-            )
-
-            self.assertEqual(result["resolution_mode"], "direct_mapping")
-            self.assertEqual(result["decision"], "leave_empty")
-            self.assertEqual(result["status"], "skipped")
-            self.assertEqual(result["output_values"], {})
-
-    def test_attribute_resolution_can_escalate_operator_without_value(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            profile = copy.deepcopy(
-                next(
-                    item
-                    for item in store.active_payload("attribute_resolution_profiles")["profiles"]
-                    if item["profile_id"] == "profile.password_reset.login_from_ad"
-                )
-            )
-            profile["use_llm_after_steps"] = False
-            profile["human_resolution_policy"] = {
-                "action": "escalate_operator",
-                "message_template": "Передайте обращение оператору: ${slot.user_fio}.",
-            }
-            profile["output_slots_order"] = [
-                {
-                    "slot_id": "user_login",
-                    "order": 1,
-                    "required_for_success": True,
-                    "source_hint": "missing_field",
-                    "fallback": "ask_clarification",
-                }
-            ]
-            slot_schema = next(
-                item
-                for item in store.active_payload("slot_schemas")["slot_schemas"]
-                if item["slot_schema_id"] == "slot.password_reset"
-            )
-
-            result = store.simulate_attribute_resolution_profile(
-                profile=profile,
-                slot_schema=slot_schema,
-                provided={},
-                simulation_options={
-                    "allow_llm": False,
-                    "allow_readonly_integrations": True,
-                    "allow_mock_integrations": True,
-                },
-                effective_thresholds={
-                    "auto_accept_confidence": 0.85,
-                    "clarification_confidence": 0.70,
-                    "operator_handoff_confidence": 0.50,
-                    "min_extraction_confidence": 0.70,
-                },
-                execution_trace=[],
-                slot_values={},
-            )
-
-            self.assertEqual(result["decision"], "handoff")
-            self.assertEqual(result["status"], "operator_handoff")
-            self.assertEqual(result["pending_question"], None)
-            self.assertEqual(
-                result["resolution_decision"]["handoff_message"],
-                "Передайте обращение оператору: ${slot.user_fio}.",
-            )
-
-    def test_operation_response_items_requires_selector_for_ambiguous_containers(self) -> None:
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "users": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-                "groups": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-            },
-        }
-
-        count, item, summary = operation_response_items(
-            {"users": [{"login": "ivanov"}], "groups": [{"name": "admins"}]},
-            response_schema,
-            [{"slot_id": "user_login", "source_hint": "login"}],
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Выполни ${Capability.provider_channel_repair_monitor}. "
+                "${paramCapability.provider_channel_repair_monitor.input.service_request}<-${case.ticket_id} "
+                "${paramCapability.provider_channel_repair_monitor.input.problem_url}<-${slot.zabbix_url} "
+                "результат ${paramCapability.provider_channel_repair_monitor.output.provider_mail_body}->provider_mail_body"
+            ),
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            llm_assist_invoker=fake_llm_assist,
         )
 
-        self.assertEqual(count, -1)
-        self.assertIsNone(item)
-        self.assertEqual(summary["source_status"], "configuration_error")
+        self.assertEqual(result["validation_errors"], [])
+        self.assertEqual(result["structure"]["input_mapping"]["service_request"], "case:ticket_id")
+        self.assertEqual(result["structure"]["input_mapping"]["problem_url"], "slot:zabbix_url")
 
-    def test_operation_response_items_uses_source_hint_container(self) -> None:
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "users": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-                "groups": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-            },
-        }
+    def test_llm_assist_unavailable_does_not_fall_back_to_deterministic_success(self) -> None:
+        def failed_llm_assist(**_: object) -> dict:
+            return {"status": "error", "error": {"message": "model unavailable"}}
 
-        count, item, summary = operation_response_items(
-            {"users": [{"login": "ivanov"}], "groups": [{"name": "admins"}]},
-            response_schema,
-            [{"slot_id": "user_login", "source_hint": "users.login"}],
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Выполни ${Capability.provider_channel_repair_monitor}. "
+                "${paramCapability.provider_channel_repair_monitor.input.problem_url}<-${slot.zabbix_url} "
+                "${paramCapability.provider_channel_repair_monitor.input.service_request}<-${case.ticket_id}"
+            ),
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            llm_assist_invoker=failed_llm_assist,
         )
 
-        self.assertEqual(count, 1)
-        self.assertEqual(item, {"login": "ivanov"})
-        self.assertEqual(summary["result_path"], "users")
+        self.assertEqual(result["structure"], {})
+        self.assertTrue(any("LLM assist" in error for error in result["validation_errors"]))
 
-    def test_operation_response_items_keeps_root_source_hint_for_top_level_field(self) -> None:
-        response_schema = {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string"},
-                "router_candidates": {
-                    "type": "array",
-                    "items": {"type": "object", "additionalProperties": True},
-                },
-                "email_result": {
-                    "type": "object",
-                    "properties": {"body": {"type": "string"}},
-                },
-            },
-        }
-
-        count, item, summary = operation_response_items(
-            {
-                "message": "Письмо провайдеру отправлено.",
-                "router_candidates": [],
-                "email_result": {"body": "ok"},
-            },
-            response_schema,
-            [{"slot_id": "provider_mail_body", "source_hint": "message"}],
+    def test_capability_step_prompt_contains_rich_slot_and_field_metadata(self) -> None:
+        messages = build_capability_step_assist_prompt(
+            instruction="заполни соответствующими входными данными",
+            slot_schema=slot_schema(),
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            previous_steps=[],
+            capability_id="provider_channel_repair_monitor",
+            profile_context={"description": "Получить письмо регистрации от провайдера."},
+            system_prompt_template="custom assist prompt",
+        )
+        self.assertEqual(messages[0]["content"], "custom assist prompt")
+        payload = json.loads(messages[1]["content"])
+        zabbix_slot = next(slot for slot in payload["slots"] if slot["slot_id"] == "zabbix_url")
+        self.assertIn("Original problem URL", zabbix_slot["extraction_instruction"])
+        provider_capability = payload["capabilities"][0]
+        problem_url = next(field for field in provider_capability["input_fields"] if field["field_id"] == "problem_url")
+        self.assertIn("Zabbix", problem_url["description"])
+        poll_interval = next(field for field in provider_capability["input_fields"] if field["field_id"] == "poll_interval_minutes")
+        self.assertEqual(poll_interval["default"], 1)
+        self.assertEqual(payload["constraints"]["selected_capability_id"], "provider_channel_repair_monitor")
+        self.assertTrue(payload["constraints"]["requires_output_mapping"])
+        self.assertTrue(
+            any(
+                item["capability_id"] == "provider_channel_repair_monitor"
+                and item["section"] == "input"
+                and item["field_id"] == "from"
+                for item in payload["metadata_quality"]["missing_capability_field_descriptions"]
+            )
         )
 
-        self.assertEqual(count, 1)
-        self.assertEqual(item["message"], "Письмо провайдеру отправлено.")
-        self.assertEqual(summary["result_path"], "")
+    def test_llm_assist_rejects_unknown_output_field(self) -> None:
+        def fake_llm_assist(**_: object) -> dict:
+            return {
+                "status": "success",
+                "draft": {
+                    "capability_id": "provider_channel_repair_monitor",
+                    "input_mapping": {
+                        "service_request": "case:ticket_id",
+                        "problem_url": "slot:zabbix_url",
+                    },
+                    "output_mapping": {
+                        "provider_mail_body": "unknown_output",
+                    },
+                },
+            }
 
-    def test_service_scenario_accepts_known_react_call_scope(self) -> None:
-        with TemporaryDirectory() as tempdir:
+        result = compile_attribute_resolution_step(
+            instruction="возьми capability по отправке почты провайдера и результат запиши в соответствующий слот",
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+            llm_assist_invoker=fake_llm_assist,
+        )
+
+        self.assertEqual(result["structure"], {})
+        self.assertTrue(any("unknown_output" in error for error in result["validation_errors"]))
+
+    def test_rejects_step_without_capability_reference(self) -> None:
+        result = compile_attribute_resolution_step(
+            instruction=(
+                "Вызови внешнюю endpoint-операцию wait_for_email_by_ticket. "
+                "ticket_number <- ${case.ticket_id}"
+            ),
+            slot_schema=slot_schema(),
+            tools=[],
+            capabilities=[capability()],
+            capability_bindings=[binding()],
+        )
+
+        self.assertEqual(result["structure"], {})
+        self.assertTrue(any("должен ссылаться на Capability" in error for error in result["validation_errors"]))
+
+    def test_service_scenario_rejects_unknown_execution_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
             store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
             payload = copy.deepcopy(store.active_payload("service_scenarios"))
-            tool_name = store.active_payload("tools")["tools"][0]["tool_name"]
-            scenario = next(item for item in payload["scenarios"] if item["scenario_id"] == "password_reset")
-            scenario["allowed_react_call_names"] = [tool_name]
-
+            payload["scenarios"][0]["legacy_call_names"] = ["wait_for_email_by_ticket"]
             validation = store.validate_payload("service_scenarios", payload)
 
-            self.assertEqual(validation["status"], "valid", validation["errors"])
-
-    def test_service_scenario_rejects_unknown_react_call_scope(self) -> None:
-        with TemporaryDirectory() as tempdir:
-            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
-            payload = copy.deepcopy(store.active_payload("service_scenarios"))
-            scenario = next(item for item in payload["scenarios"] if item["scenario_id"] == "password_reset")
-            scenario["allowed_react_call_names"] = ["missing_react_call"]
-
-            validation = store.validate_payload("service_scenarios", payload)
-
-            self.assertEqual(validation["status"], "invalid")
-            self.assertTrue(
-                any("missing_react_call" in error and "ReAct-вызов" in error for error in validation["errors"]),
-                validation["errors"],
-            )
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("legacy_call_names" in error for error in validation["errors"]))
 
 
 if __name__ == "__main__":

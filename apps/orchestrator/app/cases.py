@@ -137,7 +137,7 @@ class CaseStore:
                 case_id,
                 "tool_result_recorded",
                 actor_type="system",
-                actor_id="integration_dispatcher",
+                actor_id="capability_dispatcher",
                 summary=f"Результат инструмента записан со статусом {result['status']}.",
                 correlation=self._correlation_from_tool_result(result),
                 payload={"tool_result": copy.deepcopy(result)},
@@ -189,7 +189,7 @@ class CaseStore:
                 case_id,
                 "tool_result_recorded",
                 actor_type="system",
-                actor_id="integration_dispatcher",
+                actor_id="capability_dispatcher",
                 summary=f"Результат инструмента записан со статусом {result['status']}.",
                 correlation=self._correlation_from_tool_result(result),
                 payload={"tool_result": copy.deepcopy(result)},
@@ -498,7 +498,7 @@ class CaseStore:
                 record["case_id"],
                 "tool_result_recorded",
                 actor_type="system",
-                actor_id="integration_dispatcher",
+                actor_id="capability_dispatcher",
                 summary=f"Результат инструмента записан со статусом {tool_result['status']}.",
                 correlation=self._correlation_from_tool_result(tool_result),
                 payload={"tool_result": copy.deepcopy(tool_result)},
@@ -533,43 +533,6 @@ class CaseStore:
         )
         return self.require(record["case_id"])
 
-    def record_integration_callback(
-        self,
-        callback: dict[str, Any],
-        tool_result: dict[str, Any],
-        workflow_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        record = self._case_for_callback(callback)
-        if record is None:
-            raise CaseNotFound(
-                callback.get("case_id")
-                or callback.get("invocation_id")
-                or callback.get("ticket_id")
-                or "integration_callback"
-            )
-
-        now = utc_now()
-        record["current_workflow_state"] = copy.deepcopy(workflow_state)
-        self._upsert_tool_result(record, tool_result)
-        record["updated_at"] = now
-        self._apply_outcome(record, now)
-        self._save(record)
-        self._record_tool_result_correlations(record, tool_result)
-        self.append_event(
-            record["case_id"],
-            "integration_callback_received",
-            actor_type="endpoint",
-            actor_id=callback["endpoint_id"],
-            summary=f"Получен callback интеграции со статусом {callback['status']}.",
-            correlation=self._correlation_from_tool_result(tool_result),
-            payload={
-                "callback": copy.deepcopy(callback),
-                "tool_result": copy.deepcopy(tool_result),
-                "workflow_state": copy.deepcopy(workflow_state),
-            },
-        )
-        return self.require(record["case_id"])
-
     def _case_for_gate(self, gate: dict[str, Any]) -> dict[str, Any] | None:
         case_id = gate.get("extensions", {}).get("case_id")
         if case_id:
@@ -587,20 +550,6 @@ class CaseStore:
         if record:
             return record
         return self.latest_by_ticket(feedback["ticket_id"])
-
-    def _case_for_callback(self, callback: dict[str, Any]) -> dict[str, Any] | None:
-        case_id = callback.get("case_id")
-        if case_id:
-            return self.get(case_id)
-        invocation_id = callback.get("invocation_id")
-        if invocation_id:
-            record = self.by_correlation("invocation_id", invocation_id)
-            if record:
-                return record
-        ticket_id = callback.get("ticket_id")
-        if ticket_id:
-            return self.latest_by_ticket(ticket_id)
-        return None
 
     def _record_analysis_correlations(self, record: dict[str, Any]) -> None:
         self._record_correlation(record["case_id"], record["ticket_id"], "case_id", record["case_id"])

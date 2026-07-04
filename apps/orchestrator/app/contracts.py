@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, SchemaError
+from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
@@ -50,20 +50,11 @@ class ContractRegistry:
         self.workflow_transition_rules = load_json(
             self.contracts_root / "workflow" / "workflow-transition-rules.json"
         )
-        self.tool_catalog = load_json(
-            self.contracts_root / "tools" / "tool-catalog.json"
-        )
-        self.integration_endpoint_catalog = load_json(
-            self.contracts_root / "integrations" / "integration-endpoint-catalog.json"
-        )
         self.knowledge_source_catalog = load_json(
             self.contracts_root / "knowledge" / "knowledge-source-catalog.json"
         )
         self.security_catalog = load_json(
             self.contracts_root / "security" / "security-catalog.json"
-        )
-        self.n8n_workflow_catalog = load_json(
-            self.contracts_root / "config" / "n8n-workflow-catalog.json"
         )
         self._validate_static_contract_data()
 
@@ -71,19 +62,7 @@ class ContractRegistry:
         paths = {
             "ai_decision": self.contracts_root / "decisions" / "ai-decision.schema.json",
             "proposed_action": self.contracts_root / "tools" / "proposed-action.schema.json",
-            "tool_definition": self.contracts_root / "tools" / "tool-definition.schema.json",
-            "tool_catalog": self.contracts_root / "tools" / "tool-catalog.schema.json",
-            "tool_invocation": self.contracts_root / "tools" / "tool-invocation.schema.json",
             "tool_result": self.contracts_root / "tools" / "tool-result.schema.json",
-            "integration_endpoint": self.contracts_root
-            / "integrations"
-            / "integration-endpoint.schema.json",
-            "integration_endpoint_catalog": self.contracts_root
-            / "integrations"
-            / "integration-endpoint-catalog.schema.json",
-            "integration_callback": self.contracts_root
-            / "integrations"
-            / "integration-callback.schema.json",
             "external_event": self.contracts_root
             / "integrations"
             / "external-event.schema.json",
@@ -160,15 +139,21 @@ class ContractRegistry:
             "audit_event": self.contracts_root / "security" / "audit-event.schema.json",
             "prompt_catalog": self.contracts_root / "config" / "prompt-catalog.schema.json",
             "model_routing": self.contracts_root / "config" / "model-routing.schema.json",
-            "n8n_workflow_catalog": self.contracts_root
-            / "config"
-            / "n8n-workflow-catalog.schema.json",
             "interaction_channels": self.contracts_root
             / "config"
             / "interaction-channels.schema.json",
             "attribute_resolution_profiles": self.contracts_root
             / "config"
             / "attribute-resolution-profiles.schema.json",
+            "capability_catalog": self.contracts_root
+            / "config"
+            / "capability-catalog.schema.json",
+            "mcp_environment_catalog": self.contracts_root
+            / "config"
+            / "mcp-environment-catalog.schema.json",
+            "capability_binding_catalog": self.contracts_root
+            / "config"
+            / "capability-binding-catalog.schema.json",
             "service_scenarios": self.contracts_root
             / "config"
             / "service-scenarios.schema.json",
@@ -208,11 +193,8 @@ class ContractRegistry:
     def _validate_static_contract_data(self) -> None:
         self.require_valid("workflow_state_catalog", self.workflow_state_catalog)
         self.require_valid("workflow_transition_rules", self.workflow_transition_rules)
-        self.require_valid("tool_catalog", self.tool_catalog)
-        self.require_valid("integration_endpoint_catalog", self.integration_endpoint_catalog)
         self.require_valid("knowledge_source_catalog", self.knowledge_source_catalog)
         self.require_valid("security_catalog", self.security_catalog)
-        self.require_valid("n8n_workflow_catalog", self.n8n_workflow_catalog)
         state_ids = {
             state["id"]
             for state in self.workflow_state_catalog["states"]
@@ -227,110 +209,8 @@ class ContractRegistry:
                 "workflow_transition_rules",
                 [f"unknown state_id: {state_id}" for state_id in unknown_state_ids],
             )
-        self._validate_tool_catalog_references()
         self._validate_knowledge_source_catalog()
         self._validate_security_catalog()
-        self._validate_n8n_workflow_catalog()
-
-    def _validate_tool_catalog_references(self) -> None:
-        endpoint_by_id = {
-            endpoint["endpoint_id"]: endpoint
-            for endpoint in self.integration_endpoint_catalog["endpoints"]
-        }
-
-        errors = []
-        endpoint_ids = [
-            endpoint["endpoint_id"]
-            for endpoint in self.integration_endpoint_catalog["endpoints"]
-        ]
-        duplicate_endpoint_ids = sorted(
-            endpoint_id
-            for endpoint_id in set(endpoint_ids)
-            if endpoint_ids.count(endpoint_id) > 1
-        )
-        for endpoint_id in duplicate_endpoint_ids:
-            errors.append(f"Дублируется endpoint_id: {endpoint_id}")
-
-        for endpoint in self.integration_endpoint_catalog["endpoints"]:
-            for operation_id, operation in endpoint["operations"].items():
-                try:
-                    Draft202012Validator.check_schema(operation["request_schema"])
-                except SchemaError as error:
-                    errors.append(
-                        f"{endpoint['endpoint_id']}/{operation_id} request_schema невалидна: {error.message}"
-                    )
-                try:
-                    Draft202012Validator.check_schema(operation["response_schema"])
-                except SchemaError as error:
-                    errors.append(
-                        f"{endpoint['endpoint_id']}/{operation_id} response_schema невалидна: {error.message}"
-                    )
-                for event_type, async_contract in (operation.get("async_event_contracts") or {}).items():
-                    for schema_key in ("result_schema", "progress_schema", "error_schema"):
-                        schema = async_contract.get(schema_key)
-                        if not schema:
-                            continue
-                        try:
-                            Draft202012Validator.check_schema(schema)
-                        except SchemaError as error:
-                            errors.append(
-                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} "
-                                f"{schema_key} невалидна: {error.message}"
-                            )
-                if operation.get("mock_output") is not None:
-                    validator = Draft202012Validator(operation["response_schema"])
-                    for error in validator.iter_errors(operation["mock_output"]):
-                        errors.append(
-                            f"{endpoint['endpoint_id']}/{operation_id} mock_output не соответствует response_schema: {error.message}"
-                        )
-
-        seen_tool_names: set[str] = set()
-        for tool in self.tool_catalog["tools"]:
-            tool_name = tool["tool_name"]
-            if tool_name in seen_tool_names:
-                errors.append(f"Дублируется tool_name: {tool_name}")
-            seen_tool_names.add(tool_name)
-
-            try:
-                Draft202012Validator.check_schema(tool["parameters_schema"])
-            except SchemaError as error:
-                errors.append(f"{tool_name} parameters_schema невалидна: {error.message}")
-            try:
-                Draft202012Validator.check_schema(tool["result_schema"])
-            except SchemaError as error:
-                errors.append(f"{tool_name} result_schema невалидна: {error.message}")
-
-            for binding in tool["endpoint_bindings"]:
-                endpoint = endpoint_by_id.get(binding["endpoint_id"])
-                if not endpoint:
-                    errors.append(
-                        f"{tool_name} ссылается на неизвестный endpoint_id: {binding['endpoint_id']}"
-                    )
-                    continue
-                if binding["operation_id"] not in endpoint["operations"]:
-                    errors.append(
-                        f"{tool_name} ссылается на неизвестный operation_id "
-                        f"{binding['operation_id']} для endpoint {binding['endpoint_id']}"
-                    )
-                    continue
-                operation = endpoint["operations"][binding["operation_id"]]
-                mapping = binding.get("parameter_mapping", {})
-                for required_parameter in operation["request_schema"].get("required", []):
-                    if required_parameter not in mapping:
-                        errors.append(
-                            f"{tool_name} не заполняет обязательный параметр операции "
-                            f"{binding['endpoint_id']}/{binding['operation_id']}: {required_parameter}"
-                        )
-                result_mapping = binding.get("result_mapping", {})
-                for required_field in tool["result_schema"].get("required", []):
-                    if required_field not in result_mapping:
-                        errors.append(
-                            f"{tool_name} не маппит обязательное поле результата "
-                            f"{binding['endpoint_id']}/{binding['operation_id']}: {required_field}"
-                        )
-
-        if errors:
-            raise ContractValidationError("tool_catalog", errors)
 
     def _validate_knowledge_source_catalog(self) -> None:
         errors = []
@@ -401,43 +281,6 @@ class ContractRegistry:
 
         if errors:
             raise ContractValidationError("security_catalog", errors)
-
-    def _validate_n8n_workflow_catalog(self) -> None:
-        errors = []
-        workflow_ids = [
-            workflow["workflow_id"]
-            for workflow in self.n8n_workflow_catalog["workflows"]
-        ]
-        for workflow_id in self._duplicates(workflow_ids):
-            errors.append(f"Дублируется workflow_id: {workflow_id}")
-
-        endpoint_by_id = {
-            endpoint["endpoint_id"]: endpoint
-            for endpoint in self.integration_endpoint_catalog["endpoints"]
-        }
-        for workflow in self.n8n_workflow_catalog["workflows"]:
-            endpoint = endpoint_by_id.get(workflow["endpoint_id"])
-            if not endpoint:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный endpoint_id: "
-                    f"{workflow['endpoint_id']}"
-                )
-            else:
-                for operation_id in workflow.get("operations", []):
-                    if operation_id not in endpoint["operations"]:
-                        errors.append(
-                            f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестную operation "
-                            f"{operation_id} для endpoint {workflow['endpoint_id']}"
-                        )
-            callback_endpoint_id = workflow.get("callback_endpoint_id")
-            if callback_endpoint_id and callback_endpoint_id not in endpoint_by_id:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный "
-                    f"callback_endpoint_id: {callback_endpoint_id}"
-                )
-
-        if errors:
-            raise ContractValidationError("n8n_workflow_catalog", errors)
 
     def validate(self, contract_name: str, payload: Any) -> list[str]:
         validator = self.validators[contract_name]

@@ -46,6 +46,7 @@
       "enum": [
         "mock",
         "n8n_webhook",
+        "mcp_tool",
         "direct_http",
         "queue"
       ]

@@ -6,7 +6,7 @@ HOST="${ORCHESTRATOR_HOST:-127.0.0.1}"
 PORT="${ORCHESTRATOR_PORT:-18088}"
 BASE_URL="http://${HOST}:${PORT}"
 
-${COMPOSE_BIN} ps postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+${COMPOSE_BIN} ps postgres redis redpanda litellm orchestrator async-outbox-publisher async-mcp-worker async-external-event-worker async-agent-task-worker
 
 python3 - <<'PY'
 import os
@@ -45,122 +45,6 @@ if not 200 <= status < 300:
     raise SystemExit(f"LiteLLM public gateway вернул HTTP {status}: {url}")
 print(f"LiteLLM public gateway OK: {url}")
 PY
-
-${COMPOSE_BIN} exec -T n8n node - <<'JS'
-const requiredRaw = String(process.env.ZABBIX_RUNBOOK_REQUIRED_ORIGINS || '').trim();
-const registryRaw = String(process.env.ZABBIX_API_TOKENS_BY_ORIGIN || '').trim();
-const apiRegistryRaw = String(process.env.ZABBIX_API_URLS_BY_ORIGIN || '').trim();
-
-if (!requiredRaw && !registryRaw && !apiRegistryRaw) {
-  console.log('Zabbix runbook registry check skipped: ZABBIX_RUNBOOK_REQUIRED_ORIGINS is not set.');
-  process.exit(0);
-}
-
-function parseJsonObject(name, raw) {
-  if (!raw) return {};
-  try {
-    const value = JSON.parse(raw);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('not_object');
-    }
-    return value;
-  } catch (error) {
-    throw new Error(`${name} must be a JSON object.`);
-  }
-}
-
-const tokenRegistry = parseJsonObject('ZABBIX_API_TOKENS_BY_ORIGIN', registryRaw);
-const apiUrlRegistry = parseJsonObject('ZABBIX_API_URLS_BY_ORIGIN', apiRegistryRaw);
-const requiredOrigins = (requiredRaw
-  ? requiredRaw.split(/[,\s]+/).filter(Boolean)
-  : Object.keys(tokenRegistry)
-);
-
-if (!requiredOrigins.length) {
-  throw new Error('ZABBIX_RUNBOOK_REQUIRED_ORIGINS is empty and token registry has no origins.');
-}
-
-for (const origin of requiredOrigins) {
-  const token = String(tokenRegistry[origin] || '').trim();
-  if (!token) {
-    throw new Error(`Missing Zabbix API token mapping for origin ${origin}.`);
-  }
-  const apiUrl = String(apiUrlRegistry[origin] || `${origin.replace(/\/+$/, '')}/api_jsonrpc.php`).trim();
-  if (!/^https?:\/\/[^?#]+$/i.test(apiUrl)) {
-    throw new Error(`Invalid Zabbix API URL for origin ${origin}: ${apiUrl}`);
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json-rpc',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'apiinfo.version',
-        params: {},
-        id: 1,
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    let payload;
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      throw new Error('non_json_response');
-    }
-    if (payload.error) {
-      throw new Error(`JSON-RPC error ${payload.error.code || 'unknown'}`);
-    }
-    if (!payload.result) {
-      throw new Error('missing apiinfo.version result');
-    }
-    const authResponse = await fetch(apiUrl, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json-rpc',
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'event.get',
-        params: {
-          output: ['eventid'],
-          limit: 1,
-          sortfield: 'eventid',
-          sortorder: 'DESC',
-        },
-        id: 2,
-      }),
-    });
-    const authText = await authResponse.text();
-    if (!authResponse.ok) {
-      throw new Error(`authenticated event.get HTTP ${authResponse.status}`);
-    }
-    let authPayload;
-    try {
-      authPayload = JSON.parse(authText);
-    } catch {
-      throw new Error('authenticated event.get returned non JSON response');
-    }
-    if (authPayload.error) {
-      throw new Error(`authenticated event.get failed with JSON-RPC error ${authPayload.error.code || 'unknown'}`);
-    }
-    console.log(`Zabbix API registry OK: ${origin} -> ${apiUrl}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-JS
 
 python3 - "${BASE_URL}/readyz" <<'PY'
 import json

@@ -154,7 +154,7 @@ PYTHON=.venv/bin/python make stage10-check
 - `POST /cases`
 - `GET /cases/{case_id}`
 - `GET /cases/{case_id}/timeline`
-- `POST /integrations/callbacks/{endpoint_id}`
+- `POST /external-events/{source}`
 
 `POST /tickets/analyze` остается совместимым и создает запись кейса внутри.
 
@@ -209,7 +209,7 @@ PYTHON=.venv/bin/python make stage11-check
 
 Dev auth использует `X-ServiceDesk-Actor`. Если header не задан, применяется `SECURITY_DEV_ACTOR`, по умолчанию `admin-1`.
 
-Integration callback endpoint `POST /integrations/callbacks/{endpoint_id}` теперь требует `X-ServiceDesk-Callback-Token`, значение берется из `INTEGRATION_CALLBACK_TOKEN`.
+External event endpoint `POST /external-events/{source}` требует callback-auth: в local/dev это `X-ServiceDesk-Callback-Token`, в shared/staging/production - OIDC/JWKS или trusted proxy JWT.
 
 ## Локальные команды этапа 12
 
@@ -283,7 +283,7 @@ PYTHON=.venv/bin/python make stage12_7-check
 
 Этап 13.8 заменяет технические поля `l2_conditions` и `escalation_package` на `handoff_conditions` и `handoff_package`. Консоль администратора редактирует их чекбоксами, а backend не поддерживает старые поля.
 
-Этап 13.9 заменяет техническое поле `allowed_tool_classes` на `allowed_react_action_groups`. Группы действий и стоп-условия остаются backend policy, а обычный редактор сценария показывает только лимит ReAct-итераций и порог ошибок ReAct-вызовов подряд до эскалации.
+Этап 13.9 заменяет техническое поле `allowed_tool_classes` на `allowed_orchestration_action_groups`. Группы действий и стоп-условия остаются backend policy, а обычный редактор сценария показывает только лимит итераций оркестрации и порог ошибок capability подряд до эскалации.
 
 ## Локальные команды этапа 13
 
@@ -309,21 +309,23 @@ PYTHON=.venv/bin/python make stage13-check
 - `POST /admin/config/drafts/{draft_id}/activate`
 - `GET /admin/config/versions`
 - `POST /admin/config/versions/{version_id}/rollback`
-- `GET /admin/n8n/workflows`
+- `GET /admin/config/active/mcp_environments`
+- `GET /admin/config/active/capabilities`
+- `GET /admin/config/active/capability_bindings`
 
 В интерфейсе администратора используйте раздел `Изменения конфигурации`.
 
-## Async n8n через Kafka
+## Async Capability/MCP через Kafka
 
-Долгие n8n runbook workflow запускаются без удержания HTTP request в orchestrator:
+Долгие внешние операции запускаются через capability binding без удержания HTTP request в orchestrator:
 
 ```text
-ProcessingStore wait_state -> processing_outbox -> Kafka tool.commands -> async worker -> n8n webhook -> ExternalEvent
+ProcessingStore wait_state -> processing_outbox -> Kafka mcp.commands -> async-mcp-worker -> external MCP environment -> ExternalEvent
 ```
 
-Default topic исходящих команд: `tool.commands`. Локальный Kafka/Redpanda endpoint с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
+Default topic исходящих capability-команд: `mcp.commands`. Локальный Kafka/Redpanda endpoint с host: `127.0.0.1:19092`; внутри docker network: `redpanda:9092`.
 
-Worker передает n8n полный callback package в `body.invocation.extensions.async_callback`: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source`, `idempotency_key_base`, `result_transport` и `result_topic`.
+Worker передает внешнему MCP окружению полный async context: `case_id`, `ticket_id`, `run_id`, `wait_id`, `correlation_id`, `event_type`, `callback_url`, `source`, `idempotency_key_base`, `result_transport` и `result_topic`. Внутренняя реализация MCP окружения, включая n8n, не хранится в ServiceDeskAgents.
 
 Бизнес-контракт результата один: `contracts/integrations/external-event.schema.json`. HTTP callback `POST /external-events/{source}` и Kafka topic `external.events` являются транспортами доставки одного и того же `ExternalEvent`.
 
@@ -333,17 +335,15 @@ Default topic входящих внешних результатов: `external.
 PYTHON=.venv/bin/python make async-external-event-worker
 ```
 
-Kafka consumer workers (`async-tool-worker` и `async-external-event-worker`) работают как long-running процессы. Для ручной диагностики можно добавить `--limit N` к прямому module-запуску.
+Kafka consumer workers (`async-mcp-worker`, `async-external-event-worker` и `async-agent-task-worker`) работают как long-running процессы. Для ручной диагностики можно добавить `--limit N` к прямому module-запуску.
 
 `completion_policy.result_transport` задает ожидаемый транспорт результата:
 
-- `http_callback` - n8n вызывает `callback_url`;
-- `kafka_event` - n8n публикует `ExternalEvent` в `result_topic`;
-- `both` - n8n может использовать оба транспорта, повторная доставка обрабатывается по per-event `idempotency_key`.
+- `http_callback` - внешнее MCP окружение вызывает `callback_url`;
+- `kafka_event` - внешнее MCP окружение публикует `ExternalEvent` в `result_topic`;
+- `both` - внешнее MCP окружение может использовать оба транспорта, повторная доставка обрабатывается по per-event `idempotency_key`.
 
-`result_transport` не является настройкой безопасности. Защита доступных транспортов описывается отдельно в `transport_security` endpoint/OpenAPI/workflow metadata: HTTP callback в production должен идти через administrator-selected HTTPS URL и token auth, Kafka защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем. `transport_security.policy` допускает `admin_configured` и `credential_configured`; оба значения описывают настройку credentials, а не выбор транспорта результата.
-
-Язык OpenAPI-контракта n8n выбирается при загрузке контракта через `contract_source.lang` и query-параметр `lang=ru|en`. Текущий admin UI использует `ru`; runtime invocation и callback package этот параметр не получают.
+`result_transport` не является настройкой безопасности. Защита доступных транспортов описывается отдельно в конфигурации внешнего MCP окружения: HTTP callback в production должен идти через administrator-selected HTTPS URL и token/OIDC auth, Kafka защищается broker ACL с `SASL_SSL`, `SSL`/mTLS, signed envelope или равноценным инфраструктурным контролем.
 
 `idempotency_key_base` является ключом команды. Каждый `progress`, `success`, `error`, `timeout` или `cancelled` результат должен отправляться как отдельный `ExternalEvent` со стабильным `idempotency_key`, например `<idempotency_key_base>:<event_id>`. Kafka-доставка принимается только для ожиданий с `result_transport=kafka_event|both` и только из ожидаемого `result_topic`.
 
@@ -356,5 +356,5 @@ PYTHON=.venv/bin/python make async-outbox-publish-once
 Запустить worker команд:
 
 ```bash
-PYTHON=.venv/bin/python make async-tool-worker
+PYTHON=.venv/bin/python make async-mcp-worker
 ```

@@ -71,6 +71,8 @@ SLOT_METHOD_ALLOWED_FIELDS = {
     "operator_manual": {"operator_hint"},
 }
 
+EXTERNAL_EVENT_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
+
 SLOT_METHOD_REQUIRED_FIELD = {
     "user_question": "user_question",
     "case": "case_source_ref",
@@ -89,105 +91,105 @@ DEFAULT_CONFIDENCE_THRESHOLDS = {
 DEFAULT_EDITOR_REFERENCE_HIDDEN_FIELDS = [
     {
         "field": "accepted_at",
-        "contexts": ["react_output", "step_output", "wait"],
+        "contexts": ["capability_output", "step_output", "wait"],
         "display_name": "Accepted at",
         "description": "Техническое время принятия async-команды или ожидания.",
         "show_in_hints": False,
     },
     {
         "field": "action_id",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Action ID",
         "description": "Технический идентификатор команды исполнения.",
         "show_in_hints": False,
     },
     {
         "field": "async_delivery",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Async delivery",
         "description": "Служебная metadata доставки async-результата.",
         "show_in_hints": False,
     },
     {
         "field": "correlation_id",
-        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "contexts": ["capability_output", "step_output", "wait", "channel"],
         "display_name": "Correlation ID",
         "description": "Технический идентификатор корреляции сообщений и callback.",
         "show_in_hints": False,
     },
     {
         "field": "has_callback_url",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Has callback URL",
         "description": "Служебный признак наличия callback URL.",
         "show_in_hints": False,
     },
     {
         "field": "invocation_id",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Invocation ID",
         "description": "Технический идентификатор вызова endpoint.",
         "show_in_hints": False,
     },
     {
         "field": "message",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Message",
         "description": "Служебное сообщение транспорта; бизнес-текст лучше брать из явных полей контракта.",
         "show_in_hints": False,
     },
     {
         "field": "result_topic",
-        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "contexts": ["capability_output", "step_output", "wait", "channel"],
         "display_name": "Result topic",
         "description": "Технический Kafka topic доставки результата.",
         "show_in_hints": False,
     },
     {
         "field": "result_transport",
-        "contexts": ["react_output", "step_output", "wait"],
+        "contexts": ["capability_output", "step_output", "wait"],
         "display_name": "Result transport",
         "description": "Технический способ доставки результата async-вызова.",
         "show_in_hints": False,
     },
     {
         "field": "runbook_status",
-        "contexts": ["react_output", "step_output"],
+        "contexts": ["capability_output", "step_output"],
         "display_name": "Runbook status",
         "description": "Транспортный статус запуска runbook, не итоговое бизнес-решение сценария.",
         "show_in_hints": False,
     },
     {
         "field": "wait_id",
-        "contexts": ["react_output", "step_output", "wait"],
+        "contexts": ["capability_output", "step_output", "wait"],
         "display_name": "Wait ID",
         "description": "Технический идентификатор состояния ожидания.",
         "show_in_hints": False,
     },
     {
         "field": "idempotency_key",
-        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "contexts": ["capability_output", "step_output", "wait", "channel"],
         "display_name": "Idempotency key",
         "description": "Технический ключ идемпотентности доставки команды.",
         "show_in_hints": False,
     },
     {
         "field": "callback_url",
-        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "contexts": ["capability_output", "step_output", "wait", "channel"],
         "display_name": "Callback URL",
         "description": "Технический URL callback для async-результата.",
         "show_in_hints": False,
     },
     {
         "field": "event_type",
-        "contexts": ["react_output", "step_output", "wait"],
+        "contexts": ["capability_output", "step_output", "wait"],
         "display_name": "Event type",
         "description": "Технический тип события во внешнем callback.",
         "show_in_hints": False,
     },
     {
         "field": "source",
-        "contexts": ["react_output", "step_output", "wait", "channel"],
+        "contexts": ["capability_output", "step_output", "wait", "channel"],
         "display_name": "Source",
         "description": "Служебный источник события или параметра.",
         "show_in_hints": False,
@@ -195,15 +197,15 @@ DEFAULT_EDITOR_REFERENCE_HIDDEN_FIELDS = [
 ]
 
 STEP_SOURCE_REF_RE = re.compile(
-    r"^(step[1-9][0-9]*)\.react\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$"
+    r"^(step[1-9][0-9]*)\.capability\.([a-z][a-z0-9_.-]*)\.(input|output)\.([A-Za-z0-9_][A-Za-z0-9_.-]*)$"
 )
-PARAM_REACT_OUTPUT_REF_RE = re.compile(
-    r"^\$\{paramReAct\.(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+PARAM_CAPABILITY_OUTPUT_REF_RE = re.compile(
+    r"^\$\{paramCapability\.(?P<capability_id>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
     r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}$"
 )
-STEP_OUTPUT_REF_RE = re.compile(
-    r"^\$\{step\.(?P<step_id>step[1-9][0-9]*)\.react\."
-    r"(?P<react_call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+STEP_CAPABILITY_OUTPUT_REF_RE = re.compile(
+    r"^\$\{step\.(?P<step_id>step[1-9][0-9]*)\.capability\."
+    r"(?P<capability_id>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
     r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}$"
 )
 
@@ -247,7 +249,7 @@ AGENT_OUTCOME_LABELS = {
     "success": "Завершено автоматически",
     "needs_review": "Требуется эскалация",
     "waiting": "Вопрос клиенту",
-    "waiting_external_event": "Ожидает n8n",
+    "waiting_external_event": "Ожидает внешний результат",
     "escalated": "Требуется эскалация",
     "error": "Ошибка",
 }
@@ -256,7 +258,7 @@ AGENT_OUTCOME_NEXT_STEPS = {
     "success": "Автообработка завершена; проверьте трассу и итоговые данные при необходимости.",
     "needs_review": "Передайте обращение оператору вместе с контекстом и трассой обработки.",
     "waiting": "Передайте клиенту уточняющий вопрос и продолжите обработку после ответа.",
-    "waiting_external_event": "Дождитесь terminal ExternalEvent от n8n; после callback сценарий продолжит обработку.",
+    "waiting_external_event": "Дождитесь terminal ExternalEvent от внешнего исполнителя; после callback сценарий продолжит обработку.",
     "escalated": "Проверьте пакет передачи и передайте обращение в настроенный канал эскалации.",
     "error": "Исправьте конфигурацию, mock или контракт и повторите тестовый прогон.",
 }
@@ -323,14 +325,10 @@ LEGACY_ENDPOINT_ID_MAP = {
     "mock.ownership": "mock",
     "mock.known_incidents": "mock",
     "mock.runbooks": "mock",
-    "n8n.diagnostics": "n8n",
-    "n8n.identity": "n8n",
-    "n8n.systemcenter.runbooks": "n8n",
 }
 
 ENDPOINT_DISPLAY_NAME_OVERRIDES = {
     "mock": "Тестовое подключение интеграций",
-    "n8n": "n8n webhook AI ServiceDesk",
 }
 
 
@@ -488,6 +486,18 @@ def schema_declares_path(
     return True
 
 
+def schema_allows_mapping_path(schema: dict[str, Any] | None, path: str | None) -> bool:
+    if schema_declares_path(schema, path, allow_nested_additional=True):
+        return True
+    if not isinstance(schema, dict) or not path:
+        return False
+    first_part = str(path).replace("[]", "").split(".", 1)[0]
+    if not first_part:
+        return False
+    additional = schema.get("additionalProperties")
+    return additional is True or isinstance(additional, dict)
+
+
 def schemas_are_type_compatible(source_schema: dict[str, Any] | None, target_schema: dict[str, Any] | None) -> bool:
     source_type = schema_type(source_schema)
     target_type = schema_type(target_schema)
@@ -546,84 +556,6 @@ def infer_object_schema_from_sample(value: dict[str, Any] | None) -> dict[str, A
     }
 
 
-def default_parameter_mapping(
-    tool: dict[str, Any],
-    operation: dict[str, Any] | None = None,
-) -> dict[str, str]:
-    operation_schema = operation.get("request_schema") if operation else None
-    operation_names = list(dict.fromkeys([
-        *schema_required(operation_schema),
-        *schema_properties(operation_schema).keys(),
-    ]))
-    tool_schema = tool.get("parameters_schema", {})
-    tool_names = set(schema_required(tool_schema))
-    tool_names.update(schema_properties(tool_schema))
-    if not operation_names:
-        operation_names = list(dict.fromkeys([
-            *schema_required(tool_schema),
-            *schema_properties(tool_schema).keys(),
-        ]))
-    result = {}
-    operation_name_set = set(operation_names)
-    operation_properties = schema_properties(operation_schema)
-    for name in operation_names:
-        if (
-            name in SYSTEM_OPERATION_PARAMETERS
-            or is_endpoint_parameter_alias(name, operation_name_set, operation_properties.get(name))
-        ):
-            continue
-        if name in tool_names:
-            result[name] = f"react:{name}"
-        elif name == "login" and "user_login" in tool_names:
-            result[name] = "react:user_login"
-    return result
-
-
-def normalize_parameter_mapping(
-    mapping: dict[str, Any],
-    tool_schema: dict[str, Any] | None,
-    operation_schema: dict[str, Any] | None,
-) -> dict[str, str]:
-    if not isinstance(mapping, dict):
-        return {}
-    tool_names = set(schema_required(tool_schema))
-    tool_names.update(schema_properties(tool_schema))
-    operation_names = set(schema_required(operation_schema))
-    operation_properties = schema_properties(operation_schema)
-    operation_names.update(operation_properties)
-    result = {}
-    for target_parameter, source_ref in mapping.items():
-        target = str(target_parameter or "")
-        source, separator, source_value = str(source_ref).partition(":")
-        if (
-            target in SYSTEM_OPERATION_PARAMETERS
-            or is_endpoint_parameter_alias(target, operation_names, operation_properties.get(target))
-        ):
-            continue
-        if source == "react" and source_value not in tool_names:
-            continue
-        if separator == ":" and source in {"react", "constant", "secret"} and source_value:
-            result[target] = str(source_ref)
-    return result
-
-
-def default_result_mapping(
-    tool: dict[str, Any],
-    operation: dict[str, Any] | None = None,
-) -> dict[str, str]:
-    tool_schema = tool.get("result_schema", {})
-    response_schema = operation_terminal_result_schema(operation) if operation else None
-    response_properties = schema_properties(response_schema)
-    result = {}
-    for name in dict.fromkeys([
-        *schema_required(tool_schema),
-        *schema_properties(tool_schema).keys(),
-    ]):
-        if name in response_properties:
-            result[name] = name
-    return result
-
-
 def compact_agent_dict(value: dict[str, Any]) -> dict[str, Any]:
     return {
         key: item
@@ -670,7 +602,7 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
         item
         for item in simulation.get("attribute_resolution") or []
         if item.get("status") == "pending_live_execution"
-        or item.get("decision") == "execute_react_call"
+        or item.get("decision") == "execute_capability"
     ]
     missing_slot_set = set(missing_slots)
     configuration_blocks = []
@@ -694,7 +626,7 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
         summary = operator_escalation.get("reason") or "Агент завершил автообработку и подготовил передачу оператору."
     elif pending_live_resolution:
         status = "waiting_external_event"
-        summary = "Агент ожидает внешний результат ReAct-вызова или n8n workflow."
+        summary = "Агент ожидает внешний результат capability."
     elif simulation.get("awaiting_client_response") or simulation.get("next_question"):
         status = "waiting"
         summary = "Агенту не хватает данных: сформирован вопрос клиенту."
@@ -722,24 +654,26 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
         "missing_slots": missing_slots,
         "low_confidence_slots": low_confidence_slots,
         "ambiguous_resolution_count": len(ambiguous_resolution),
-        "ready_react_calls": [
+        "ready_capabilities": [
             compact_agent_dict(
                 {
-                    "react_call": item.get("tool_name"),
-                    "endpoint_id": item.get("endpoint_id"),
-                    "operation_id": item.get("operation_id"),
+                    "capability_id": item.get("capability_id"),
+                    "mcp_environment_id": item.get("mcp_environment_id"),
+                    "mcp_tool_name": item.get("mcp_tool_name"),
+                    "execution_mode": item.get("execution_mode"),
                     "status": item.get("status", "ready"),
                     "parameters": item.get("parameters"),
                 }
             )
             for item in ready_calls
+            if item.get("capability_id")
         ],
-        "blocked_react_calls": [
+        "blocked_capabilities": [
             compact_agent_dict(
                 {
-                    "react_call": item.get("tool_name"),
-                    "endpoint_id": item.get("endpoint_id"),
-                    "operation_id": item.get("operation_id"),
+                    "capability_id": item.get("capability_id"),
+                    "mcp_environment_id": item.get("mcp_environment_id"),
+                    "mcp_tool_name": item.get("mcp_tool_name"),
                     "block_reasons": item.get("block_reasons"),
                     "missing_slots": item.get("missing_slots"),
                     "missing_parameter_slots": item.get("missing_parameter_slots"),
@@ -747,6 +681,7 @@ def build_agent_outcome_from_simulation(simulation: dict[str, Any]) -> dict[str,
                 }
             )
             for item in blocked_calls
+            if item.get("capability_id")
         ],
         "error_count": len(error_events),
         "final_decision": final_decision,
@@ -936,7 +871,7 @@ def is_endpoint_parameter_alias(
     return canonical_name != value and canonical_name in names
 
 
-def react_visible_parameter_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+def visible_endpoint_parameter_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return default_request_schema()
     normalized = copy.deepcopy(schema)
@@ -976,12 +911,12 @@ def react_visible_parameter_schema(schema: dict[str, Any] | None) -> dict[str, A
     return normalized
 
 
-CANONICAL_REACT_PARAMETER_SCHEMAS = {
+CANONICAL_CAPABILITY_PARAMETER_SCHEMAS = {
     "check_zabbix_status": object_schema(["target_ref"], {"target_ref": string_property()}),
     "query_cmdb_object": object_schema(["object_ref"], {"object_ref": string_property()}),
     "get_service_owner": object_schema(["target_ref"], {"target_ref": string_property()}),
     "search_known_incidents": object_schema(["query"], {"query": string_property()}),
-    "n8n_wait_for_email_by_ticket": object_schema(
+    "wait_for_email_by_ticket": object_schema(
         ["ticket_number", "poll_interval_minutes", "timeout_minutes"],
         {
             "ticket_number": string_property("Номер заявки"),
@@ -1132,7 +1067,7 @@ def normalize_tool_launch_parameter_bindings(launch: dict[str, Any]) -> None:
             or "context:object_ref"
         }
 
-    canonical_schema = canonical_react_parameter_schema(tool_name)
+    canonical_schema = canonical_capability_parameter_schema(tool_name)
     if canonical_schema:
         allowed_parameters = set(schema_required(canonical_schema))
         allowed_parameters.update(schema_properties(canonical_schema))
@@ -1262,39 +1197,6 @@ def default_async_completion_policy_for_operation(
     return launch["completion_policy"]
 
 
-def normalize_enrichment_step_launch(enrichment_step: dict[str, Any]) -> None:
-    legacy_launch = enrichment_step.pop("launch", None)
-    if isinstance(legacy_launch, dict):
-        enrichment_step.setdefault("endpoint_id", legacy_launch.get("endpoint_id"))
-        enrichment_step.setdefault("operation_id", legacy_launch.get("operation_id"))
-        enrichment_step.setdefault("completion_policy", legacy_launch.get("completion_policy"))
-
-    has_launch_fields = any(
-        enrichment_step.get(field) not in (None, "", {}, [])
-        for field in ("endpoint_id", "operation_id", "completion_policy")
-    )
-    if not has_launch_fields:
-        for field in ("endpoint_id", "operation_id", "completion_policy"):
-            if enrichment_step.get(field) in (None, "", {}, []):
-                enrichment_step.pop(field, None)
-        return
-    launch = {
-        "tool_name": enrichment_step.get("react_call"),
-        "endpoint_id": enrichment_step.get("endpoint_id"),
-        "operation_id": enrichment_step.get("operation_id"),
-        "completion_policy": enrichment_step.get("completion_policy") or {},
-    }
-    normalize_tool_launch_completion_policy(launch)
-    if launch.get("endpoint_id"):
-        enrichment_step["endpoint_id"] = launch["endpoint_id"]
-    if launch.get("operation_id"):
-        enrichment_step["operation_id"] = launch["operation_id"]
-    enrichment_step["completion_policy"] = launch["completion_policy"]
-    for field in ("endpoint_id", "operation_id"):
-        if enrichment_step.get(field) in (None, "", {}, []):
-            enrichment_step.pop(field, None)
-
-
 def select_tool_binding(
     tool: dict[str, Any] | None,
     *,
@@ -1347,8 +1249,8 @@ def endpoint_has_transport_security(endpoint: dict[str, Any] | None, transport: 
     return isinstance(section, dict) and bool(section)
 
 
-def canonical_react_parameter_schema(tool_name: str | None) -> dict[str, Any] | None:
-    schema = CANONICAL_REACT_PARAMETER_SCHEMAS.get(str(tool_name or ""))
+def canonical_capability_parameter_schema(tool_name: str | None) -> dict[str, Any] | None:
+    schema = CANONICAL_CAPABILITY_PARAMETER_SCHEMAS.get(str(tool_name or ""))
     return copy.deepcopy(schema) if schema else None
 
 
@@ -2068,9 +1970,9 @@ def resolved_dry_run_parameters(
         elif source == "step":
             match = STEP_SOURCE_REF_RE.match(source_value)
             if match:
-                step_id, react_call, kind, field_path = match.groups()
+                step_id, capability_id, kind, field_path = match.groups()
                 step_record = step_results.get(step_id)
-                if step_record and step_record.get("react_call") != react_call:
+                if step_record and step_record.get("capability_id") != capability_id:
                     step_record = None
                 if step_record and kind == "input":
                     value = step_record.get("parameters", {}).get(field_path)
@@ -2516,14 +2418,14 @@ def normalize_resolution_decision_policy(policy: dict[str, Any] | None) -> dict[
 
 def step_source_ref(step: dict[str, Any], field_path: str, *, kind: str = "output") -> str:
     step_id = step.get("step_id") or "step1"
-    react_call = step.get("react_call") or "react_call"
-    return f"step:{step_id}.react.{react_call}.{kind}.{field_path}"
+    capability_id = step.get("capability_id") or "capability_id"
+    return f"step:{step_id}.capability.{capability_id}.{kind}.{field_path}"
 
 
 def step_template_ref(step: dict[str, Any], field_path: str, *, kind: str = "output") -> str:
     step_id = step.get("step_id") or "step1"
-    react_call = step.get("react_call") or "react_call"
-    return f"${{step.{step_id}.react.{react_call}.{kind}.{field_path}}}"
+    capability_id = step.get("capability_id") or "capability_id"
+    return f"${{step.{step_id}.capability.{capability_id}.{kind}.{field_path}}}"
 
 
 def migrate_entity_source_ref(source_ref: Any, entity_step_by_name: dict[str, dict[str, Any]]) -> Any:
@@ -2602,119 +2504,32 @@ def migrate_entity_template_refs(text: str | None, entity_step_by_name: dict[str
 
 def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(profile)
-    result["status"] = "active"
+    result["status"] = result.get("status") or "active"
     result["use_llm_after_steps"] = bool(result.get("use_llm_after_steps", True))
-    result.pop("allowed_scenarios", None)
-    output_slots = [slot_id for slot_id in result.get("output_slots", []) if slot_id]
-    target_slot_id = result.get("target_slot_id") or (output_slots[0] if output_slots else None)
-
-    legacy_steps = result.pop("steps", [])
-    result.pop("resolution_mode", None)
-    result.pop("attempt_scope", None)
-    result.pop("ambiguity_policy", None)
-    result.pop("operator_handoff_package", None)
-    legacy_candidate_mapping = result.pop("candidate_mapping", None)
-    result.pop("input_slots", None)
-
-    if "resolver_operation" not in result:
-        tool_step = next((step for step in legacy_steps if step.get("type") == "tool_call"), None)
-        history_step = next((step for step in legacy_steps if step.get("type") == "ticket_history_search"), None)
-        candidate_source = result.get("candidate_source")
-        if candidate_source:
-            normalize_endpoint_reference(candidate_source)
-            resolver_operation = {
-                "source_type": candidate_source.get("source_type", "disabled"),
-                "tool_name": candidate_source.get("tool_name"),
-                "endpoint_id": candidate_source.get("endpoint_id"),
-                "operation_id": candidate_source.get("operation_id"),
-                "parameter_mapping": slot_parameter_mapping_from_legacy(
-                    candidate_source.get("parameter_mapping", {}),
-                    result.get("input_attributes", []),
-                ),
-            }
-            if candidate_source.get("history_filter"):
-                resolver_operation["history_filter"] = candidate_source["history_filter"]
-        elif tool_step:
-            resolver_operation = {
-                "source_type": "react_call",
-                "tool_name": tool_step.get("tool_name"),
-                "endpoint_id": normalize_endpoint_id(tool_step.get("endpoint_id")),
-                "operation_id": tool_step.get("operation_id"),
-                "parameter_mapping": slot_parameter_mapping_from_legacy(
-                    tool_step.get("parameter_bindings", {}),
-                    result.get("input_attributes", []),
-                ),
-            }
-        elif history_step:
-            resolver_operation = {
-                "source_type": "ticket_history",
-                "history_filter": history_step.get("history_filter", {}),
-                "parameter_mapping": {},
-            }
-        else:
-            resolver_operation = {
-                "source_type": "disabled",
-                "parameter_mapping": {},
-            }
-        resolver_operation["parameter_mapping"] = resolver_operation.get("parameter_mapping", {})
-        result["resolver_operation"] = compact_config_dict(resolver_operation, keep_empty={"parameter_mapping"})
-
-    result_policy = result.get("result_policy") or result_policy_from_candidate_mapping(
-        legacy_candidate_mapping,
-        result.get("resolver_operation", {}).get("tool_name"),
-        target_slot_id,
-    )
-    if "operation_result_entity" not in result:
-        result["operation_result_entity"] = operation_result_entity_from_policy(
-            result.get("resolver_operation", {}),
-            result_policy,
-        )
-    if "enrichment_steps" not in result:
-        result["enrichment_steps"] = enrichment_steps_from_legacy(
-            result.get("resolver_operation", {}),
-            result.get("operation_result_entity", {}),
-        )
-    entity_step_by_name: dict[str, dict[str, Any]] = {}
     normalized_enrichment_steps = []
     for index, enrichment_step in enumerate(result.get("enrichment_steps", []), start=1):
         enrichment_step = copy.deepcopy(enrichment_step)
+        legacy_parameter_mapping = enrichment_step.pop("parameter_mapping", None)
+        for legacy_key in ("react_call", "endpoint_id", "operation_id", "result_fields"):
+            enrichment_step.pop(legacy_key, None)
+        if "input_mapping" not in enrichment_step and isinstance(legacy_parameter_mapping, dict):
+            migrated_input_mapping = {
+                parameter: source_ref
+                for parameter, source_ref in legacy_parameter_mapping.items()
+                if re.match(r"^(slot|output|step|case|constant|secret):.+$", str(source_ref or ""))
+            }
+            if migrated_input_mapping:
+                enrichment_step["input_mapping"] = migrated_input_mapping
         step_id = str(enrichment_step.get("step_id") or "")
         if not re.match(r"^step[1-9][0-9]*$", step_id):
             enrichment_step["step_id"] = f"step{index}"
-        legacy_entity_name = enrichment_step.pop("result_entity_name", None)
-        enrichment_step.pop("result_entity_description", None)
-        enrichment_step.pop("result_fields", None)
-        enrichment_step["parameter_mapping"] = migrate_entity_parameter_mapping(
-            enrichment_step.get("parameter_mapping", {}),
-            entity_step_by_name,
-        )
-        if enrichment_step.get("configuration_instruction"):
-            enrichment_step["configuration_instruction"] = migrate_entity_template_refs(
-                enrichment_step.get("configuration_instruction"),
-                entity_step_by_name,
-            )
-        normalize_enrichment_step_launch(enrichment_step)
         normalized_enrichment_steps.append(enrichment_step)
-        if legacy_entity_name and enrichment_step.get("react_call"):
-            entity_step_by_name[str(legacy_entity_name)] = {
-                "step_id": enrichment_step["step_id"],
-                "react_call": enrichment_step["react_call"],
-            }
     result["enrichment_steps"] = normalized_enrichment_steps
-    if "output_slots_order" not in result:
-        result["output_slots_order"] = output_slots_order_from_policy(
-            target_slot_id,
-            output_slots,
-            result_policy,
-        )
     last_step = normalized_enrichment_steps[-1] if normalized_enrichment_steps else None
     if last_step:
         output_hint_by_slot = {
             hint["target"]: hint["field"]
-            for hint in output_mapping_hints_from_instruction(
-                last_step.get("configuration_instruction"),
-                react_call=last_step.get("react_call"),
-            )
+            for hint in output_mapping_hints_from_instruction(last_step.get("configuration_instruction"))
         }
         if output_hint_by_slot:
             for item in result.get("output_slots_order", []):
@@ -2722,10 +2537,25 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
                 if slot_id in output_hint_by_slot:
                     item["source_hint"] = output_hint_by_slot[slot_id]
     result["output_slots_order"] = normalize_output_slot_order(
-        result["output_slots_order"],
-        target_slot_id,
+        result.get("output_slots_order", []),
+        result.get("target_slot_id"),
         last_step=last_step,
     )
+    selected_output_slot_ids = {
+        str(item.get("slot_id"))
+        for item in result.get("output_slots_order", []) or []
+        if item.get("slot_id")
+    }
+    for enrichment_step in result.get("enrichment_steps", []) or []:
+        output_mapping = enrichment_step.get("output_mapping")
+        if not isinstance(output_mapping, dict):
+            enrichment_step["output_mapping"] = {}
+            continue
+        enrichment_step["output_mapping"] = {
+            str(slot_id): field_path
+            for slot_id, field_path in output_mapping.items()
+            if str(slot_id) in selected_output_slot_ids
+        }
 
     fallback = result.setdefault(
         "fallback",
@@ -2750,28 +2580,12 @@ def normalize_attribute_resolution_profile(profile: dict[str, Any]) -> dict[str,
             "script_text": default_resolution_script_text(result),
             "response_contract": default_resolution_response_contract(),
         }
-    else:
-        result["llm_resolution_script"]["script_text"] = migrate_entity_template_refs(
-            result["llm_resolution_script"].get("script_text"),
-            entity_step_by_name,
-        )
-
-    for legacy_key in (
-        "input_attributes",
-        "candidate_source",
-        "result_policy",
-        "decision_policy",
-        "clarification_policy",
-        "handoff_policy",
-        "output_slots",
-        "resolver_operation",
-        "operation_result_entity",
-    ):
-        result.pop(legacy_key, None)
     result.setdefault("max_attempts", 1)
-    result.pop("audit_required", None)
-    result.pop("log_required", None)
     return result
+
+
+def completion_policy_is_empty(policy: Any) -> bool:
+    return isinstance(policy, dict) and not policy
 
 
 def compact_config_dict(value: dict[str, Any], keep_empty: set[str] | None = None) -> dict[str, Any]:
@@ -2842,21 +2656,8 @@ def enrichment_steps_from_legacy(
     resolver_operation: dict[str, Any],
     result_entity: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    if resolver_operation.get("source_type") != "react_call" or not resolver_operation.get("tool_name"):
-        return []
-    operation_name = result_entity.get("entity_name") or resolver_operation.get("operation_id") or resolver_operation["tool_name"]
-    return [
-        {
-            "step_id": "step1",
-            "step_name": f"Получить {humanize_config_id(operation_name)}",
-            "react_call": resolver_operation["tool_name"],
-            "endpoint_id": resolver_operation.get("endpoint_id"),
-            "operation_id": resolver_operation.get("operation_id"),
-            "completion_policy": copy.deepcopy(resolver_operation.get("completion_policy") or {}),
-            "parameter_mapping": resolver_operation.get("parameter_mapping", {}),
-            "on_error": "continue_to_llm",
-        }
-    ]
+    _ = (resolver_operation, result_entity)
+    return []
 
 
 def output_slots_order_from_policy(
@@ -2890,15 +2691,15 @@ def normalize_output_source_hint(
     hint = str(source_hint or "").strip()
     if not hint:
         return ""
-    if re.match(r"^(paramReAct|step)\.", hint):
+    if re.match(r"^(paramCapability|step)\.", hint):
         return f"${{{hint}}}"
-    step_match = STEP_OUTPUT_REF_RE.match(hint)
-    if step_match and last_step:
+    capability_step_match = STEP_CAPABILITY_OUTPUT_REF_RE.match(hint)
+    if capability_step_match and last_step:
         if (
-            step_match.group("step_id") == last_step.get("step_id")
-            and step_match.group("react_call") == last_step.get("react_call")
+            capability_step_match.group("step_id") == last_step.get("step_id")
+            and capability_step_match.group("capability_id") == last_step.get("capability_id")
         ):
-            return step_match.group("field")
+            return capability_step_match.group("field")
     return hint
 
 
@@ -2912,7 +2713,7 @@ def output_source_hint_reference(
     enrichment_steps: list[dict[str, Any]],
 ) -> dict[str, Any]:
     hint = str(source_hint or "").strip()
-    if re.match(r"^(paramReAct|step)\.", hint):
+    if re.match(r"^(paramCapability|step)\.", hint):
         hint = f"${{{hint}}}"
     if not enrichment_steps:
         return {
@@ -2924,58 +2725,58 @@ def output_source_hint_reference(
         {**step, "step_id": enrichment_step_id(step, index)}
         for index, step in enumerate(enrichment_steps, start=1)
     ]
-    step_match = STEP_OUTPUT_REF_RE.match(hint)
-    if step_match:
-        step_id = step_match.group("step_id")
-        react_call = step_match.group("react_call")
+    capability_step_match = STEP_CAPABILITY_OUTPUT_REF_RE.match(hint)
+    if capability_step_match:
+        step_id = capability_step_match.group("step_id")
+        capability_id = capability_step_match.group("capability_id")
         step = next((item for item in steps if item.get("step_id") == step_id), None)
         if not step:
             return {
                 "source_hint": hint,
                 "step_id": step_id,
-                "react_call": react_call,
-                "field": step_match.group("field"),
+                "capability_id": capability_id,
+                "field": capability_step_match.group("field"),
                 "error": f"source_hint ссылается на неизвестный шаг: {step_id}.",
             }
-        if step.get("react_call") != react_call:
+        if step.get("capability_id") != capability_id:
             return {
                 "source_hint": hint,
                 "step_id": step_id,
-                "react_call": react_call,
-                "field": step_match.group("field"),
+                "capability_id": capability_id,
+                "field": capability_step_match.group("field"),
                 "error": (
-                    f"source_hint ожидает ReAct-вызов {react_call} в {step_id}, "
-                    f"но там настроен {step.get('react_call')}."
+                    f"source_hint ожидает capability {capability_id} в {step_id}, "
+                    f"но там настроена {step.get('capability_id')}."
                 ),
             }
         return {
             "source_hint": hint,
             "step": step,
             "step_id": step_id,
-            "react_call": react_call,
-            "field": step_match.group("field"),
+            "capability_id": capability_id,
+            "field": capability_step_match.group("field"),
         }
 
-    param_match = PARAM_REACT_OUTPUT_REF_RE.match(hint)
-    if param_match:
-        react_call = param_match.group("react_call")
-        matches = [step for step in steps if step.get("react_call") == react_call]
+    capability_param_match = PARAM_CAPABILITY_OUTPUT_REF_RE.match(hint)
+    if capability_param_match:
+        capability_id = capability_param_match.group("capability_id")
+        matches = [step for step in steps if step.get("capability_id") == capability_id]
         if not matches:
             return {
                 "source_hint": hint,
-                "react_call": react_call,
-                "field": param_match.group("field"),
-                "error": f"source_hint ссылается на ReAct-вызов, которого нет в шагах профиля: {react_call}.",
+                "capability_id": capability_id,
+                "field": capability_param_match.group("field"),
+                "error": f"source_hint ссылается на capability, которой нет в шагах профиля: {capability_id}.",
             }
         if len(matches) > 1:
             step_ids = ", ".join(step.get("step_id", "") for step in matches)
             return {
                 "source_hint": hint,
-                "react_call": react_call,
-                "field": param_match.group("field"),
+                "capability_id": capability_id,
+                "field": capability_param_match.group("field"),
                 "error": (
-                    f"source_hint неоднозначен: ReAct-вызов {react_call} используется в шагах {step_ids}. "
-                    "Используйте формат ${step.<step_id>.react.<react_call>.output.<field>}."
+                    f"source_hint неоднозначен: capability {capability_id} используется в шагах {step_ids}. "
+                    "Используйте формат ${step.<step_id>.capability.<capability_id>.output.<field>}."
                 ),
             }
         step = matches[0]
@@ -2983,8 +2784,8 @@ def output_source_hint_reference(
             "source_hint": hint,
             "step": step,
             "step_id": step.get("step_id"),
-            "react_call": react_call,
-            "field": param_match.group("field"),
+            "capability_id": capability_id,
+            "field": capability_param_match.group("field"),
         }
 
     step = steps[-1]
@@ -2992,19 +2793,17 @@ def output_source_hint_reference(
         "source_hint": hint,
         "step": step,
         "step_id": step.get("step_id"),
-        "react_call": step.get("react_call"),
+        "capability_id": step.get("capability_id"),
         "field": hint,
     }
 
 
 def output_mapping_hints_from_instruction(
     instruction: str | None,
-    *,
-    react_call: str | None = None,
 ) -> list[dict[str, str]]:
     output_pattern = (
-        r"\$\{paramReAct\."
-        r"(?P<call>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
+        r"\$\{paramCapability\."
+        r"(?P<capability_id>[A-Za-z][A-Za-z0-9_.-]*)\.output\."
         r"(?P<field>[A-Za-z0-9_][A-Za-z0-9_.-]*)\}"
     )
     slot_target_pattern = (
@@ -3017,8 +2816,6 @@ def output_mapping_hints_from_instruction(
         rf"{output_pattern}\s*(?:->|=>|в|to)\s*{slot_target_pattern}",
     ):
         for match in re.finditer(pattern, instruction or "", flags=re.IGNORECASE):
-            if react_call and match.group("call") != react_call:
-                continue
             target = match.group("slot") or match.group("plain_slot")
             if target:
                 hints.append({"target": target, "field": match.group("field")})
@@ -3061,9 +2858,9 @@ def default_resolution_response_contract() -> dict[str, Any]:
 def default_resolution_script_text(profile: dict[str, Any]) -> str:
     output_slots = ", ".join(item["slot_id"] for item in profile.get("output_slots_order", []))
     step_refs = ", ".join(
-        f"{step.get('step_id', f'step{index}')}.react.{step.get('react_call', 'react_call')}.output.<field>"
+        f"{step.get('step_id', f'step{index}')}.capability.{step.get('capability_id', 'capability_id')}.output.<field>"
         for index, step in enumerate(profile.get("enrichment_steps", []), start=1)
-    ) or "нет результатов ReAct-вызовов"
+    ) or "нет результатов capability"
     return (
         "Проанализируй входные слоты и результаты шагов обогащения. "
         f"Доступные ссылки на результаты: {step_refs}. "
@@ -3081,6 +2878,17 @@ DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE = (
     "Если результат однозначный, верни decision=fill и filled_slots. "
     "Если данных недостаточно или кандидатов несколько, верни decision=ask_clarification и один уточняющий вопрос. "
     "Если уверенно решить нельзя после попыток, верни decision=handoff."
+)
+
+DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE = (
+    "Ты помощник настройки capability step для AI ServiceDesk. "
+    "Верни только JSON без markdown. Не исполняй capability и не используй MCP/n8n/tool детали. "
+    "Выбери одну capability из списка и заполни mapping только из доступных slot/case/step refs или constants. "
+    "Явные refs и selected_capability_id из запроса являются constraints и имеют приоритет над догадками. "
+    "Если constraints.requires_output_mapping=true, заполняй output_mapping только в selected_output_slots. "
+    "Если constraints.requires_output_mapping=false, верни output_mapping={} и не подбирай выходы. "
+    "Используй descriptions слотов и полей capability как основной источник смысла. "
+    "Не выдумывай слоты, capability, input/output поля."
 )
 
 
@@ -3218,34 +3026,8 @@ def output_slot_error_context(
         f"Выходные слоты и порядок заполнения -> строка {rule.get('order') or '?'} "
         f"{display_label(slot.get('display_name'), slot_id)} -> Источник значения \"{source_hint}\": "
         f"поле \"{local_hint}\" отсутствует в результате {step_prefix} {step_label} / "
-        f"ReAct-вызов {tool_label}. Доступные поля результата: {available_text}."
+        f"capability {tool_label}. Доступные поля результата: {available_text}."
     )
-
-
-def enrichment_step_result_schema(
-    step: dict[str, Any],
-    *,
-    tool_by_name: dict[str, dict[str, Any]],
-    endpoint_by_id: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
-    tool = tool_by_name.get(step.get("react_call") or "")
-    if not tool:
-        return None, None, None
-    binding = select_tool_binding(
-        tool,
-        endpoint_id=step.get("endpoint_id"),
-        operation_id=step.get("operation_id"),
-    )
-    endpoint = endpoint_by_id.get((binding or {}).get("endpoint_id") or "")
-    operation = (endpoint or {}).get("operations", {}).get((binding or {}).get("operation_id") or "")
-    if not operation:
-        return tool.get("result_schema"), tool, None
-    completion_policy = step.get("completion_policy") or {}
-    if completion_policy.get("mode") == "external_event":
-        event_type = completion_policy.get("expected_event_type")
-        async_contract = (operation.get("async_event_contracts") or {}).get(event_type or "")
-        return (async_contract or {}).get("result_schema"), tool, operation
-    return operation.get("response_schema") or tool.get("result_schema"), tool, operation
 
 
 def operation_response_items(
@@ -3339,7 +3121,7 @@ def resolved_output_rule_values(
     *,
     profile: dict[str, Any],
     enrichment_step_results: dict[str, Any],
-    tool_by_name: dict[str, dict[str, Any]],
+    capability_by_id: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     output_values: dict[str, Any] = {}
     selected_items: dict[str, dict[str, Any]] = {}
@@ -3360,14 +3142,14 @@ def resolved_output_rule_values(
         step_id = source_ref.get("step_id")
         step_result = enrichment_step_results.get(step_id or "")
         raw_result = (step_result or {}).get("result")
-        tool = tool_by_name.get(source_ref.get("react_call") or "")
-        if raw_result is None or not tool:
+        capability = capability_by_id.get(source_ref.get("capability_id") or "")
+        if raw_result is None or not capability:
             errors.append(f"{rule.get('slot_id')}: результат шага {step_id} недоступен.")
             continue
         if step_id not in selected_items:
             count, result_item, result_summary = operation_response_items(
                 raw_result,
-                tool.get("result_schema"),
+                capability.get("output_schema"),
                 [
                     {**item_rule, "source_hint": item_ref.get("field", "")}
                     for item_rule, item_ref in source_refs_by_rule
@@ -3524,7 +3306,7 @@ def direct_mapping_resolution_decision(
             "filled_slots": output_values,
             "confidence": confidence,
             "next_question": "",
-            "reason": "Выходные слоты заполнены прямым маппингом результата ReAct-вызова.",
+            "reason": "Выходные слоты заполнены прямым маппингом результата capability.",
         }
     if count == 0:
         reason = "Операция не вернула результатов."
@@ -3562,36 +3344,6 @@ def resolution_profile_current_step(profile: dict[str, Any]) -> dict[str, Any] |
         if step["type"] in {"clarification", "operator_handoff", "escalate"}:
             return step
     return profile.get("steps", [None])[-1]
-
-
-def tool_usage_refs(
-    tool_name: str,
-    resolution_payload: dict[str, Any],
-    channels_payload: dict[str, Any],
-) -> list[str]:
-    refs = []
-    for profile in resolution_payload.get("profiles", []):
-        if any(step.get("react_call") == tool_name for step in profile.get("enrichment_steps", [])):
-            refs.append(f"attribute_resolution_profile:{profile.get('profile_id')}")
-    _ = channels_payload
-    return refs
-
-
-def endpoint_operation_usage_refs(
-    endpoint_id: str,
-    operation_id: str,
-    tools_payload: dict[str, Any],
-    workflows_payload: dict[str, Any],
-) -> list[str]:
-    refs = []
-    for tool in tools_payload.get("tools", []):
-        for binding in tool.get("endpoint_bindings", []):
-            if binding.get("endpoint_id") == endpoint_id and binding.get("operation_id") == operation_id:
-                refs.append(f"react_call:{tool.get('tool_name')}")
-    for workflow in workflows_payload.get("workflows", []):
-        if workflow.get("endpoint_id") == endpoint_id and operation_id in workflow.get("operations", []):
-            refs.append(f"n8n_workflow:{workflow.get('workflow_id')}")
-    return refs
 
 
 def endpoint_operation_async_usage_refs(
@@ -3870,20 +3622,6 @@ CONFIG_DOMAINS: dict[str, ConfigDomain] = {
         read_permission="workflow.read",
         manage_permission="workflow.manage",
     ),
-    "tools": ConfigDomain(
-        domain="tools",
-        title="Каталог ReAct-вызовов ИИ",
-        contract_name="tool_catalog",
-        read_permission="tools.read",
-        manage_permission="tools.manage",
-    ),
-    "integration_endpoints": ConfigDomain(
-        domain="integration_endpoints",
-        title="Каталог точек интеграции",
-        contract_name="integration_endpoint_catalog",
-        read_permission="tools.read",
-        manage_permission="tools.manage",
-    ),
     "workflow_states": ConfigDomain(
         domain="workflow_states",
         title="Каталог состояний рабочего процесса",
@@ -3912,13 +3650,6 @@ CONFIG_DOMAINS: dict[str, ConfigDomain] = {
         read_permission="models.read",
         manage_permission="models.manage",
     ),
-    "n8n_workflows": ConfigDomain(
-        domain="n8n_workflows",
-        title="Каталог workflow n8n",
-        contract_name="n8n_workflow_catalog",
-        read_permission="tools.read",
-        manage_permission="tools.manage",
-    ),
     "interaction_channels": ConfigDomain(
         domain="interaction_channels",
         title="Каналы взаимодействия",
@@ -3930,6 +3661,27 @@ CONFIG_DOMAINS: dict[str, ConfigDomain] = {
         domain="attribute_resolution_profiles",
         title="Профили разрешения атрибутов",
         contract_name="attribute_resolution_profiles",
+        read_permission="workflow.read",
+        manage_permission="workflow.manage",
+    ),
+    "capabilities": ConfigDomain(
+        domain="capabilities",
+        title="Каталог capabilities",
+        contract_name="capability_catalog",
+        read_permission="workflow.read",
+        manage_permission="workflow.manage",
+    ),
+    "mcp_environments": ConfigDomain(
+        domain="mcp_environments",
+        title="Каталог внешних MCP-окружений",
+        contract_name="mcp_environment_catalog",
+        read_permission="tools.read",
+        manage_permission="tools.manage",
+    ),
+    "capability_bindings": ConfigDomain(
+        domain="capability_bindings",
+        title="Привязки capabilities к MCP-окружениям",
+        contract_name="capability_binding_catalog",
         read_permission="workflow.read",
         manage_permission="workflow.manage",
     ),
@@ -3966,10 +3718,6 @@ class ConfigStore:
 
     def default_config(self, domain: str) -> dict[str, Any]:
         self._require_domain(domain)
-        if domain == "tools":
-            return copy.deepcopy(self.contracts.tool_catalog)
-        if domain == "integration_endpoints":
-            return copy.deepcopy(self.contracts.integration_endpoint_catalog)
         if domain == "workflow_states":
             return copy.deepcopy(self.contracts.workflow_state_catalog)
         if domain == "workflow_transitions":
@@ -3978,12 +3726,16 @@ class ConfigStore:
             return default_prompt_catalog()
         if domain == "model_routing":
             return default_model_routing()
-        if domain == "n8n_workflows":
-            return load_json(CONTRACTS_ROOT / "config" / "n8n-workflow-catalog.json")
         if domain == "interaction_channels":
             return default_interaction_channels()
         if domain == "attribute_resolution_profiles":
             return default_attribute_resolution_profiles()
+        if domain == "capabilities":
+            return default_capabilities()
+        if domain == "mcp_environments":
+            return default_mcp_environments()
+        if domain == "capability_bindings":
+            return default_capability_bindings()
         if domain == "service_scenarios":
             return default_service_scenarios()
         if domain == "slot_schemas":
@@ -4052,45 +3804,50 @@ class ConfigStore:
 
     def validate_external_event_result_contract(self, wait: dict[str, Any], event: dict[str, Any]) -> None:
         origin = wait.get("origin") or {}
-        if origin.get("kind") != "react_call":
+        if origin.get("kind") != "capability":
             return
         snapshot = self._wait_contract_snapshot(wait)
         if snapshot:
             endpoint_id = snapshot.get("endpoint_id")
             operation_id = snapshot.get("operation_id")
+            capability_id = snapshot.get("capability_id")
             async_contracts = {
                 snapshot.get("event_type"): copy.deepcopy(snapshot.get("async_event_contract") or {})
             }
         else:
-            endpoint_id = origin.get("endpoint_id")
-            operation_id = origin.get("operation_id")
-            if not endpoint_id or not operation_id:
+            capability_id = origin.get("capability_id")
+            endpoint_id = None
+            operation_id = None
+            if not capability_id:
                 return
-            endpoint = self._by_id(self.active_payload("integration_endpoints")["endpoints"], "endpoint_id").get(endpoint_id)
-            operation = (endpoint or {}).get("operations", {}).get(operation_id)
-            if not operation:
+            capability = self._by_id(
+                self.active_payload("capabilities").get("capabilities", []),
+                "capability_id",
+            ).get(capability_id)
+            if not capability:
                 raise ContractValidationError(
                     "external_event_result",
-                    [f"Не найдена endpoint-операция для ожидания: {endpoint_id}/{operation_id}."],
+                    [f"Не найдена capability для ожидания: {capability_id}."],
                 )
-            async_contracts = operation.get("async_event_contracts") or {}
+            async_contracts = capability.get("async_event_contracts") or {}
         if not async_contracts:
             return
         event_type = event.get("event_type")
         async_contract = async_contracts.get(event_type)
+        contract_owner = capability_id or f"{endpoint_id}/{operation_id}"
         if not async_contract:
             raise ContractValidationError(
                 "external_event_result",
-                [f"{endpoint_id}/{operation_id} не содержит async_event_contracts.{event_type}."],
+                [f"{contract_owner} не содержит async_event_contracts.{event_type}."],
             )
         errors = []
         if async_contract.get("contract_status") == "broken":
-            errors.append(f"{endpoint_id}/{operation_id}/{event_type} имеет contract_status=broken.")
+            errors.append(f"{contract_owner}/{event_type} имеет contract_status=broken.")
         status = event.get("status")
         allowed_statuses = set(async_contract.get("statuses") or [])
         if allowed_statuses and status not in allowed_statuses:
             errors.append(
-                f"{endpoint_id}/{operation_id}/{event_type} не допускает status={status}; "
+                f"{contract_owner}/{event_type} не допускает status={status}; "
                 f"разрешено: {', '.join(sorted(allowed_statuses))}."
             )
         schema_key = {
@@ -4111,26 +3868,26 @@ class ConfigStore:
         if errors:
             raise ContractValidationError("external_event_result", errors)
 
-    def external_event_contract_snapshot(
+    def capability_event_contract_snapshot(
         self,
         *,
-        endpoint_id: str,
-        operation_id: str,
+        capability_id: str,
         event_type: str,
     ) -> dict[str, Any]:
-        endpoint = self._by_id(self.active_payload("integration_endpoints")["endpoints"], "endpoint_id").get(endpoint_id)
-        operation = (endpoint or {}).get("operations", {}).get(operation_id)
-        async_contract = (operation or {}).get("async_event_contracts", {}).get(event_type)
-        if not operation or not async_contract:
+        capability = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
+        ).get(capability_id)
+        async_contract = (capability or {}).get("async_event_contracts", {}).get(event_type)
+        if not capability or not async_contract:
             raise ContractValidationError(
                 "external_event_result",
-                [f"Не найден async_event_contracts.{event_type} для {endpoint_id}/{operation_id}."],
+                [f"Не найден async_event_contracts.{event_type} для capability {capability_id}."],
             )
         return {
             "schema_version": "1.0",
-            "endpoint_id": endpoint_id,
-            "operation_id": operation_id,
-            "operation_contract_version": operation.get("contract_version"),
+            "capability_id": capability_id,
+            "capability_contract_version": capability.get("contract_version"),
             "event_type": event_type,
             "async_event_contract": copy.deepcopy(async_contract),
         }
@@ -4153,55 +3910,14 @@ class ConfigStore:
                 scenario.pop("tool_launch_matrix_id", None)
                 scenario.setdefault("default_channel_id", "debug")
                 scenario.setdefault("allowed_channel_ids", ["messenger_bot", "service_desk", "debug"])
-                scenario.setdefault("allowed_react_call_names", [])
                 scenario.setdefault("audit_required", True)
                 scenario.setdefault("log_required", True)
-        elif domain == "tools":
-            endpoint_by_id = {
-                endpoint["endpoint_id"]: endpoint
-                for endpoint in self.active_payload("integration_endpoints").get("endpoints", [])
-            }
-            for tool in normalized.get("tools", []):
-                tool.get("policy", {}).pop("allowed_environments", None)
-                tool.setdefault("contract_version", "1.0")
-                tool.setdefault("contract_status", "valid")
-                tool.setdefault("result_schema", default_response_schema())
-                canonical_schema = canonical_react_parameter_schema(tool.get("tool_name"))
-                if canonical_schema:
-                    tool["parameters_schema"] = canonical_schema
-                else:
-                    tool["parameters_schema"] = react_visible_parameter_schema(tool.get("parameters_schema"))
-                seen_bindings: set[tuple[str | None, str | None]] = set()
-                normalized_bindings = []
-                for binding in tool.get("endpoint_bindings", []):
-                    normalize_endpoint_binding(binding)
-                    endpoint = endpoint_by_id.get(binding.get("endpoint_id"))
-                    operation = endpoint.get("operations", {}).get(binding.get("operation_id")) if endpoint else None
-                    if operation:
-                        normalize_operation_definition(binding.get("operation_id"), operation)
-                    if canonical_schema:
-                        binding["parameter_mapping"] = default_parameter_mapping(tool, operation)
-                    else:
-                        if binding.get("parameter_mapping"):
-                            binding["parameter_mapping"] = normalize_parameter_mapping(
-                                binding.get("parameter_mapping") or {},
-                                tool.get("parameters_schema"),
-                                operation.get("request_schema") if operation else None,
-                            )
-                        else:
-                            binding.setdefault("parameter_mapping", default_parameter_mapping(tool, operation))
-                    binding.setdefault("result_mapping", default_result_mapping(tool, operation))
-                    binding_key = (binding.get("endpoint_id"), binding.get("operation_id"))
-                    if binding_key in seen_bindings:
-                        continue
-                    seen_bindings.add(binding_key)
-                    normalized_bindings.append(binding)
-                tool["endpoint_bindings"] = normalized_bindings
         elif domain == "attribute_resolution_profiles":
             normalized["profiles"] = [
                 normalize_attribute_resolution_profile(profile)
                 for profile in normalized.get("profiles", [])
             ]
+            self._normalize_attribute_resolution_completion_policies(normalized["profiles"])
             self._assign_attribute_resolution_slot_schema_ids(normalized["profiles"])
         elif domain == "slot_schemas":
             for slot_schema in normalized.get("slot_schemas", []):
@@ -4228,13 +3944,13 @@ class ConfigStore:
             )
             for policy in normalized.get("policies", []):
                 scenario_id = policy.pop("scenario_id", None)
-                policy.setdefault("display_name", f"ReAct-политика: {scenario_names.get(scenario_id or '', policy['policy_id'])}")
+                policy.setdefault("display_name", f"Политика оркестрации: {scenario_names.get(scenario_id or '', policy['policy_id'])}")
         elif domain == "escalation_policies":
             for policy in normalized.get("policies", []):
                 scenario_id = policy.pop("scenario_id", None)
                 policy.setdefault("display_name", f"Решение и эскалация: {scenario_names.get(scenario_id or '', policy['policy_id'])}")
                 policy.setdefault("auto_close", {})
-                policy["auto_close"].setdefault("requires_tool_success", True)
+                policy["auto_close"].setdefault("requires_capability_success", True)
                 policy["auto_close"].pop("requires_user_confirmation", None)
                 policy.pop("waiting", None)
                 policy.pop("channel_profile_mapping", None)
@@ -4266,21 +3982,6 @@ class ConfigStore:
                     "action_profiles",
                 ):
                     channel.pop(legacy_action_key, None)
-        elif domain == "integration_endpoints":
-            normalized = merge_legacy_integration_endpoints(normalized)
-            for endpoint in normalized.get("endpoints", []):
-                for operation_id, operation in endpoint.get("operations", {}).items():
-                    normalize_operation_definition(operation_id, operation)
-                    operation.setdefault("display_name", humanize_config_id(operation_id))
-                    operation.setdefault(
-                        "description",
-                        f"Техническая операция подключения {endpoint['endpoint_id']}.",
-                    )
-        elif domain == "n8n_workflows":
-            for workflow in normalized.get("workflows", []):
-                normalize_endpoint_reference(workflow)
-                if workflow.get("callback_endpoint_id"):
-                    workflow["callback_endpoint_id"] = normalize_endpoint_id(workflow["callback_endpoint_id"])
         elif domain == "prompt_packs":
             replacements = {
                 "передай Л1": "передай человеку",
@@ -4358,74 +4059,74 @@ class ConfigStore:
             if best_schema_id:
                 profile["slot_schema_id"] = best_schema_id
 
-    def _n8n_delivery_defaults_by_operation(self) -> dict[tuple[str, str], dict[str, str]]:
-        try:
-            workflows = self.active_payload("n8n_workflows").get("workflows", [])
-        except Exception:
-            workflows = self.default_config("n8n_workflows").get("workflows", [])
-        defaults: dict[tuple[str, str], dict[str, str]] = {}
-        for workflow in workflows:
-            endpoint_id = workflow.get("endpoint_id")
-            delivery = workflow.get("result_delivery") or {}
-            default_transport = delivery.get("default_transport")
-            default_topic = delivery.get("default_result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC
-            for operation_id in workflow.get("operations") or []:
-                if endpoint_id and operation_id:
-                    defaults[(endpoint_id, operation_id)] = {
-                        "result_transport": default_transport or "http_callback",
-                        "result_topic": default_topic,
-                    }
-        return defaults
+    def _active_capability_binding_for_step(self, step: dict[str, Any]) -> dict[str, Any] | None:
+        capability_id = step.get("capability_id")
+        environment_id = step.get("mcp_environment_id")
+        candidates = [
+            binding
+            for binding in self.active_payload("capability_bindings").get("bindings", [])
+            if binding.get("capability_id") == capability_id
+            and binding.get("status") == "active"
+            and (not environment_id or binding.get("environment_id") == environment_id)
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
-    def _profile_step_launch(
+    def _completion_policy_for_capability_step(
+        self,
+        step: dict[str, Any],
+        capability_by_id: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        capability = capability_by_id.get(str(step.get("capability_id") or ""))
+        default_policy = copy.deepcopy((capability or {}).get("default_completion_policy") or {})
+        if default_policy:
+            return default_policy
+        binding = self._active_capability_binding_for_step(step)
+        if (binding or {}).get("execution_mode") == "sync":
+            return {"mode": "sync", "max_wait_seconds": 0, "timeout_action": "resume_agent"}
+        return {}
+
+    def _normalize_attribute_resolution_completion_policies(self, profiles: list[dict[str, Any]]) -> None:
+        capability_by_id = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
+        )
+        for profile in profiles:
+            for step in profile.get("enrichment_steps", []) or []:
+                if not step.get("capability_id"):
+                    continue
+                policy = step.get("completion_policy")
+                if isinstance(policy, dict) and policy:
+                    continue
+                if policy is not None and not completion_policy_is_empty(policy):
+                    continue
+                normalized_policy = self._completion_policy_for_capability_step(step, capability_by_id)
+                if normalized_policy:
+                    step["completion_policy"] = normalized_policy
+                else:
+                    step.pop("completion_policy", None)
+
+    def _profile_capability_launch(
         self,
         *,
         profile: dict[str, Any],
         step: dict[str, Any],
-        tool_by_name: dict[str, dict[str, Any]],
-        endpoint_by_id: dict[str, dict[str, Any]],
-        delivery_defaults: dict[tuple[str, str], dict[str, str]],
+        capability_by_id: dict[str, dict[str, Any]],
+        environment_by_id: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        tool_name = step.get("react_call")
-        tool = tool_by_name.get(tool_name or "")
-        binding = select_tool_binding(
-            tool,
-            endpoint_id=step.get("endpoint_id"),
-            operation_id=step.get("operation_id"),
-        )
-        endpoint_id = (binding or {}).get("endpoint_id") or step.get("endpoint_id")
-        operation_id = (binding or {}).get("operation_id") or step.get("operation_id")
-        endpoint = endpoint_by_id.get(endpoint_id or "")
-        operation = (endpoint or {}).get("operations", {}).get(operation_id or "")
-        policy = copy.deepcopy(step.get("completion_policy") or {})
-        async_default_policy = default_async_completion_policy_for_operation(
-            operation,
-            operation_id=operation_id,
-            delivery_defaults=delivery_defaults.get((endpoint_id or "", operation_id or ""), {}),
-        )
-        if async_default_policy and (not policy or policy.get("mode") == "sync"):
-            policy = async_default_policy
-        if policy.get("mode") == "external_event":
-            defaults = delivery_defaults.get((endpoint_id or "", operation_id or ""), {})
-            policy.setdefault("result_transport", defaults.get("result_transport") or "http_callback")
-            policy.setdefault("result_topic", defaults.get("result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC)
-        launch = {
-            "tool_name": tool_name,
-            "endpoint_id": endpoint_id,
-            "operation_id": operation_id,
-            "completion_policy": policy,
-        }
-        normalize_tool_launch_completion_policy(launch)
-        completion_policy = launch.get("completion_policy", {})
-        if completion_policy.get("mode") == "external_event":
-            defaults = delivery_defaults.get((endpoint_id or "", operation_id or ""), {})
-            completion_policy.setdefault("result_topic", defaults.get("result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC)
-        parameter_mapping = parameter_mapping_with_schema_defaults(
-            (tool or {}).get("parameters_schema", {}),
-            copy.deepcopy(step.get("parameter_mapping") or {}),
+        capability_id = step.get("capability_id")
+        capability = capability_by_id.get(capability_id or "")
+        binding = self._active_capability_binding_for_step(step)
+        environment = environment_by_id.get((binding or {}).get("environment_id") or step.get("mcp_environment_id") or "")
+        policy = copy.deepcopy(step.get("completion_policy") or (capability or {}).get("default_completion_policy") or {})
+        if (binding or {}).get("execution_mode") == "sync" and not policy:
+            policy = {"mode": "sync", "max_wait_seconds": 0, "timeout_action": "mark_failed"}
+        input_mapping = parameter_mapping_with_schema_defaults(
+            (capability or {}).get("input_schema", {}),
+            copy.deepcopy(step.get("input_mapping") or {}),
         )
         return {
             "launch_id": f"{profile.get('profile_id')}.{step.get('step_id')}",
+            "launch_type": "capability",
             "profile_id": profile.get("profile_id"),
             "profile_name": profile.get("display_name"),
             "slot_schema_id": profile.get("slot_schema_id"),
@@ -4433,39 +4134,41 @@ class ConfigStore:
             "output_slots_order": copy.deepcopy(profile.get("output_slots_order", [])),
             "step_id": step.get("step_id"),
             "step_name": step.get("step_name"),
-            "tool_name": tool_name,
-            "action_type": (tool or {}).get("action_type", "read_only"),
-            "endpoint_id": endpoint_id,
-            "operation_id": operation_id,
-            "adapter_type": (endpoint or {}).get("adapter_type"),
-            "parameter_bindings": parameter_mapping,
-            "required_slots": source_ref_slot_ids(parameter_mapping),
-            "completion_policy": completion_policy,
-            "endpoint_exists": bool(endpoint),
-            "operation_exists": bool(operation),
+            "tool_name": capability_id,
+            "capability_id": capability_id,
+            "mcp_environment_id": (environment or {}).get("environment_id") or step.get("mcp_environment_id"),
+            "mcp_tool_name": (binding or {}).get("mcp_tool_name"),
+            "execution_mode": (binding or {}).get("execution_mode"),
+            "action_type": "read_only",
+            "parameter_bindings": input_mapping,
+            "required_slots": source_ref_slot_ids(input_mapping),
+            "completion_policy": policy,
+            "capability_exists": bool(capability),
+            "binding_exists": bool(binding),
+            "environment_exists": bool(environment),
         }
 
     def _profile_tool_launches(self, profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        tool_by_name = self._by_id(self.active_payload("tools")["tools"], "tool_name")
-        endpoint_by_id = self._by_id(
-            self.active_payload("integration_endpoints")["endpoints"],
-            "endpoint_id",
+        capability_by_id = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
         )
-        delivery_defaults = self._n8n_delivery_defaults_by_operation()
+        environment_by_id = self._by_id(
+            self.active_payload("mcp_environments").get("environments", []),
+            "environment_id",
+        )
         launches: list[dict[str, Any]] = []
         for profile in profiles:
             for step in profile.get("enrichment_steps", []):
-                if not step.get("react_call"):
-                    continue
-                launches.append(
-                    self._profile_step_launch(
-                        profile=profile,
-                        step=step,
-                        tool_by_name=tool_by_name,
-                        endpoint_by_id=endpoint_by_id,
-                        delivery_defaults=delivery_defaults,
+                if step.get("capability_id"):
+                    launches.append(
+                        self._profile_capability_launch(
+                            profile=profile,
+                            step=step,
+                            capability_by_id=capability_by_id,
+                            environment_by_id=environment_by_id,
+                        )
                     )
-                )
         return launches
 
     @staticmethod
@@ -4473,17 +4176,24 @@ class ConfigStore:
         policy = launch.get("completion_policy") or {}
         if policy.get("mode") != "external_event":
             return None
-        return {
+        planned_wait = {
             "wait_type": "external_event_wait",
-            "react_call": launch.get("tool_name"),
-            "endpoint_id": launch.get("endpoint_id"),
-            "operation_id": launch.get("operation_id"),
             "expected_event_type": policy.get("expected_event_type"),
             "result_transport": policy.get("result_transport"),
             "result_topic": policy.get("result_topic") or DEFAULT_EXTERNAL_EVENT_RESULT_TOPIC,
             "max_wait_seconds": policy.get("max_wait_seconds"),
             "timeout_action": policy.get("timeout_action"),
         }
+        if launch.get("launch_type") == "capability":
+            planned_wait.update(
+                {
+                    "capability_id": launch.get("capability_id"),
+                    "mcp_environment_id": launch.get("mcp_environment_id"),
+                    "mcp_tool_name": launch.get("mcp_tool_name"),
+                    "execution_mode": launch.get("execution_mode"),
+                }
+            )
+        return planned_wait
 
     def _simulate_profile_launches(
         self,
@@ -4498,6 +4208,7 @@ class ConfigStore:
         blocked_launches: list[dict[str, Any]] = []
         next_allowed_actions: list[dict[str, Any]] = []
         missing_slot_set = set(missing_slots)
+        blocked_profile_steps: dict[str, dict[str, Any]] = {}
         for launch in launches:
             missing_parameter_slots = [
                 slot_id
@@ -4517,13 +4228,41 @@ class ConfigStore:
                 slot_values=slot_values,
             )
             item["parameters"] = copy.deepcopy(parameters)
-            if not launch.get("endpoint_exists") or not launch.get("operation_exists"):
-                item["status"] = "blocked_by_configuration"
+            profile_key = str(launch.get("profile_id") or launch.get("launch_id") or "")
+            previous_blocker = blocked_profile_steps.get(profile_key)
+            if previous_blocker:
+                item["status"] = "blocked_by_previous_step"
+                item["previous_launch_id"] = previous_blocker.get("launch_id")
+                item["block_reasons"] = [
+                    (
+                        f"Ожидается предыдущий шаг профиля: "
+                        f"{previous_blocker.get('launch_id') or previous_blocker.get('step_id') or 'н/д'}."
+                    )
+                ]
                 blocked_launches.append(item)
                 continue
+            if launch.get("launch_type") == "capability":
+                config_missing = [
+                    label
+                    for label, exists in (
+                        ("capability", launch.get("capability_exists")),
+                        ("capability_binding", launch.get("binding_exists")),
+                        ("mcp_environment", launch.get("environment_exists")),
+                    )
+                    if not exists
+                ]
+                if config_missing:
+                    item["status"] = "blocked_by_configuration"
+                    item["block_reasons"] = config_missing
+                    blocked_launches.append(item)
+                    if profile_key:
+                        blocked_profile_steps[profile_key] = item
+                    continue
             if missing_parameter_slots:
                 item["status"] = "blocked_by_missing_slots"
                 blocked_launches.append(item)
+                if profile_key:
+                    blocked_profile_steps[profile_key] = item
                 continue
             if simulation_options.get("bypass_policy_gates"):
                 item["status"] = "ready"
@@ -4533,8 +4272,10 @@ class ConfigStore:
                 item["status"] = "ready"
             ready_launches.append(item)
             action_extensions = {
-                "endpoint_id": launch.get("endpoint_id"),
-                "operation_id": launch.get("operation_id"),
+                "capability_id": launch.get("capability_id"),
+                "mcp_environment_id": launch.get("mcp_environment_id"),
+                "mcp_tool_name": launch.get("mcp_tool_name"),
+                "execution_mode": launch.get("execution_mode"),
                 "completion_policy": launch.get("completion_policy"),
                 "source_profile_id": launch.get("profile_id"),
                 "source_step_id": launch.get("step_id"),
@@ -4549,9 +4290,10 @@ class ConfigStore:
             }
             next_allowed_actions.append(
                 {
-                    "tool_name": launch.get("tool_name"),
+                    "tool_name": launch.get("tool_name") or launch.get("capability_id") or launch.get("mcp_tool_name"),
+                    "capability_id": launch.get("capability_id"),
                     "action_id": f"{launch.get('launch_id')}.action",
-                    "action_type": launch.get("action_type"),
+                    "action_type": "mcp_capability" if launch.get("launch_type") == "capability" else launch.get("action_type"),
                     "parameters": copy.deepcopy(parameters),
                     "reason": (
                         "Автоматический запуск шага профиля разрешения "
@@ -4559,7 +4301,7 @@ class ConfigStore:
                     ),
                     "risk_level": "medium" if launch.get("action_type") == "action" else "low",
                     "expected_effect": (
-                        "Endpoint-операция будет вызвана с параметрами, рассчитанными "
+                        "Внешняя MCP capability будет вызвана с параметрами, рассчитанными "
                         "из заполненных слотов сценария."
                     ),
                     "requires_state_change": launch.get("action_type") == "action",
@@ -4917,10 +4659,14 @@ class ConfigStore:
         }
 
     def _orchestration_graph_nodes(self, *, detail: dict[str, Any] | None) -> list[dict[str, Any]]:
-        tool_catalog = self.active_payload("tools")
-        endpoint_catalog = self.active_payload("integration_endpoints")
-        tool_by_name = self._by_id(tool_catalog["tools"], "tool_name")
-        endpoint_by_id = self._by_id(endpoint_catalog["endpoints"], "endpoint_id")
+        capability_by_id = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
+        )
+        environment_by_id = self._by_id(
+            self.active_payload("mcp_environments").get("environments", []),
+            "environment_id",
+        )
 
         def item_status(item: dict[str, Any] | None) -> str:
             return "valid" if item else "missing"
@@ -4984,23 +4730,27 @@ class ConfigStore:
         escalation_policy = detail.get("escalation_policy") if detail else None
         channel = detail.get("interaction_channel") if detail else None
         stage_count = len(slot_schema_stages(slot_schema)) if slot_schema else 0
-        profile_tool_names = sorted({
-            step.get("react_call")
+        profile_capability_ids = sorted({
+            step.get("capability_id")
             for profile in profiles
             for step in profile.get("enrichment_steps", [])
-            if step.get("react_call")
+            if step.get("capability_id")
         })
-        profile_tools = [tool_by_name[tool_name] for tool_name in profile_tool_names if tool_name in tool_by_name]
-        endpoint_ids = sorted({
-            binding.get("endpoint_id")
-            for tool in profile_tools
-            for binding in tool.get("endpoint_bindings", [])
-            if binding.get("endpoint_id")
+        profile_capabilities = [
+            capability_by_id[capability_id]
+            for capability_id in profile_capability_ids
+            if capability_id in capability_by_id
+        ]
+        environment_ids = sorted({
+            step.get("mcp_environment_id")
+            for profile in profiles
+            for step in profile.get("enrichment_steps", [])
+            if step.get("mcp_environment_id")
         })
-        profile_endpoints = [
-            endpoint_by_id[endpoint_id]
-            for endpoint_id in endpoint_ids
-            if endpoint_id in endpoint_by_id
+        profile_environments = [
+            environment_by_id[environment_id]
+            for environment_id in environment_ids
+            if environment_id in environment_by_id
         ]
 
         return [
@@ -5085,7 +4835,7 @@ class ConfigStore:
                 y=210,
                 step_number=1,
                 status="valid" if not detail or profiles else "partial",
-                description="Заполнение атрибутов через входные слоты, ReAct-операции, LLM-правило, уточнение у клиента и эскалацию оператору.",
+                description="Заполнение атрибутов через входные слоты, capabilities, LLM-правило, уточнение у клиента и эскалацию оператору.",
                 config_refs=[
                     {
                         "domain": "attribute_resolution_profiles",
@@ -5132,20 +4882,20 @@ class ConfigStore:
                 ] if detail else [],
             ),
             node(
-                "react_planning",
-                "3. ReAct-планирование",
+                "orchestration",
+                "3. Оркестрация",
                 x=880,
                 y=210,
                 step_number=3,
                 status=item_status(policy) if detail else "valid",
-                description="Цикл Думай -> Действуй -> Наблюдай со стоп-условиями и лимитом итераций.",
+                description="Цикл оркестрации со стоп-условиями и лимитом итераций.",
                 config_refs=[
                     config_ref(
                         domain="orchestrator_policy",
-                        title="Политика ReAct",
+                        title="Политика оркестрации",
                         item=policy,
                         id_key="policy_id",
-                        view_name="scenarioReact",
+                        view_name="scenarioOrchestration",
                     ),
                 ],
                 metrics=[
@@ -5155,47 +4905,47 @@ class ConfigStore:
                     },
                     {
                         "label": "Ошибок до стопа",
-                        "value": policy.get("consecutive_tool_errors_to_escalate") if policy else "н/д",
+                        "value": policy.get("consecutive_capability_errors_to_escalate") if policy else "н/д",
                     },
                 ] if detail else [],
             ),
             node(
-                "endpoint_contracts",
-                "Контракты endpoint",
+                "capability_contracts",
+                "Capabilities / MCP",
                 x=1090,
                 y=370,
                 node_type="configuration",
-                description="Технические endpoint-операции, которые используются enrichment шагами профилей разрешения.",
+                description="Capability contracts и внешние MCP-окружения, используемые enrichment шагами профилей разрешения.",
                 config_refs=[
                     *[
                         {
-                            "domain": "tools",
-                            "title": "ReAct-вызов",
-                            "id": tool["tool_name"],
-                            "display_name": tool.get("description") or tool["tool_name"],
-                            "view": "reactCalls",
+                            "domain": "capabilities",
+                            "title": "Capability",
+                            "id": capability["capability_id"],
+                            "display_name": capability.get("display_name") or capability["capability_id"],
+                            "view": "capabilities",
                         }
-                        for tool in profile_tools
+                        for capability in profile_capabilities
                     ],
                     *[
                         {
-                            "domain": "integration_endpoints",
-                            "title": "Endpoint",
-                            "id": endpoint["endpoint_id"],
-                            "display_name": endpoint.get("display_name") or endpoint["endpoint_id"],
-                            "view": "integrations",
+                            "domain": "mcp_environments",
+                            "title": "MCP environment",
+                            "id": environment["environment_id"],
+                            "display_name": environment.get("display_name") or environment["environment_id"],
+                            "view": "mcpEnvironments",
                         }
-                        for endpoint in profile_endpoints
+                        for environment in profile_environments
                     ],
                 ],
                 metrics=[
                     {
-                        "label": "Endpoint",
-                        "value": len(profile_endpoints),
+                        "label": "MCP окружений",
+                        "value": len(profile_environments),
                     },
                     {
-                        "label": "ReAct-вызовов",
-                        "value": len(profile_tool_names),
+                        "label": "Capabilities",
+                        "value": len(profile_capability_ids),
                     },
                 ] if detail else [],
             ),
@@ -5274,16 +5024,16 @@ class ConfigStore:
             edge("intake", "slot_filling", "текст обращения"),
             edge("prompt_pack", "slot_filling", "инструкции", edge_type="support"),
             edge("prompt_pack", "classification", "пороги и правила", edge_type="support"),
-            edge("prompt_pack", "react_planning", "ReAct-правила", edge_type="support"),
+            edge("prompt_pack", "orchestration", "правила оркестрации", edge_type="support"),
             edge("interaction_channel", "slot_filling", "доставка вопросов", edge_type="support"),
             edge("slot_filling", "attribute_resolution", "нужны атрибуты"),
             edge("attribute_resolution", "waiting", "вопрос клиенту", condition="не хватает данных", edge_type="support"),
             edge("waiting", "slot_filling", "ответ клиента", condition="возобновить сценарий", edge_type="loop"),
             edge("attribute_resolution", "classification", "слоты готовы"),
-            edge("classification", "react_planning", "маршрут выбран"),
+            edge("classification", "orchestration", "маршрут выбран"),
             edge("classification", "escalation", "эскалация оператору", condition="human review или низкая уверенность"),
-            edge("endpoint_contracts", "attribute_resolution", "enrichment steps", edge_type="support"),
-            edge("react_planning", "decision", "стоп-условие"),
+            edge("capability_contracts", "attribute_resolution", "capability contracts", edge_type="support"),
+            edge("orchestration", "decision", "стоп-условие"),
             edge("decision", "waiting", "ожидать клиента", condition="нет ответа клиента"),
             edge("decision", "closed", "закрыть", condition="success + подтверждение"),
             edge("decision", "escalation", "эскалировать оператору", condition="ошибки, лимит, confidence"),
@@ -5400,254 +5150,231 @@ class ConfigStore:
                 step="1",
                 status="skipped",
                 title=f"Разрешение атрибута: {profile['display_name']}",
-                message="Для профиля не настроено обогащение контекста через ReAct-вызовы.",
+                message="Для профиля не настроено обогащение контекста через capability.",
                 details={"enrichment_steps": 0},
             )
             return {
                 **default_result,
-                "reason": "Обогащение контекста не настроено для выбранного профиля.",
+            "reason": "Обогащение контекста не настроено для выбранного профиля.",
             }
 
-        endpoint_by_id = self._by_id(
-            self.active_payload("integration_endpoints")["endpoints"],
-            "endpoint_id",
+        capability_by_id = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
         )
-        tool_by_name = self._by_id(self.active_payload("tools")["tools"], "tool_name")
-        delivery_defaults = self._n8n_delivery_defaults_by_operation()
+        environment_by_id = self._by_id(
+            self.active_payload("mcp_environments").get("environments", []),
+            "environment_id",
+        )
         enrichment_step_results: dict[str, Any] = {}
         last_step: dict[str, Any] | None = None
         last_mock_output: dict[str, Any] | None = None
-        last_endpoint_id = ""
-        last_operation_id = ""
+        last_capability: dict[str, Any] | None = None
+        last_environment_id = ""
+        last_mcp_tool_name = ""
 
         for step_index, enrichment_step in enumerate(enrichment_steps, start=1):
-            tool_name = enrichment_step.get("react_call")
-            tool = tool_by_name.get(tool_name or "")
-            binding = select_tool_binding(
-                tool,
-                endpoint_id=enrichment_step.get("endpoint_id"),
-                operation_id=enrichment_step.get("operation_id"),
-            )
-            endpoint_id = (binding or {}).get("endpoint_id")
-            operation_id = (binding or {}).get("operation_id")
-            endpoint = endpoint_by_id.get(endpoint_id or "")
-            operation = (endpoint or {}).get("operations", {}).get(operation_id or "")
-            adapter_type = (endpoint or {}).get("adapter_type")
-            launch = self._profile_step_launch(
-                profile=profile,
-                step=enrichment_step,
-                tool_by_name=tool_by_name,
-                endpoint_by_id=endpoint_by_id,
-                delivery_defaults=delivery_defaults,
-            )
-            if not tool or not binding or not endpoint or not operation:
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="blocked",
-                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="ReAct-вызов или его привязка к endpoint-операции не найдены.",
-                    details={"react_call": tool_name, "endpoint_id": endpoint_id, "operation_id": operation_id},
+            if enrichment_step.get("capability_id"):
+                capability_id = enrichment_step.get("capability_id")
+                capability = capability_by_id.get(capability_id or "")
+                binding = self._active_capability_binding_for_step(enrichment_step)
+                environment = environment_by_id.get((binding or {}).get("environment_id") or enrichment_step.get("mcp_environment_id") or "")
+                launch = self._profile_capability_launch(
+                    profile=profile,
+                    step=enrichment_step,
+                    capability_by_id=capability_by_id,
+                    environment_by_id=environment_by_id,
                 )
-                return {
-                    **default_result,
-                    "enrichment_step_results": enrichment_step_results,
-                    "status": "blocked_by_configuration",
-                    "decision": "handoff",
-                    "reason": "ReAct-вызов обогащения контекста или его привязка не найдены.",
-                }
-            parameter_sources = enrichment_step.get("parameter_mapping", {})
-            parameters = resolved_dry_run_parameters(
-                parameter_sources,
-                provided=provided,
-                slot_values=slot_values,
-                enrichment_step_results=enrichment_step_results,
-            )
-            unresolved_step_parameters = [
-                parameter
-                for parameter, source_ref in parameter_sources.items()
-                if str(source_ref).startswith("step:") and parameters.get(parameter) is None
-            ]
-            if unresolved_step_parameters:
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="blocked",
-                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="Не удалось разрешить ссылку на результат предыдущего шага.",
-                    details={
-                        "react_call": tool_name,
-                        "endpoint_id": endpoint_id,
-                        "operation_id": operation_id,
-                        "parameter_sources": parameter_sources,
-                        "unresolved_parameters": unresolved_step_parameters,
-                    },
-                )
-                return {
-                    **default_result,
-                    "enrichment_step_results": enrichment_step_results,
-                    "status": "blocked_by_configuration",
-                    "decision": "handoff",
-                    "reason": (
-                        "Не удалось разрешить параметры из предыдущих шагов: "
-                        f"{', '.join(unresolved_step_parameters)}."
-                    ),
-                }
-            parameters, applied_parameter_defaults = apply_schema_parameter_defaults(
-                tool.get("parameters_schema", {}),
-                parameters,
-            )
-            if adapter_type == "mock" and not simulation_options["allow_mock_integrations"]:
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="skipped",
-                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="Mock-интеграции выключены в выбранном режиме тестового прогона.",
-                    details={
-                        "react_call": tool_name,
-                        "endpoint_id": endpoint_id,
-                        "operation_id": operation_id,
-                        "parameter_sources": parameter_sources,
-                        "parameters": parameters,
-                        "applied_parameter_defaults": applied_parameter_defaults,
-                        "result": {"status": "not_executed", "reason": "Mock-интеграции выключены в выбранном режиме."},
-                    },
-                )
-                return {
-                    **default_result,
-                    "enrichment_step_results": enrichment_step_results,
-                    "reason": "Mock-интеграции выключены в выбранном режиме тестового прогона.",
-                }
-            if adapter_type != "mock" and not simulation_options["allow_readonly_integrations"]:
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="skipped",
-                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="Внешние read-only интеграции выключены в выбранном режиме тестового прогона.",
-                    details={
-                        "react_call": tool_name,
-                        "endpoint_id": endpoint_id,
-                        "operation_id": operation_id,
-                        "parameter_sources": parameter_sources,
-                        "parameters": parameters,
-                        "applied_parameter_defaults": applied_parameter_defaults,
-                        "result": {"status": "not_executed", "reason": "Read-only интеграции выключены в выбранном режиме."},
-                    },
-                )
-                return {
-                    **default_result,
-                    "enrichment_step_results": enrichment_step_results,
-                    "reason": "Внешние read-only интеграции выключены в выбранном режиме тестового прогона.",
-                }
-
-            mock_output = copy.deepcopy(operation.get("mock_output") or {})
-            if not mock_output:
-                if simulation_options.get("run_mode") == "operator_full_debug":
-                    step_id = enrichment_step.get("step_id") or f"step{step_index}"
-                    enrichment_step_results[step_id] = {
-                        "step_id": step_id,
-                        "step_name": enrichment_step.get("step_name"),
-                        "react_call": tool_name,
-                        "endpoint_id": endpoint_id,
-                        "operation_id": operation_id,
-                        "parameters": parameters,
-                        "applied_parameter_defaults": applied_parameter_defaults,
-                        "result": {
-                            "status": "ready_for_execution",
-                            "reason": "Операция будет выполнена при анализе заявки.",
-                        },
-                        "completion_policy": launch.get("completion_policy"),
-                    }
+                if not capability or not binding or not environment:
                     append_trace(
                         execution_trace,
                         step="1",
-                        status="ready",
+                        status="blocked",
                         title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                        message="Тестовый ответ операции не задан; в полном отладочном прогоне ReAct-вызов будет выполнен реально.",
+                        message="Capability, MCP binding или MCP-окружение не найдены.",
                         details={
-                            "step_index": step_index,
-                            "step_id": step_id,
-                            "react_call": tool_name,
-                            "endpoint_id": endpoint_id,
-                            "operation_id": operation_id,
-                            "completion_policy": launch.get("completion_policy"),
-                            "parameter_sources": parameter_sources,
-                            "parameters": parameters,
-                            "applied_parameter_defaults": applied_parameter_defaults,
-                            "result": enrichment_step_results[step_id]["result"],
+                            "capability_id": capability_id,
+                            "mcp_environment_id": enrichment_step.get("mcp_environment_id"),
+                            "binding_exists": bool(binding),
+                            "environment_exists": bool(environment),
                         },
                     )
                     return {
                         **default_result,
                         "enrichment_step_results": enrichment_step_results,
-                        "status": "pending_live_execution",
-                        "decision": "execute_react_call",
-                        "reason": "Операция будет выполнена при анализе заявки.",
+                        "status": "blocked_by_configuration",
+                        "decision": "handoff",
+                        "reason": "Capability, MCP binding или MCP-окружение шага обогащения не найдены.",
                     }
-                append_trace(
-                    execution_trace,
-                    step="1",
-                    status="blocked",
-                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
-                    message="В режиме проверки без выполнения нужен тестовый ответ операции.",
-                    details={
-                        "react_call": tool_name,
-                        "endpoint_id": endpoint_id,
-                        "operation_id": operation_id,
-                        "parameter_sources": parameter_sources,
-                        "parameters": parameters,
-                        "applied_parameter_defaults": applied_parameter_defaults,
-                        "result": {
-                            "status": "not_executed",
-                            "reason": "В режиме проверки без выполнения нужен тестовый ответ операции.",
-                        },
-                    },
+                parameter_sources = enrichment_step.get("input_mapping", {})
+                parameters = resolved_dry_run_parameters(
+                    parameter_sources,
+                    provided=provided,
+                    slot_values=slot_values,
+                    enrichment_step_results=enrichment_step_results,
                 )
-                return {
-                    **default_result,
-                    "enrichment_step_results": enrichment_step_results,
-                    "status": "blocked_by_configuration",
-                    "decision": "handoff",
-                    "reason": "В режиме проверки без выполнения нужен тестовый ответ операции.",
-                }
+                unresolved_step_parameters = [
+                    parameter
+                    for parameter, source_ref in parameter_sources.items()
+                    if str(source_ref).startswith("step:") and parameters.get(parameter) is None
+                ]
+                if unresolved_step_parameters:
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="blocked",
+                        title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                        message="Не удалось разрешить ссылку на результат предыдущего шага.",
+                        details={
+                            "capability_id": capability_id,
+                            "parameter_sources": parameter_sources,
+                            "unresolved_parameters": unresolved_step_parameters,
+                        },
+                    )
+                    return {
+                        **default_result,
+                        "enrichment_step_results": enrichment_step_results,
+                        "status": "blocked_by_configuration",
+                        "decision": "handoff",
+                        "reason": (
+                            "Не удалось разрешить параметры capability из предыдущих шагов: "
+                            f"{', '.join(unresolved_step_parameters)}."
+                        ),
+                    }
+                parameters, applied_parameter_defaults = apply_schema_parameter_defaults(
+                    capability.get("input_schema", {}),
+                    parameters,
+                )
+                mock_output = copy.deepcopy(
+                    ((binding.get("extensions") or {}).get("mock_output"))
+                    or ((capability.get("extensions") or {}).get("mock_output"))
+                    or {}
+                )
+                step_id = enrichment_step.get("step_id") or f"step{step_index}"
+                if not mock_output:
+                    if simulation_options.get("run_mode") == "operator_full_debug":
+                        enrichment_step_results[step_id] = {
+                            "step_id": step_id,
+                            "step_name": enrichment_step.get("step_name"),
+                            "capability_id": capability_id,
+                            "mcp_environment_id": environment.get("environment_id"),
+                            "mcp_tool_name": binding.get("mcp_tool_name"),
+                            "execution_mode": binding.get("execution_mode"),
+                            "parameters": parameters,
+                            "applied_parameter_defaults": applied_parameter_defaults,
+                            "result": {
+                                "status": "ready_for_execution",
+                                "reason": "Capability будет выполнена внешним MCP при анализе заявки.",
+                            },
+                            "completion_policy": launch.get("completion_policy"),
+                        }
+                        append_trace(
+                            execution_trace,
+                            step="1",
+                            status="ready",
+                            title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                            message="Тестовый ответ capability не задан; в полном отладочном прогоне будет вызвано внешнее MCP-окружение.",
+                            details={
+                                "step_index": step_index,
+                                "step_id": step_id,
+                                "capability_id": capability_id,
+                                "mcp_environment_id": environment.get("environment_id"),
+                                "mcp_tool_name": binding.get("mcp_tool_name"),
+                                "execution_mode": binding.get("execution_mode"),
+                                "completion_policy": launch.get("completion_policy"),
+                                "parameter_sources": parameter_sources,
+                                "parameters": parameters,
+                                "applied_parameter_defaults": applied_parameter_defaults,
+                                "result": enrichment_step_results[step_id]["result"],
+                            },
+                        )
+                        return {
+                            **default_result,
+                            "enrichment_step_results": enrichment_step_results,
+                            "status": "pending_live_execution",
+                            "decision": "execute_capability",
+                            "reason": "Capability будет выполнена внешним MCP при анализе заявки.",
+                        }
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="blocked",
+                        title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                        message="В режиме проверки без выполнения нужен тестовый ответ capability.",
+                        details={
+                            "capability_id": capability_id,
+                            "mcp_environment_id": environment.get("environment_id"),
+                            "parameter_sources": parameter_sources,
+                            "parameters": parameters,
+                            "applied_parameter_defaults": applied_parameter_defaults,
+                            "result": {
+                                "status": "not_executed",
+                                "reason": "В режиме проверки без выполнения нужен тестовый ответ capability.",
+                            },
+                        },
+                    )
+                    return {
+                        **default_result,
+                        "enrichment_step_results": enrichment_step_results,
+                        "status": "blocked_by_configuration",
+                        "decision": "handoff",
+                        "reason": "В режиме проверки без выполнения нужен тестовый ответ capability.",
+                    }
 
-            step_id = enrichment_step.get("step_id") or f"step{step_index}"
-            enrichment_step_results[step_id] = {
-                "step_id": step_id,
-                "step_name": enrichment_step.get("step_name"),
-                "react_call": tool_name,
-                "endpoint_id": endpoint_id,
-                "operation_id": operation_id,
-                "parameters": parameters,
-                "applied_parameter_defaults": applied_parameter_defaults,
-                "result": mock_output,
-                "completion_policy": launch.get("completion_policy"),
-            }
-            append_trace(
-                execution_trace,
-                step="1",
-                status="completed",
-                title=f"Обогащение контекста: {enrichment_step.get('step_name') or step_id}",
-                message=f"ReAct-вызов {tool_name} выполнил шаг {step_id}.",
-                details={
-                    "step_index": step_index,
+                enrichment_step_results[step_id] = {
                     "step_id": step_id,
-                    "react_call": tool_name,
-                    "endpoint_id": endpoint_id,
-                    "operation_id": operation_id,
-                    "completion_policy": launch.get("completion_policy"),
-                    "parameter_sources": parameter_sources,
+                    "step_name": enrichment_step.get("step_name"),
+                    "capability_id": capability_id,
+                    "mcp_environment_id": environment.get("environment_id"),
+                    "mcp_tool_name": binding.get("mcp_tool_name"),
+                    "execution_mode": binding.get("execution_mode"),
                     "parameters": parameters,
                     "applied_parameter_defaults": applied_parameter_defaults,
                     "result": mock_output,
-                },
+                    "completion_policy": launch.get("completion_policy"),
+                }
+                append_trace(
+                    execution_trace,
+                    step="1",
+                    status="completed",
+                    title=f"Обогащение контекста: {enrichment_step.get('step_name') or step_id}",
+                    message=f"Capability {capability_id} выполнила шаг {step_id}.",
+                    details={
+                        "step_index": step_index,
+                        "step_id": step_id,
+                        "capability_id": capability_id,
+                        "mcp_environment_id": environment.get("environment_id"),
+                        "mcp_tool_name": binding.get("mcp_tool_name"),
+                        "execution_mode": binding.get("execution_mode"),
+                        "completion_policy": launch.get("completion_policy"),
+                        "parameter_sources": parameter_sources,
+                        "parameters": parameters,
+                        "applied_parameter_defaults": applied_parameter_defaults,
+                        "result": mock_output,
+                    },
+                )
+                last_step = enrichment_step
+                last_mock_output = mock_output
+                last_capability = capability
+                last_environment_id = environment.get("environment_id") or ""
+                last_mcp_tool_name = binding.get("mcp_tool_name") or ""
+                continue
+
+            append_trace(
+                execution_trace,
+                step="1",
+                status="blocked",
+                title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                message="Старый operation binding удален; настройте шаг через capability.",
+                details={"step_id": enrichment_step.get("step_id")},
             )
-            last_step = enrichment_step
-            last_mock_output = mock_output
-            last_endpoint_id = endpoint_id or ""
-            last_operation_id = operation_id or ""
+            return {
+                **default_result,
+                "enrichment_step_results": enrichment_step_results,
+                "status": "blocked_by_configuration",
+                "decision": "handoff",
+                "reason": "Старый operation binding удален; используйте capability_id/input_mapping/output_mapping.",
+            }
 
         if not last_step or last_mock_output is None:
             append_trace(
@@ -5666,12 +5393,15 @@ class ConfigStore:
                 "reason": "Обогащение контекста не вернуло результата.",
             }
 
-        last_tool = tool_by_name.get(last_step.get("react_call") or "")
-        count, result_item, result_summary = operation_response_items(
-            last_mock_output,
-            (last_tool or {}).get("result_schema"),
-            [],
-        )
+        count = 1
+        result_item = last_mock_output
+        result_summary = {
+            "result_type": "object",
+            "result_path": None,
+            "object_found": True,
+            "source_status": "mock_output",
+            "source_kind": "capability",
+        }
         if result_summary.get("source_status") == "configuration_error":
             append_trace(
                 execution_trace,
@@ -5693,11 +5423,15 @@ class ConfigStore:
                 "result_summary": result_summary,
                 "reason": result_summary.get("reason") or "Контракт результата операции неоднозначен.",
             }
-        precomputed_output_values, output_resolution_summary = resolved_output_rule_values(
-            profile=profile,
-            enrichment_step_results=enrichment_step_results,
-            tool_by_name=tool_by_name,
-        )
+        precomputed_output_values = {
+            slot_id: value_at_path(last_mock_output, field_path)
+            for slot_id, field_path in (last_step.get("output_mapping") or {}).items()
+        }
+        output_resolution_summary = {
+            "source_status": "mock_output",
+            "source_kind": "capability",
+            "output_mapping": copy.deepcopy(last_step.get("output_mapping") or {}),
+        }
         if output_resolution_summary.get("source_status") == "configuration_error":
             reason = "; ".join(output_resolution_summary.get("errors") or []) or "Не удалось разрешить источники выходных слотов."
             append_trace(
@@ -5796,7 +5530,9 @@ class ConfigStore:
             "result_summary": {
                 **result_summary,
                 "count": count,
-                "source": f"{last_endpoint_id}/{last_operation_id}",
+                "source": f"{last_capability.get('capability_id')}/{last_environment_id}/{last_mcp_tool_name}"
+                if last_capability
+                else "",
             },
             "reason": reason,
         }
@@ -6453,7 +6189,8 @@ class ConfigStore:
         resolution_pending_live = [
             item
             for item in resolution_steps
-            if item.get("status") == "pending_live_execution" or item.get("decision") == "execute_react_call"
+            if item.get("status") == "pending_live_execution"
+            or item.get("decision") == "execute_capability"
         ]
         blocking_configuration = any(
             item.get("unknown_required_slots")
@@ -6476,7 +6213,7 @@ class ConfigStore:
         elif any(item.get("status") == "approval_required" for item in ready_launches):
             final_decision = "waiting_operator_approval"
         else:
-            final_decision = "ready_for_react"
+            final_decision = "ready_for_capability"
         client_question = {
             "required": bool(next_question),
             "question": next_question,
@@ -6498,7 +6235,7 @@ class ConfigStore:
         operator_escalation_reason = None
         if operator_escalation_required:
             if final_decision == "blocked_by_configuration":
-                operator_escalation_reason = "Конфигурация или параметры ReAct-вызова не позволяют продолжить автообработку."
+                operator_escalation_reason = "Конфигурация или параметры capability не позволяют продолжить автообработку."
             elif final_decision == "operator_handoff":
                 operator_escalation_reason = "Профиль разрешения слота настроен на эскалацию оператору."
             elif classification.get("decision_level") == "human_required":
@@ -6605,11 +6342,14 @@ class ConfigStore:
     ) -> dict[str, Any]:
         self._require_domain(domain)
         now = utc_now()
+        draft_payload = copy.deepcopy(payload)
+        if domain == "attribute_resolution_profiles":
+            draft_payload = self._normalize_payload(domain, draft_payload)
         draft = {
             "schema_version": "1.0",
             "draft_id": new_draft_id(),
             "domain": domain,
-            "payload": copy.deepcopy(payload),
+            "payload": draft_payload,
             "status": "draft",
             "created_by": created_by,
             "created_at": now,
@@ -6648,6 +6388,8 @@ class ConfigStore:
 
     def validate_draft(self, draft_id: str) -> dict[str, Any]:
         draft = self.require_draft(draft_id)
+        if draft.get("domain") == "attribute_resolution_profiles":
+            draft["payload"] = self._normalize_payload("attribute_resolution_profiles", draft["payload"])
         if self.is_scoped_attribute_resolution_profile_draft(draft):
             validation = self._validate_scoped_attribute_resolution_profile_draft(draft)
         else:
@@ -8070,9 +7812,31 @@ class ConfigStore:
 
     @staticmethod
     def _pre_validate_payload(domain: str, payload: dict[str, Any]) -> list[str]:
-        if domain != "interaction_channels" or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
             return []
         errors: list[str] = []
+        if domain == "capabilities":
+            for index, capability in enumerate(payload.get("capabilities") or [], start=1):
+                if not isinstance(capability, dict):
+                    continue
+                capability_id = str(capability.get("capability_id") or f"capabilities[{index}]")
+                async_contracts = capability.get("async_event_contracts") or {}
+                if isinstance(async_contracts, dict):
+                    for event_type in async_contracts:
+                        if not EXTERNAL_EVENT_TYPE_RE.match(str(event_type)):
+                            errors.append(
+                                f"{capability_id} async_event_contracts.{event_type} несовместим с ExternalEvent.event_type."
+                            )
+                policy = capability.get("default_completion_policy") or {}
+                expected_event_type = policy.get("expected_event_type") if isinstance(policy, dict) else None
+                if expected_event_type and not EXTERNAL_EVENT_TYPE_RE.match(str(expected_event_type)):
+                    errors.append(
+                        f"{capability_id} default_completion_policy.expected_event_type={expected_event_type} "
+                        "несовместим с ExternalEvent.event_type."
+                    )
+            return errors
+        if domain != "interaction_channels":
+            return errors
         channels = payload.get("channels")
         if not isinstance(channels, list):
             return errors
@@ -8246,22 +8010,22 @@ class ConfigStore:
         return draft
 
     def _cross_validate(self, domain: str, payload: dict[str, Any]) -> list[str]:
-        if domain == "tools":
-            return self._validate_tool_catalog(payload)
-        if domain == "integration_endpoints":
-            return self._validate_integration_endpoint_catalog(payload)
         if domain == "workflow_states":
             return self._validate_workflow_state_catalog(payload)
         if domain == "workflow_transitions":
             return self._validate_workflow_transition_rules(payload)
         if domain == "prompts":
             return self._validate_prompt_catalog(payload)
-        if domain == "n8n_workflows":
-            return self._validate_n8n_workflow_catalog(payload)
         if domain == "interaction_channels":
             return self._validate_interaction_channels(payload)
         if domain == "attribute_resolution_profiles":
             return self._validate_attribute_resolution_profiles(payload)
+        if domain == "capabilities":
+            return self._validate_capability_catalog(payload)
+        if domain == "mcp_environments":
+            return self._validate_mcp_environment_catalog(payload)
+        if domain == "capability_bindings":
+            return self._validate_capability_binding_catalog(payload)
         if domain == "model_routing":
             return self._validate_model_routing(payload)
         if domain == "service_scenarios":
@@ -8278,377 +8042,211 @@ class ConfigStore:
             return self._validate_escalation_policies(payload)
         return []
 
-    def _validate_tool_catalog(self, payload: dict[str, Any]) -> list[str]:
-        errors = []
-        endpoint_catalog = self.active_payload("integration_endpoints")
-        endpoint_by_id = {
-            endpoint["endpoint_id"]: endpoint
-            for endpoint in endpoint_catalog["endpoints"]
-        }
-        tool_names = [tool["tool_name"] for tool in payload["tools"]]
-        for tool_name in self._duplicates(tool_names):
-            errors.append(f"Дублируется tool_name: {tool_name}")
+    def _validate_json_schema_field(self, owner: str, schema_key: str, schema: Any) -> list[str]:
+        if not isinstance(schema, dict):
+            return [f"{owner} {schema_key} должна быть JSON Schema object."]
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as error:
+            return [f"{owner} {schema_key} невалидна: {error.message}"]
+        return []
 
-        for tool in payload["tools"]:
-            tool_name = tool["tool_name"]
-            if tool.get("contract_status") == "broken":
-                refs = tool_usage_refs(
-                    tool_name,
-                    self.active_payload("attribute_resolution_profiles"),
-                    self.active_payload("interaction_channels"),
-                )
-                if refs:
-                    errors.append(f"{tool_name} имеет contract_status=broken и используется: {', '.join(refs)}.")
-            for schema_key in ("parameters_schema", "result_schema"):
-                try:
-                    Draft202012Validator.check_schema(tool[schema_key])
-                except SchemaError as error:
-                    errors.append(f"{tool_name} {schema_key} невалидна: {error.message}")
-            binding_keys = [
-                f"{binding['endpoint_id']}::{binding['operation_id']}"
-                for binding in tool["endpoint_bindings"]
-            ]
-            for binding_key in self._duplicates(binding_keys):
-                errors.append(f"{tool_name} содержит дублирующуюся привязку endpoint/operation: {binding_key}")
-            for binding in tool["endpoint_bindings"]:
-                endpoint = endpoint_by_id.get(binding["endpoint_id"])
-                if not endpoint:
+    def _validate_capability_catalog(self, payload: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        capability_ids = [capability["capability_id"] for capability in payload.get("capabilities", [])]
+        errors.extend(
+            f"Дублируется capability_id: {capability_id}"
+            for capability_id in self._duplicates(capability_ids)
+        )
+        for capability in payload.get("capabilities", []):
+            capability_id = capability["capability_id"]
+            for schema_key in ("input_schema", "output_schema", "diagnostic_schema"):
+                errors.extend(self._validate_json_schema_field(capability_id, schema_key, capability.get(schema_key)))
+            async_contracts = capability.get("async_event_contracts") or {}
+            if "async" in set(capability.get("execution_modes") or []) and not async_contracts:
+                errors.append(f"{capability_id} поддерживает async, но не содержит async_event_contracts.")
+            for event_type in async_contracts:
+                if not EXTERNAL_EVENT_TYPE_RE.match(str(event_type)):
                     errors.append(
-                        f"{tool_name} ссылается на неизвестный endpoint_id: {binding['endpoint_id']}"
+                        f"{capability_id} async_event_contracts.{event_type} несовместим с ExternalEvent.event_type."
                     )
-                    continue
-                if binding["operation_id"] not in endpoint["operations"]:
+            policy = capability.get("default_completion_policy") or {}
+            if policy.get("mode") == "external_event":
+                expected_event_type = policy.get("expected_event_type")
+                if not expected_event_type:
+                    errors.append(f"{capability_id} default_completion_policy.external_event требует expected_event_type.")
+                elif not EXTERNAL_EVENT_TYPE_RE.match(str(expected_event_type)):
                     errors.append(
-                        f"{tool_name} ссылается на неизвестный operation_id {binding['operation_id']} "
-                        f"для endpoint {binding['endpoint_id']}"
+                        f"{capability_id} default_completion_policy.expected_event_type={expected_event_type} "
+                        "несовместим с ExternalEvent.event_type."
                     )
-                    continue
-                operation = endpoint["operations"][binding["operation_id"]]
-                errors.extend(self._validate_binding_parameter_mapping(tool, binding, operation))
-        errors.extend(self._validate_tool_catalog_usage(payload))
+                elif expected_event_type not in async_contracts:
+                    errors.append(
+                        f"{capability_id} default_completion_policy.expected_event_type={expected_event_type} "
+                        "не найден в async_event_contracts."
+                    )
+            for event_type, async_contract in async_contracts.items():
+                if "success" not in set(async_contract.get("statuses") or []):
+                    errors.append(f"{capability_id}/{event_type} должен разрешать status=success.")
+                for schema_key in ("result_schema", "progress_schema", "error_schema"):
+                    schema = async_contract.get(schema_key)
+                    if schema:
+                        errors.extend(
+                            self._validate_json_schema_field(
+                                f"{capability_id}/{event_type}",
+                                schema_key,
+                                schema,
+                            )
+                        )
         return errors
+
+    def _validate_mcp_environment_catalog(self, payload: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        capability_ids = {
+            capability["capability_id"]
+            for capability in self.active_payload("capabilities").get("capabilities", [])
+        }
+        environment_ids = [environment["environment_id"] for environment in payload.get("environments", [])]
+        errors.extend(
+            f"Дублируется environment_id: {environment_id}"
+            for environment_id in self._duplicates(environment_ids)
+        )
+        for environment in payload.get("environments", []):
+            environment_id = environment["environment_id"]
+            tier = environment.get("environment_tier")
+            auth_mode = environment.get("auth_mode")
+            if tier == "prod" and auth_mode not in {"oidc_client_credentials", "oidc_workload_identity"}:
+                errors.append(f"{environment_id} prod MCP должен использовать OIDC auth_mode.")
+            if tier in {"staging", "prod"} and auth_mode == "dev_bearer_token":
+                errors.append(f"{environment_id} {tier} MCP не может использовать dev_bearer_token.")
+            if auth_mode in {"oidc_client_credentials", "oidc_workload_identity"} and not environment.get("oidc_audience"):
+                errors.append(f"{environment_id} OIDC MCP требует oidc_audience.")
+            if environment.get("transport") == "stdio" and environment.get("status") == "active":
+                errors.append(f"{environment_id} active external MCP не должен использовать stdio transport.")
+            health_check = environment.get("health_check") or {}
+            if health_check.get("mode") == "http_get" and not health_check.get("path"):
+                errors.append(f"{environment_id} health_check.mode=http_get требует path.")
+            for capability_id in environment.get("allowed_capabilities") or []:
+                if capability_id not in capability_ids:
+                    errors.append(f"{environment_id} ссылается на неизвестную capability: {capability_id}.")
+        return errors
+
+    def _validate_capability_binding_catalog(self, payload: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        capabilities = {
+            capability["capability_id"]: capability
+            for capability in self.active_payload("capabilities").get("capabilities", [])
+        }
+        environments = {
+            environment["environment_id"]: environment
+            for environment in self.active_payload("mcp_environments").get("environments", [])
+        }
+        binding_ids = [binding["binding_id"] for binding in payload.get("bindings", [])]
+        errors.extend(
+            f"Дублируется binding_id: {binding_id}"
+            for binding_id in self._duplicates(binding_ids)
+        )
+        active_pairs: set[tuple[str, str]] = set()
+        required_async_context = {
+            "case_id",
+            "run_id",
+            "wait_id",
+            "correlation_id",
+            "capability_id",
+            "contract_version",
+            "expected_event_type",
+            "idempotency_key_base",
+        }
+        for binding in payload.get("bindings", []):
+            binding_id = binding["binding_id"]
+            capability_id = binding["capability_id"]
+            environment_id = binding["environment_id"]
+            capability = capabilities.get(capability_id)
+            environment = environments.get(environment_id)
+            if not capability:
+                errors.append(f"{binding_id} ссылается на неизвестную capability: {capability_id}.")
+                continue
+            if not environment:
+                errors.append(f"{binding_id} ссылается на неизвестное MCP-окружение: {environment_id}.")
+                continue
+            if binding["execution_mode"] not in set(capability.get("execution_modes") or []):
+                errors.append(
+                    f"{binding_id} execution_mode={binding['execution_mode']} не разрешен capability {capability_id}."
+                )
+            allowed_capabilities = set(environment.get("allowed_capabilities") or [])
+            if allowed_capabilities and capability_id not in allowed_capabilities:
+                errors.append(f"{binding_id} capability {capability_id} не разрешена для {environment_id}.")
+            if binding.get("status") == "active":
+                if capability.get("status") != "active":
+                    errors.append(f"{binding_id} active binding требует active capability {capability_id}.")
+                if environment.get("status") != "active":
+                    errors.append(f"{binding_id} active binding требует active MCP-окружение {environment_id}.")
+                pair = (capability_id, binding["execution_mode"])
+                if pair in active_pairs:
+                    errors.append(
+                        f"Для {capability_id}/{binding['execution_mode']} найдено больше одной active binding."
+                    )
+                active_pairs.add(pair)
+            required_inputs = set(schema_required(capability.get("input_schema") or {}))
+            missing_inputs = sorted(required_inputs - set((binding.get("input_mapping") or {}).keys()))
+            if missing_inputs:
+                errors.append(
+                    f"{binding_id} input_mapping не покрывает required inputs capability {capability_id}: "
+                    f"{', '.join(missing_inputs)}."
+                )
+            unknown_inputs = sorted(
+                field
+                for field in (binding.get("input_mapping") or {})
+                if not schema_allows_mapping_path(capability.get("input_schema") or {}, field)
+            )
+            if unknown_inputs:
+                errors.append(
+                    f"{binding_id} input_mapping ссылается на неизвестные inputs capability {capability_id}: "
+                    f"{', '.join(unknown_inputs)}."
+                )
+            required_outputs = set(schema_required(capability.get("output_schema") or {}))
+            missing_outputs = sorted(required_outputs - set((binding.get("output_mapping") or {}).keys()))
+            if missing_outputs:
+                errors.append(
+                    f"{binding_id} output_mapping не покрывает required outputs capability {capability_id}: "
+                    f"{', '.join(missing_outputs)}."
+                )
+            unknown_outputs = sorted(
+                field
+                for field in (binding.get("output_mapping") or {})
+                if not schema_allows_mapping_path(capability.get("output_schema") or {}, field)
+            )
+            if unknown_outputs:
+                errors.append(
+                    f"{binding_id} output_mapping ссылается на неизвестные outputs capability {capability_id}: "
+                    f"{', '.join(unknown_outputs)}."
+                )
+            if binding["execution_mode"] == "async":
+                missing_context = sorted(required_async_context - set((binding.get("async_context_mapping") or {}).keys()))
+                if missing_context:
+                    errors.append(
+                        f"{binding_id} async_context_mapping не покрывает обязательные поля: "
+                        f"{', '.join(missing_context)}."
+                    )
+                policy = capability.get("default_completion_policy") or {}
+                expected_event_type = policy.get("expected_event_type")
+                if expected_event_type and expected_event_type not in (capability.get("async_event_contracts") or {}):
+                    errors.append(
+                        f"{binding_id} expected_event_type={expected_event_type} отсутствует в capability contract."
+                    )
+        return errors
+
+    def _validate_tool_catalog(self, payload: dict[str, Any]) -> list[str]:
+        _ = payload
+        return ["tool_catalog удален; используйте capabilities и capability_bindings."]
 
     def _validate_integration_endpoint_catalog(self, payload: dict[str, Any]) -> list[str]:
-        endpoint_ids = [endpoint["endpoint_id"] for endpoint in payload["endpoints"]]
-        errors = [f"Дублируется endpoint_id: {endpoint_id}" for endpoint_id in self._duplicates(endpoint_ids)]
-        endpoint_by_id = {
-            endpoint["endpoint_id"]: endpoint
-            for endpoint in payload["endpoints"]
-        }
-        for endpoint in payload["endpoints"]:
-            if endpoint.get("enabled") and endpoint.get("adapter_type") not in {"mock", "n8n_webhook"}:
-                errors.append(
-                    f"{endpoint['endpoint_id']} adapter_type={endpoint['adapter_type']} пока не исполняется; "
-                    "включенными могут быть только mock или n8n_webhook."
-                )
-            transport_security = endpoint_transport_security(endpoint)
-            if contains_transport_delivery_selector(transport_security):
-                errors.append(
-                    f"{endpoint['endpoint_id']} transport_security описывает защиту транспорта и не должен "
-                    "содержать selected_transport или result_transport."
-                )
-            if endpoint.get("adapter_type") == "n8n_webhook":
-                http_security = transport_security.get("http") if isinstance(transport_security, dict) else {}
-                kafka_security = transport_security.get("kafka") if isinstance(transport_security, dict) else {}
-                if not isinstance(http_security, dict) or not http_security:
-                    errors.append(f"{endpoint['endpoint_id']} n8n_webhook должен содержать transport_security.http.")
-                else:
-                    if http_security.get("policy") not in {"admin_configured", "credential_configured"}:
-                        errors.append(
-                            f"{endpoint['endpoint_id']} transport_security.http.policy должен быть "
-                            "admin_configured или credential_configured."
-                        )
-                    if http_security.get("production_recommended_scheme") != "https":
-                        errors.append(
-                            f"{endpoint['endpoint_id']} transport_security.http.production_recommended_scheme "
-                            "должен быть https."
-                        )
-                if not isinstance(kafka_security, dict) or not kafka_security:
-                    errors.append(f"{endpoint['endpoint_id']} n8n_webhook должен содержать transport_security.kafka.")
-                else:
-                    if kafka_security.get("policy") not in {"admin_configured", "credential_configured"}:
-                        errors.append(
-                            f"{endpoint['endpoint_id']} transport_security.kafka.policy должен быть "
-                            "admin_configured или credential_configured."
-                        )
-                    protocols = set(kafka_security.get("supported_security_protocols") or [])
-                    if not {"SASL_SSL", "SSL"}.issubset(protocols):
-                        errors.append(
-                            f"{endpoint['endpoint_id']} transport_security.kafka.supported_security_protocols "
-                            "должен включать SASL_SSL и SSL."
-                        )
-                    auth = set(kafka_security.get("supported_auth") or [])
-                    if not {"sasl", "mtls"}.issubset(auth):
-                        errors.append(
-                            f"{endpoint['endpoint_id']} transport_security.kafka.supported_auth "
-                            "должен включать sasl и mtls."
-                        )
-            contract_source = endpoint.get("contract_source") or {}
-            if contract_source.get("enabled") and endpoint.get("adapter_type") != "n8n_webhook":
-                errors.append(
-                    f"{endpoint['endpoint_id']} содержит активный contract_source; "
-                    "импорт OpenAPI поддерживается только для adapter_type=n8n_webhook."
-                )
-            for operation_id, operation in endpoint["operations"].items():
-                if operation.get("contract_status") == "broken":
-                    refs = endpoint_operation_usage_refs(
-                        endpoint["endpoint_id"],
-                        operation_id,
-                        self.active_payload("tools"),
-                        self.active_payload("n8n_workflows"),
-                    )
-                    if refs:
-                        errors.append(
-                            f"{endpoint['endpoint_id']}/{operation_id} имеет contract_status=broken "
-                            f"и используется: {', '.join(refs)}."
-                        )
-                try:
-                    Draft202012Validator.check_schema(operation["request_schema"])
-                except SchemaError as error:
-                    errors.append(
-                        f"{endpoint['endpoint_id']}/{operation_id} request_schema невалидна: {error.message}"
-                    )
-                try:
-                    Draft202012Validator.check_schema(operation["response_schema"])
-                except SchemaError as error:
-                    errors.append(
-                        f"{endpoint['endpoint_id']}/{operation_id} response_schema невалидна: {error.message}"
-                    )
-                async_contracts = operation.get("async_event_contracts") or {}
-                for event_type, async_contract in async_contracts.items():
-                    if async_contract.get("contract_status") == "broken":
-                        refs = endpoint_operation_async_usage_refs(
-                            endpoint["endpoint_id"],
-                            operation_id,
-                            event_type,
-                            self.active_payload("attribute_resolution_profiles"),
-                        )
-                        if refs:
-                            errors.append(
-                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} имеет "
-                                f"contract_status=broken и используется: {', '.join(refs)}."
-                            )
-                    for schema_key in ("result_schema", "progress_schema", "error_schema"):
-                        schema = async_contract.get(schema_key)
-                        if not schema:
-                            continue
-                        try:
-                            Draft202012Validator.check_schema(schema)
-                        except SchemaError as error:
-                            errors.append(
-                                f"{endpoint['endpoint_id']}/{operation_id}/{event_type} "
-                                f"{schema_key} невалидна: {error.message}"
-                            )
-                if operation.get("mock_output") is not None:
-                    validator = Draft202012Validator(operation["response_schema"])
-                    for error in validator.iter_errors(operation["mock_output"]):
-                        errors.append(
-                            f"{endpoint['endpoint_id']}/{operation_id} mock_output не соответствует response_schema: "
-                            f"{error.message}"
-                        )
-                for example in operation.get("mock_examples", []):
-                    validator = Draft202012Validator(operation["response_schema"])
-                    for error in validator.iter_errors(example.get("response_example", {})):
-                        errors.append(
-                            f"{endpoint['endpoint_id']}/{operation_id} mock_example "
-                            f"{example.get('example_id')} не соответствует response_schema: {error.message}"
-                        )
-        for tool in self.active_payload("tools")["tools"]:
-            for binding in tool["endpoint_bindings"]:
-                endpoint = endpoint_by_id.get(binding["endpoint_id"])
-                if not endpoint:
-                    errors.append(
-                        f"{tool['tool_name']} ссылается на отсутствующий endpoint_id: {binding['endpoint_id']}"
-                    )
-                    continue
-                if binding["operation_id"] not in endpoint["operations"]:
-                    errors.append(
-                        f"{tool['tool_name']} ссылается на отсутствующую operation "
-                        f"{binding['operation_id']} для endpoint {binding['endpoint_id']}"
-                    )
-                    continue
-                errors.extend(
-                    self._validate_binding_parameter_mapping(
-                        tool,
-                        binding,
-                        endpoint["operations"][binding["operation_id"]],
-                    )
-                )
-        for workflow in self.active_payload("n8n_workflows")["workflows"]:
-            endpoint = endpoint_by_id.get(workflow["endpoint_id"])
-            if not endpoint:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на отсутствующий endpoint_id: "
-                    f"{workflow['endpoint_id']}"
-                )
-            else:
-                for operation_id in workflow.get("operations", []):
-                    if operation_id not in endpoint["operations"]:
-                        errors.append(
-                            f"Workflow n8n {workflow['workflow_id']} ссылается на отсутствующую operation "
-                            f"{operation_id} для endpoint {workflow['endpoint_id']}"
-                        )
-            callback_endpoint_id = workflow.get("callback_endpoint_id")
-            if callback_endpoint_id and callback_endpoint_id not in endpoint_by_id:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на отсутствующий callback_endpoint_id: "
-                    f"{callback_endpoint_id}"
-                )
-        return errors
-
-    @staticmethod
-    def _validate_binding_parameter_mapping(
-        tool: dict[str, Any],
-        binding: dict[str, Any],
-        operation: dict[str, Any],
-    ) -> list[str]:
-        errors = []
-        tool_name = tool["tool_name"]
-        operation_id = binding.get("operation_id")
-        endpoint_id = binding.get("endpoint_id")
-        mapping = binding.get("parameter_mapping", {})
-        if not isinstance(mapping, dict):
-            return [f"{tool_name}/{endpoint_id}/{operation_id} parameter_mapping должен быть object."]
-
-        operation_schema = operation.get("request_schema", default_request_schema())
-        operation_properties = schema_properties(operation_schema)
-        operation_required = schema_required(operation_schema)
-        tool_parameter_names = set(schema_required(tool.get("parameters_schema")))
-        tool_parameter_names.update(schema_properties(tool.get("parameters_schema")))
-
-        missing_required = [
-            parameter
-            for parameter in operation_required
-            if parameter not in mapping and parameter not in SYSTEM_OPERATION_PARAMETERS
-        ]
-        for parameter in missing_required:
-            errors.append(
-                f"{tool_name}/{endpoint_id}/{operation_id} не заполняет обязательный параметр операции: {parameter}"
-            )
-
-        if operation_schema.get("additionalProperties") is False:
-            for parameter in mapping:
-                if parameter not in operation_properties:
-                    errors.append(
-                        f"{tool_name}/{endpoint_id}/{operation_id} маппит параметр вне request_schema операции: {parameter}"
-                    )
-
-        for target_parameter, source_ref in mapping.items():
-            source, separator, source_value = str(source_ref).partition(":")
-            if separator != ":" or source not in {"react", "constant", "secret"} or not source_value:
-                errors.append(
-                    f"{tool_name}/{endpoint_id}/{operation_id} parameter_mapping.{target_parameter} "
-                    "должен иметь формат react:<param>, constant:<value> или secret:<env>."
-                )
-                continue
-            if source == "react" and source_value not in tool_parameter_names:
-                errors.append(
-                    f"{tool_name}/{endpoint_id}/{operation_id} parameter_mapping.{target_parameter} "
-                    f"ссылается на отсутствующий параметр ReAct-вызова: {source_value}"
-                )
-                continue
-            if source == "react":
-                operation_parameter_schema = operation_properties.get(target_parameter)
-                react_parameter_schema = schema_properties(tool.get("parameters_schema")).get(source_value)
-                if not schemas_are_type_compatible(react_parameter_schema, operation_parameter_schema):
-                    errors.append(
-                        f"{tool_name}/{endpoint_id}/{operation_id} parameter_mapping.{target_parameter} "
-                        f"имеет несовместимые типы: ReAct {schema_type(react_parameter_schema)} -> endpoint {schema_type(operation_parameter_schema)}"
-                    )
-
-        result_mapping = binding.get("result_mapping", {})
-        if not isinstance(result_mapping, dict):
-            errors.append(f"{tool_name}/{endpoint_id}/{operation_id} result_mapping должен быть object.")
-            return errors
-
-        tool_result_schema = tool.get("result_schema", default_response_schema())
-        operation_response_schema = operation_terminal_result_schema(operation) or default_response_schema()
-        tool_result_properties = schema_properties(tool_result_schema)
-        required_result_fields = schema_required(tool_result_schema)
-        missing_result_fields = [
-            field_name
-            for field_name in required_result_fields
-            if field_name not in result_mapping
-        ]
-        for field_name in missing_result_fields:
-            errors.append(
-                f"{tool_name}/{endpoint_id}/{operation_id} не маппит обязательное поле результата ReAct-вызова: {field_name}"
-            )
-
-        if tool_result_schema.get("additionalProperties") is False:
-            for field_name in result_mapping:
-                if field_name not in tool_result_properties:
-                    errors.append(
-                        f"{tool_name}/{endpoint_id}/{operation_id} result_mapping.{field_name} "
-                        "маппит поле вне result_schema ReAct-вызова."
-                    )
-
-        for react_field, endpoint_path in result_mapping.items():
-            target_schema = tool_result_properties.get(react_field)
-            source_schema = schema_at_path(operation_response_schema, endpoint_path)
-            if react_field not in tool_result_properties:
-                errors.append(
-                    f"{tool_name}/{endpoint_id}/{operation_id} result_mapping.{react_field} "
-                    "ссылается на отсутствующее поле result_schema ReAct-вызова."
-                )
-                continue
-            if not source_schema:
-                errors.append(
-                    f"{tool_name}/{endpoint_id}/{operation_id} result_mapping.{react_field} "
-                    f"ссылается на отсутствующее поле response_schema операции: {endpoint_path}"
-                )
-                continue
-            if not schemas_are_type_compatible(source_schema, target_schema):
-                errors.append(
-                    f"{tool_name}/{endpoint_id}/{operation_id} result_mapping.{react_field} "
-                    f"имеет несовместимые типы: endpoint {schema_type(source_schema)} -> ReAct {schema_type(target_schema)}"
-                )
-        return errors
-
-    @staticmethod
-    def _tool_binding_exists(
-        tool: dict[str, Any],
-        endpoint_id: str | None,
-        operation_id: str | None,
-    ) -> bool:
-        return any(
-            binding["endpoint_id"] == endpoint_id and binding["operation_id"] == operation_id
-            for binding in tool.get("endpoint_bindings", [])
-        )
+        _ = payload
+        return ["integration_endpoints удалены; используйте mcp_environments."]
 
     def _validate_tool_catalog_usage(self, payload: dict[str, Any]) -> list[str]:
-        errors = []
-        tool_by_name = {
-            tool["tool_name"]: tool
-            for tool in payload["tools"]
-        }
-        for profile in self.active_payload("attribute_resolution_profiles")["profiles"]:
-            for step in profile.get("enrichment_steps", []):
-                tool_name = step.get("react_call")
-                if not tool_name:
-                    continue
-                tool = tool_by_name.get(tool_name)
-                if not tool:
-                    errors.append(
-                        f"Профиль разрешения {profile['profile_id']} ссылается на отсутствующий ReAct-вызов: "
-                        f"{tool_name}"
-                    )
-                    continue
-                if not tool.get("endpoint_bindings"):
-                    errors.append(
-                        f"Профиль разрешения {profile['profile_id']} ссылается на ReAct-вызов "
-                        f"{tool_name} без привязки операции"
-                    )
-                elif (step.get("endpoint_id") or step.get("operation_id")) and not select_tool_binding(
-                    tool,
-                    endpoint_id=step.get("endpoint_id"),
-                    operation_id=step.get("operation_id"),
-                ):
-                    errors.append(
-                        f"Профиль разрешения {profile['profile_id']}.{step.get('step_id')} "
-                        f"ссылается на отсутствующий binding {step.get('endpoint_id')}/{step.get('operation_id')}"
-                    )
-        return errors
+        _ = payload
+        return ["tool_catalog удален; используйте capabilities и capability_bindings."]
 
     def _validate_workflow_state_catalog(self, payload: dict[str, Any]) -> list[str]:
         state_ids = [state["id"] for state in payload["states"]]
@@ -8724,36 +8322,9 @@ class ConfigStore:
             errors.append("settings.temperature должен быть в диапазоне 0..2.")
         return errors
 
-    def _validate_n8n_workflow_catalog(self, payload: dict[str, Any]) -> list[str]:
-        errors = []
-        workflow_ids = [workflow["workflow_id"] for workflow in payload["workflows"]]
-        for workflow_id in self._duplicates(workflow_ids):
-            errors.append(f"Дублируется workflow_id: {workflow_id}")
-        endpoint_by_id = {
-            endpoint["endpoint_id"]: endpoint
-            for endpoint in self.active_payload("integration_endpoints")["endpoints"]
-        }
-        for workflow in payload["workflows"]:
-            endpoint = endpoint_by_id.get(workflow["endpoint_id"])
-            if not endpoint:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный endpoint_id: "
-                    f"{workflow['endpoint_id']}"
-                )
-            else:
-                for operation_id in workflow.get("operations", []):
-                    if operation_id not in endpoint["operations"]:
-                        errors.append(
-                            f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестную operation "
-                            f"{operation_id} для endpoint {workflow['endpoint_id']}"
-                        )
-            callback_endpoint_id = workflow.get("callback_endpoint_id")
-            if callback_endpoint_id and callback_endpoint_id not in endpoint_by_id:
-                errors.append(
-                    f"Workflow n8n {workflow['workflow_id']} ссылается на неизвестный callback_endpoint_id: "
-                    f"{callback_endpoint_id}"
-                )
-        return errors
+    def _validate_removed_workflow_catalog(self, payload: dict[str, Any]) -> list[str]:
+        _ = payload
+        return ["legacy workflow catalogs удалены; внешнее исполнение настраивается через mcp_environments/capabilities/capability_bindings."]
 
     def _validate_interaction_channels(self, payload: dict[str, Any]) -> list[str]:
         errors = []
@@ -8833,14 +8404,8 @@ class ConfigStore:
         for profile_id in self._duplicates(profile_ids):
             errors.append(f"Дублируется profile_id: {profile_id}")
 
-        tool_by_name = {
-            tool["tool_name"]: tool
-            for tool in self.active_payload("tools")["tools"]
-        }
-        endpoint_by_id = self._by_id(
-            self.active_payload("integration_endpoints")["endpoints"],
-            "endpoint_id",
-        )
+        tool_by_name: dict[str, dict[str, Any]] = {}
+        endpoint_by_id: dict[str, dict[str, Any]] = {}
         interaction_channels = self.active_payload("interaction_channels")["channels"]
         slot_schema_by_id = self._by_id(
             self.active_payload("slot_schemas")["slot_schemas"],
@@ -8851,6 +8416,10 @@ class ConfigStore:
             for schema in self.active_payload("slot_schemas")["slot_schemas"]
             for slot in schema.get("slots", [])
         }
+        capability_by_id = self._by_id(
+            self.active_payload("capabilities").get("capabilities", []),
+            "capability_id",
+        )
 
         for profile in profiles:
             profile_id = profile["profile_id"]
@@ -8868,7 +8437,10 @@ class ConfigStore:
                 declared_slot_ids.add(target_slot_id)
             for slot_id in declared_slot_ids:
                 if slot_id in known_slot_ids and slot_id not in profile_slot_ids:
-                    errors.append(f"{profile_id} ссылается на слот вне выбранной схемы {profile.get('slot_schema_id')}: {slot_id}")
+                    errors.append(
+                        f"{profile_id}: выходной слот {slot_id} отсутствует в выбранном сценарии профиля. "
+                        "Добавьте слот в сценарий обработки и активируйте его перед активацией профиля."
+                    )
             if target_slot_id and target_slot_id not in output_slot_ids:
                 errors.append(f"{profile_id} target_slot_id должен входить в output_slots_order.")
             for slot_id in self._duplicates(output_slot_ids):
@@ -8902,7 +8474,7 @@ class ConfigStore:
             reference_context = build_execution_reference_context(
                 slot_schema=slot_schema or {"slots": []},
                 output_slots=output_slot_ids,
-                tools=list(tool_by_name.values()),
+                capabilities=list(capability_by_id.values()),
                 steps=profile.get("enrichment_steps", []),
                 channels=interaction_channels,
             )
@@ -8917,7 +8489,7 @@ class ConfigStore:
                     step_reference_context = build_execution_reference_context(
                         slot_schema=slot_schema or {"slots": []},
                         output_slots=output_slot_ids,
-                        tools=list(tool_by_name.values()),
+                        capabilities=list(capability_by_id.values()),
                         steps=profile.get("enrichment_steps", []),
                         allowed_steps=list(seen_steps.values()),
                         channels=interaction_channels,
@@ -8929,235 +8501,145 @@ class ConfigStore:
                             label=f"{step_label}.configuration_instruction",
                         )
                     )
-                tool = tool_by_name.get(enrichment_step.get("react_call"))
-                binding = None
-                endpoint = None
-                operation = None
-                if not tool:
-                    errors.append(f"{step_label} ссылается на неизвестный ReAct-вызов: {enrichment_step.get('react_call')}")
-                elif not tool.get("endpoint_bindings"):
-                    errors.append(f"{step_label} ReAct-вызов {enrichment_step.get('react_call')} не имеет привязки операции.")
-                else:
-                    binding = select_tool_binding(
-                        tool,
-                        endpoint_id=enrichment_step.get("endpoint_id"),
-                        operation_id=enrichment_step.get("operation_id"),
-                    )
-                    if not binding:
-                        errors.append(
-                            f"{step_label} ReAct-вызов {enrichment_step.get('react_call')} не имеет binding "
-                            f"{enrichment_step.get('endpoint_id')}/{enrichment_step.get('operation_id')}."
-                        )
+                capability_id = enrichment_step.get("capability_id")
+                if capability_id:
+                    capability = capability_by_id.get(capability_id)
+                    if not capability:
+                        errors.append(f"{step_label} ссылается на неизвестную capability: {capability_id}.")
                     else:
-                        endpoint = endpoint_by_id.get(binding.get("endpoint_id") or "")
-                        operation = (endpoint or {}).get("operations", {}).get(binding.get("operation_id") or "")
-                        if not endpoint or not operation:
-                            errors.append(
-                                f"{step_label} ссылается на отсутствующую endpoint-операцию "
-                                f"{binding.get('endpoint_id')}/{binding.get('operation_id')}."
-                            )
-                    last_step_tool = tool
-                completion_policy = enrichment_step.get("completion_policy") or {}
-                async_event_types = async_event_types_for_operation(operation)
-                if async_event_types and completion_policy.get("mode") == "sync":
-                    errors.append(
-                        f'{profile_id}.enrichment_steps[{index}] '
-                        f'Профиль "{profile.get("display_name")}" ({profile_id}) -> '
-                        f'Шаг {index} "{enrichment_step.get("step_name") or step_id}" ({step_id}) -> '
-                        f'ReAct-вызов "{(tool or {}).get("display_name") or enrichment_step.get("react_call")}" '
-                        f'({enrichment_step.get("react_call")}) связан с асинхронной endpoint-операцией '
-                        f'{(binding or {}).get("endpoint_id")}/{(binding or {}).get("operation_id")}, '
-                        'но completion_policy.mode=sync. Выберите режим external_event.'
-                    )
-                if completion_policy.get("mode") == "external_event":
-                    expected_event_type = completion_policy.get("expected_event_type")
-                    async_contracts = (operation or {}).get("async_event_contracts", {}) or {}
-                    async_contract = async_contracts.get(expected_event_type or "")
-                    operation_ref = (
-                        f"{binding.get('endpoint_id')}/{binding.get('operation_id')}"
-                        if binding
-                        else f"{enrichment_step.get('endpoint_id')}/{enrichment_step.get('operation_id')}"
-                    )
-                    if not expected_event_type:
-                        errors.append(f"{step_label}.completion_policy должен содержать expected_event_type.")
-                    elif not async_contract:
-                        if not async_contracts:
-                            errors.append(
-                                f"{step_label}.completion_policy ожидает async_event_contracts."
-                                f"{expected_event_type}, но endpoint-операция {operation_ref} "
-                                "не содержит async_event_contracts."
-                            )
-                        else:
-                            available_events = ", ".join(sorted(async_contracts))
-                            errors.append(
-                                f"{step_label}.completion_policy ссылается на отсутствующий "
-                                f"async_event_contracts.{expected_event_type} в endpoint-операции "
-                                f"{operation_ref}. Доступные события: {available_events}."
-                            )
-                    elif async_contract.get("contract_status") == "broken":
-                        errors.append(
-                            f"{step_label}.completion_policy использует broken async_event_contracts."
-                            f"{expected_event_type}."
-                        )
-                if tool:
-                    parameter_mapping = enrichment_step.get("parameter_mapping", {})
-                    configured_parameters = {}
-                    if isinstance(parameter_mapping, dict):
-                        for parameter, source_ref in parameter_mapping.items():
-                            source, separator, source_value = str(source_ref).partition(":")
-                            if separator == ":" and source_value:
-                                configured_parameters[parameter] = (
-                                    source_value if source == "constant" else f"configured:{source}"
-                                )
-                    effective_parameters, _applied_defaults = apply_schema_parameter_defaults(
-                        tool.get("parameters_schema", {}),
-                        configured_parameters,
-                    )
-                    for required_group in missing_required_parameter_groups(
-                        tool.get("parameters_schema", {}),
-                        effective_parameters,
-                    ):
-                        errors.append(
-                            f'{profile_id}.enrichment_steps[{index}] '
-                            f'Профиль "{profile.get("display_name")}" ({profile_id}) -> '
-                            f'Шаг {index} "{enrichment_step.get("step_name") or step_id}" ({step_id}) -> '
-                            f'ReAct-вызов "{tool.get("display_name") or tool.get("tool_name")}" '
-                            f'({tool.get("tool_name")}) не заполняет обязательный параметр: '
-                            f'{format_required_parameter_group(required_group)}.'
-                        )
-                for parameter, source_ref in enrichment_step.get("parameter_mapping", {}).items():
-                    if tool:
-                        parameter_schema = tool.get("parameters_schema", {})
-                        parameter_names = set(schema_properties(parameter_schema))
-                        parameter_names.update(schema_required(parameter_schema))
-                        if parameter_names and parameter not in parameter_names:
-                            errors.append(
-                                f"{step_label}.parameter_mapping.{parameter} заполняет параметр вне "
-                                f"parameters_schema ReAct-вызова {tool.get('tool_name')}."
-                            )
-                    source, separator, value = str(source_ref).partition(":")
-                    if separator != ":" or source not in {"slot", "output", "step", "case", "constant", "secret"} or not value:
-                        errors.append(
-                            f"{step_label}.parameter_mapping.{parameter} должен иметь формат "
-                            "slot:<slot_id>, output:<slot_id>, case:<field>, "
-                            "step:<step_id>.react.<react_call>.input|output.<field>, constant:<value> или secret:<ref>."
-                        )
-                        continue
-                    if source == "slot" and value not in profile_slot_ids:
-                        errors.append(
-                            f"{step_label}.parameter_mapping.{parameter} ссылается на слот вне выбранной схемы: {value}"
-                        )
-                    elif source == "output" and value not in output_slot_ids:
-                        errors.append(
-                            f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестный выходной слот: {value}"
-                        )
-                    elif source == "step":
-                        step_match = STEP_SOURCE_REF_RE.match(value)
-                        if not step_match:
-                            errors.append(
-                                f"{step_label}.parameter_mapping.{parameter} должен ссылаться на step как "
-                                "step:<step_id>.react.<react_call>.input|output.<field>."
-                            )
-                        else:
-                            ref_step_id, ref_react_call, _, _ = step_match.groups()
-                            ref_step = seen_steps.get(ref_step_id)
-                            if not ref_step:
+                        completion_policy = enrichment_step.get("completion_policy") or {}
+                        if completion_policy.get("mode") == "external_event":
+                            expected_event_type = completion_policy.get("expected_event_type")
+                            async_contracts = capability.get("async_event_contracts") or {}
+                            if "async" not in set(capability.get("execution_modes") or []):
+                                errors.append(f"{step_label} использует external_event для sync-only capability {capability_id}.")
+                            elif not expected_event_type:
+                                errors.append(f"{step_label}.completion_policy должен содержать expected_event_type.")
+                            elif expected_event_type not in async_contracts:
+                                available_events = ", ".join(sorted(async_contracts)) or "нет"
                                 errors.append(
-                                    f"{step_label}.parameter_mapping.{parameter} ссылается на шаг, "
-                                    f"который еще не выполнен: {ref_step_id}"
+                                    f"{step_label}.completion_policy ссылается на отсутствующий "
+                                    f"async_event_contracts.{expected_event_type} в capability {capability_id}. "
+                                    f"Доступные события: {available_events}."
                                 )
-                            elif ref_step.get("react_call") != ref_react_call:
+                            elif async_contracts[expected_event_type].get("contract_status") == "broken":
                                 errors.append(
-                                    f"{step_label}.parameter_mapping.{parameter} ожидает ReAct-вызов "
-                                    f"{ref_react_call} в {ref_step_id}, но там настроен {ref_step.get('react_call')}."
+                                    f"{step_label}.completion_policy использует broken async_event_contracts."
+                                    f"{expected_event_type}."
                                 )
-                            else:
-                                ref_tool = tool_by_name.get(ref_react_call)
-                                _, _, ref_kind, field_path = step_match.groups()
-                                if ref_tool and ref_kind == "input" and not schema_declares_path(
-                                    ref_tool.get("parameters_schema", {}),
-                                    field_path,
-                                ):
+                        elif completion_policy.get("mode") == "sync" and "sync" not in set(capability.get("execution_modes") or []):
+                            errors.append(f"{step_label} использует sync для capability {capability_id}, которая не поддерживает sync.")
+
+                        input_mapping = enrichment_step.get("input_mapping", {})
+                        configured_parameters = {}
+                        if isinstance(input_mapping, dict):
+                            for parameter, source_ref in input_mapping.items():
+                                source, separator, source_value = str(source_ref).partition(":")
+                                if separator == ":" and source_value:
+                                    configured_parameters[parameter] = (
+                                        source_value if source == "constant" else f"configured:{source}"
+                                    )
+                        effective_parameters, _applied_defaults = apply_schema_parameter_defaults(
+                            capability.get("input_schema", {}),
+                            configured_parameters,
+                        )
+                        for required_group in missing_required_parameter_groups(
+                            capability.get("input_schema", {}),
+                            effective_parameters,
+                        ):
+                            errors.append(
+                                f'{profile_id}.enrichment_steps[{index}] '
+                                f'Профиль "{profile.get("display_name")}" ({profile_id}) -> '
+                                f'Шаг {index} "{enrichment_step.get("step_name") or step_id}" ({step_id}) -> '
+                                f'capability "{capability.get("display_name") or capability_id}" '
+                                f'({capability_id}) не заполняет обязательный параметр: '
+                                f'{format_required_parameter_group(required_group)}.'
+                            )
+                        input_names = set(schema_properties(capability.get("input_schema", {})))
+                        input_names.update(schema_required(capability.get("input_schema", {})))
+                        for parameter, source_ref in input_mapping.items():
+                            if input_names and parameter not in input_names:
+                                errors.append(
+                                    f"{step_label}.input_mapping.{parameter} заполняет параметр вне "
+                                    f"input_schema capability {capability_id}."
+                                )
+                            source, separator, value = str(source_ref).partition(":")
+                            if separator != ":" or source not in {"slot", "output", "step", "case", "constant", "secret"} or not value:
+                                errors.append(
+                                    f"{step_label}.input_mapping.{parameter} должен иметь формат "
+                                    "slot:<slot_id>, output:<slot_id>, case:<field>, step:<ref>, constant:<value> или secret:<ref>."
+                                )
+                            elif source == "slot" and value not in profile_slot_ids:
+                                errors.append(
+                                    f"{step_label}.input_mapping.{parameter}: входной слот {value} "
+                                    "отсутствует в выбранном сценарии профиля."
+                                )
+                        output_schema = capability.get("output_schema", {})
+                        for slot_id, field_path in (enrichment_step.get("output_mapping") or {}).items():
+                            if slot_id not in output_slot_ids:
+                                if slot_id not in profile_slot_ids:
                                     errors.append(
-                                        f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестный "
-                                        f"входной параметр {ref_react_call}: {field_path}"
+                                        f"{step_label}.output_mapping.{slot_id}: слот не найден в выбранном "
+                                        "сценарии профиля. Добавьте слот в сценарий и в блок "
+                                        "\"Выходные слоты и порядок заполнения\" либо удалите mapping из шага."
                                     )
-                                if ref_tool and ref_kind == "output":
-                                    ref_result_schema, _, _ = enrichment_step_result_schema(
-                                        ref_step,
-                                        tool_by_name=tool_by_name,
-                                        endpoint_by_id=endpoint_by_id,
+                                else:
+                                    errors.append(
+                                        f"{step_label}.output_mapping.{slot_id}: слот не выбран как выходной "
+                                        "слот профиля. Добавьте его в блок \"Выходные слоты и порядок заполнения\" "
+                                        "либо удалите mapping из шага."
                                     )
-                                    if not schema_declares_path(
-                                        ref_result_schema or {},
-                                        field_path,
-                                        allow_nested_additional=True,
-                                    ):
-                                        errors.append(
-                                            f"{step_label}.parameter_mapping.{parameter} ссылается на неизвестное "
-                                            f"поле результата {ref_react_call}: {field_path}"
-                                        )
+                            elif slot_id not in profile_slot_ids:
+                                errors.append(
+                                    f"{step_label}.output_mapping.{slot_id}: выходной слот отсутствует "
+                                    "в выбранном сценарии профиля. Добавьте слот в сценарий обработки "
+                                    "и активируйте его перед активацией профиля."
+                                )
+                            if not schema_declares_path(output_schema, str(field_path), allow_nested_additional=True):
+                                errors.append(
+                                    f"{step_label}.output_mapping.{slot_id} ссылается на неизвестное "
+                                    f"поле результата capability {capability_id}: {field_path}."
+                                )
+                    seen_steps[step_id] = enrichment_step
+                    continue
+
+                errors.append(
+                    f"{step_label} должен использовать capability_id/input_mapping/output_mapping; "
+                    "старый operation binding удален."
+                )
                 seen_steps[step_id] = enrichment_step
+                continue
 
             if output_slot_ids and profile.get("enrichment_steps"):
-                rules_by_step: dict[str, list[dict[str, Any]]] = {}
-                source_refs_by_slot: dict[str, dict[str, Any]] = {}
                 for rule in profile.get("output_slots_order", []):
                     source_ref = output_source_hint_reference(rule.get("source_hint"), profile.get("enrichment_steps", []))
                     if source_ref.get("error"):
                         errors.append(f"{profile_id} output_slots_order.{rule['slot_id']}: {source_ref['error']}")
                         continue
-                    source_refs_by_slot[rule["slot_id"]] = source_ref
-                    rules_by_step.setdefault(source_ref.get("step_id") or "", []).append({
-                        **rule,
-                        "source_hint": source_ref.get("field", ""),
-                    })
-
-                for step_id, step_rules in rules_by_step.items():
-                    source_ref = next((item for item in source_refs_by_slot.values() if item.get("step_id") == step_id), {})
-                    step_for_schema = source_ref.get("step") or {}
-                    result_schema, tool, _operation = enrichment_step_result_schema(
-                        step_for_schema,
-                        tool_by_name=tool_by_name,
-                        endpoint_by_id=endpoint_by_id,
-                    )
-                    if not tool:
-                        errors.append(
-                            f"{profile_id} output_slots_order ссылается на неизвестный ReAct-вызов: "
-                            f"{source_ref.get('react_call')}"
-                        )
-                        continue
-                    result_path, selector_error = operation_result_selector_path(
-                        result_schema or {},
-                        step_rules,
-                    )
-                    if selector_error:
-                        errors.append(
-                            f"{profile_id} результат ReAct-вызова {tool.get('tool_name')} в {step_id} "
-                            f"неоднозначен: {selector_error}"
-                        )
-                    selected_schema = selected_operation_result_schema(result_schema or {}, result_path)
-                    for rule in step_rules:
-                        source_ref = source_refs_by_slot.get(rule["slot_id"], {})
-                        source_hint = source_ref.get("source_hint") or rule.get("source_hint")
-                        local_hint = operation_result_local_hint(rule.get("source_hint"), {"result_path": result_path})
-                        if local_hint and selected_schema and not schema_declares_path(
-                            selected_schema,
-                            local_hint,
+                    if source_ref.get("capability_id"):
+                        capability = capability_by_id.get(source_ref.get("capability_id") or "")
+                        field = source_ref.get("field")
+                        if not capability:
+                            errors.append(
+                                f"{profile_id} output_slots_order.{rule['slot_id']} "
+                                f"ссылается на неизвестную capability: {source_ref.get('capability_id')}."
+                            )
+                        elif not schema_declares_path(
+                            capability.get("output_schema", {}),
+                            field,
                             allow_nested_additional=True,
                         ):
                             errors.append(
-                                output_slot_error_context(
-                                    profile=profile,
-                                    rule=rule,
-                                    source_ref=source_ref,
-                                    tool=tool,
-                                    selected_schema=selected_schema,
-                                    source_hint=str(source_hint),
-                                    local_hint=local_hint,
-                                    slot_schema=slot_schema,
-                                )
+                                f"{profile_id} output_slots_order.{rule['slot_id']} "
+                                f"ссылается на неизвестное поле результата capability "
+                                f"{source_ref.get('capability_id')}: {field}."
                             )
+                        continue
+                    errors.append(
+                        f"{profile_id} output_slots_order.{rule['slot_id']} использует удаленный source_hint. "
+                        "Используйте source_hint вида "
+                        "${step.<step_id>.capability.<capability_id>.output.<field>}."
+                    )
 
             llm_script = profile["llm_resolution_script"]
             if not llm_script.get("script_text"):
@@ -9209,7 +8691,6 @@ class ConfigStore:
         )
         channel_by_id = self._by_id(self.active_payload("interaction_channels")["channels"], "channel_id")
         channel_ids = set(channel_by_id)
-        tool_names = set(self._by_id(self.active_payload("tools")["tools"], "tool_name"))
         for scenario in scenarios:
             scenario_id = scenario["scenario_id"]
             if scenario["slot_schema_id"] not in slot_schema_ids:
@@ -9240,9 +8721,6 @@ class ConfigStore:
                     errors.append(f"{scenario_id} ссылается на неизвестный allowed_channel_id: {channel_id}")
             if default_channel_id not in allowed_channel_ids:
                 errors.append(f"{scenario_id} default_channel_id должен входить в allowed_channel_ids.")
-            for tool_name in scenario.get("allowed_react_call_names", []):
-                if tool_name not in tool_names:
-                    errors.append(f"{scenario_id} ссылается на неизвестный ReAct-вызов: {tool_name}")
         return errors
 
     def _validate_slot_schemas(self, payload: dict[str, Any]) -> list[str]:
@@ -9428,8 +8906,8 @@ class ConfigStore:
         for policy_id in self._duplicates(policy_ids):
             errors.append(f"Дублируется policy_id: {policy_id}")
         for policy in payload["policies"]:
-            if policy["consecutive_tool_errors_to_escalate"] > policy["max_iterations"]:
-                errors.append(f"{policy['policy_id']} лимит ошибок ReAct-вызовов не может быть выше max_iterations.")
+            if policy["consecutive_capability_errors_to_escalate"] > policy["max_iterations"]:
+                errors.append(f"{policy['policy_id']} лимит ошибок capability не может быть выше max_iterations.")
         return errors
 
     def _validate_prompt_packs(self, payload: dict[str, Any]) -> list[str]:
@@ -9442,8 +8920,8 @@ class ConfigStore:
             "behavior_principles",
             "slot_schemas",
             "classification_confidence",
-            "react_planning",
-            "tool_rules",
+            "orchestration",
+            "capability_rules",
             "escalation_response",
         }
         for pack in payload["packs"]:
@@ -9631,7 +9109,6 @@ def default_service_scenarios() -> dict[str, Any]:
                 "escalation_policy_id": f"escalation.{item['scenario_id']}",
                 "default_channel_id": "debug",
                 "allowed_channel_ids": ["messenger_bot", "service_desk", "debug"],
-                "allowed_react_call_names": [],
                 "audit_required": True,
                 "log_required": True,
                 "tags": ["mvp"],
@@ -9962,6 +9439,364 @@ def default_slot_schemas() -> dict[str, Any]:
     }
 
 
+def default_capabilities() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "capabilities": [
+            {
+                "capability_id": "provider_channel_repair_monitor",
+                "display_name": "Мониторинг ремонта канала провайдера",
+                "status": "active",
+                "description": (
+                    "Запускает внешний MCP-исполнитель ремонта канала провайдера, ожидает ответ провайдера "
+                    "и возвращает canonical данные для продолжения сценария."
+                ),
+                "contract_version": "1.0",
+                "execution_modes": ["async"],
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["problem_url", "service_request"],
+                    "properties": {
+                        "problem_url": {"type": "string", "minLength": 1},
+                        "service_request": {"type": "string", "minLength": 1},
+                        "problem_host": {"type": "string"},
+                        "from": {"type": "string"},
+                        "reply_to": {"type": "string"},
+                        "template_id": {"type": "string"},
+                        "poll_interval_minutes": {"type": "integer", "minimum": 1},
+                        "timeout_minutes": {"type": "integer", "minimum": 1},
+                    },
+                },
+                "output_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "required": ["provider_mail_body"],
+                    "properties": {
+                        "provider_mail_body": {"type": "string", "minLength": 1},
+                        "provider_mail_subject": {"type": "string"},
+                        "provider_ticket_number": {"type": "string"},
+                        "polling_diagnostic": {"type": "object", "additionalProperties": True},
+                        "zabbix_status": {"type": "string"},
+                    },
+                },
+                "async_event_contracts": {
+                    "provider_channel_repair_monitor.completed": {
+                        "display_name": "Результат мониторинга ремонта канала провайдера",
+                        "description": "Progress или terminal результат внешнего MCP-исполнителя.",
+                        "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+                        "result_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "provider_mail_body": {"type": "string"},
+                                "provider_mail_subject": {"type": "string"},
+                                "provider_ticket_number": {"type": "string"},
+                                "polling_diagnostic": {"type": "object", "additionalProperties": True},
+                                "zabbix_status": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                        "progress_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "polling_diagnostic": {"type": "object", "additionalProperties": True},
+                                "message": {"type": "string"},
+                            },
+                        },
+                        "error_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "code": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                        "contract_version": "1.0",
+                        "contract_status": "valid",
+                    }
+                },
+                "default_completion_policy": {
+                    "mode": "external_event",
+                    "expected_event_type": "provider_channel_repair_monitor.completed",
+                    "max_wait_seconds": 3600,
+                    "timeout_action": "escalate_operator",
+                },
+                "diagnostic_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "external_execution_id": {"type": "string"},
+                        "correlation_id": {"type": "string"},
+                        "phase": {"type": "string"},
+                        "last_checked_resource": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "capability_id": "zabbix_problem_update",
+                "display_name": "Обновление проблемы Zabbix",
+                "status": "active",
+                "description": (
+                    "Передает внешнему MCP-исполнителю команду обновить/дополнить проблему Zabbix "
+                    "сообщением из сценария."
+                ),
+                "contract_version": "1.0",
+                "execution_modes": ["sync"],
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["problem_url", "message"],
+                    "properties": {
+                        "problem_url": {"type": "string", "minLength": 1},
+                        "message": {"type": "string", "minLength": 1},
+                    },
+                },
+                "output_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "required": ["status"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "message": {"type": "string"},
+                        "eventid": {"type": "string"},
+                        "triggerid": {"type": "string"},
+                        "zabbix_origin": {"type": "string"},
+                        "problem": {"type": "object", "additionalProperties": True},
+                    },
+                },
+                "async_event_contracts": {},
+                "default_completion_policy": {
+                    "mode": "sync",
+                    "max_wait_seconds": 0,
+                    "timeout_action": "resume_agent",
+                },
+                "diagnostic_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "external_execution_id": {"type": "string"},
+                        "phase": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "capability_id": "zabbix_problem_status_wait",
+                "display_name": "Ожидание восстановления проблемы Zabbix",
+                "status": "active",
+                "description": (
+                    "Ожидает во внешнем MCP-окружении восстановления проблемы Zabbix и возвращает canonical статус."
+                ),
+                "contract_version": "1.0",
+                "execution_modes": ["async"],
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["problem_url", "poll_interval_minutes", "timeout_minutes"],
+                    "properties": {
+                        "problem_url": {"type": "string", "minLength": 1},
+                        "poll_interval_minutes": {"type": "integer", "minimum": 1},
+                        "timeout_minutes": {"type": "integer", "minimum": 1},
+                        "request_id": {"type": "string"},
+                    },
+                },
+                "output_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "required": ["status"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "timed_out": {"type": "boolean"},
+                        "message": {"type": "string"},
+                        "zabbix_status": {"type": "object", "additionalProperties": True},
+                        "started_at": {"type": "string"},
+                        "finished_at": {"type": "string"},
+                        "poll_interval_minutes": {"type": "integer"},
+                        "timeout_minutes": {"type": "integer"},
+                    },
+                },
+                "async_event_contracts": {
+                    "zabbix_problem_status_wait.completed": {
+                        "display_name": "Результат ожидания восстановления Zabbix",
+                        "description": "Progress или terminal результат ожидания восстановления проблемы Zabbix.",
+                        "statuses": ["progress", "success", "error", "timeout", "cancelled"],
+                        "result_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "status": {"type": "string"},
+                                "timed_out": {"type": "boolean"},
+                                "message": {"type": "string"},
+                                "zabbix_status": {"type": "object", "additionalProperties": True},
+                            },
+                        },
+                        "progress_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "message": {"type": "string"},
+                                "zabbix_status": {"type": "object", "additionalProperties": True},
+                            },
+                        },
+                        "error_schema": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "code": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                        "contract_version": "1.0",
+                        "contract_status": "valid",
+                    },
+                },
+                "default_completion_policy": {
+                    "mode": "external_event",
+                    "expected_event_type": "zabbix_problem_status_wait.completed",
+                    "max_wait_seconds": 86400,
+                    "timeout_action": "escalate_operator",
+                },
+                "diagnostic_schema": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "external_execution_id": {"type": "string"},
+                        "correlation_id": {"type": "string"},
+                        "phase": {"type": "string"},
+                    },
+                },
+            },
+        ],
+    }
+
+
+def default_mcp_environments() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "environments": [
+            {
+                "environment_id": "mcp.provider_ops",
+                "display_name": "Provider operations MCP",
+                "status": "active",
+                "environment_tier": "dev",
+                "transport": "streamable_http",
+                "base_url": os.getenv("MCP_PROVIDER_OPS_BASE_URL", "http://hostmachine:9000/mcp"),
+                "auth_mode": "dev_bearer_token",
+                "auth_ref": "env:MCP_PROVIDER_OPS_TOKEN",
+                "allowed_capabilities": [
+                    "provider_channel_repair_monitor",
+                    "zabbix_problem_update",
+                    "zabbix_problem_status_wait",
+                ],
+                "health_check": {
+                    "mode": "http_get",
+                    "path": "/health",
+                    "timeout_seconds": 5,
+                },
+                "discovery_policy": {
+                    "mode": "manual",
+                },
+            }
+        ],
+    }
+
+
+def default_capability_bindings() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "bindings": [
+            {
+                "binding_id": "binding.provider_channel_repair_monitor.primary",
+                "capability_id": "provider_channel_repair_monitor",
+                "environment_id": "mcp.provider_ops",
+                "mcp_tool_name": "provider_channel_repair_monitor",
+                "execution_mode": "async",
+                "status": "active",
+                "input_mapping": {
+                    "problem_url": "problem_url",
+                    "service_request": "service_request",
+                    "problem_host": "problem_host",
+                    "from": "from",
+                    "reply_to": "reply_to",
+                },
+                "output_mapping": {
+                    "provider_mail_body": "provider_mail_body",
+                    "provider_mail_subject": "provider_mail_subject",
+                    "provider_ticket_number": "provider_ticket_number",
+                    "polling_diagnostic": "polling_diagnostic",
+                    "zabbix_status": "zabbix_status",
+                },
+                "async_context_mapping": {
+                    "case_id": "async_context.case_id",
+                    "run_id": "async_context.run_id",
+                    "wait_id": "async_context.wait_id",
+                    "correlation_id": "async_context.correlation_id",
+                    "capability_id": "async_context.capability_id",
+                    "contract_version": "async_context.contract_version",
+                    "expected_event_type": "async_context.expected_event_type",
+                    "idempotency_key_base": "async_context.idempotency_key_base",
+                },
+            },
+            {
+                "binding_id": "binding.zabbix_problem_update.primary",
+                "capability_id": "zabbix_problem_update",
+                "environment_id": "mcp.provider_ops",
+                "mcp_tool_name": "zabbix_problem_update",
+                "execution_mode": "sync",
+                "status": "active",
+                "input_mapping": {
+                    "problem_url": "problem_url",
+                    "message": "message",
+                },
+                "output_mapping": {
+                    "status": "status",
+                    "message": "message",
+                    "eventid": "eventid",
+                    "triggerid": "triggerid",
+                    "zabbix_origin": "zabbix_origin",
+                    "problem": "problem",
+                },
+                "async_context_mapping": {},
+            },
+            {
+                "binding_id": "binding.zabbix_problem_status_wait.primary",
+                "capability_id": "zabbix_problem_status_wait",
+                "environment_id": "mcp.provider_ops",
+                "mcp_tool_name": "zabbix_problem_status_wait",
+                "execution_mode": "async",
+                "status": "active",
+                "input_mapping": {
+                    "problem_url": "problem_url",
+                    "poll_interval_minutes": "poll_interval_minutes",
+                    "timeout_minutes": "timeout_minutes",
+                    "request_id": "request_id",
+                },
+                "output_mapping": {
+                    "status": "status",
+                    "timed_out": "timed_out",
+                    "message": "message",
+                    "zabbix_status": "zabbix_status",
+                    "started_at": "started_at",
+                    "finished_at": "finished_at",
+                    "poll_interval_minutes": "poll_interval_minutes",
+                    "timeout_minutes": "timeout_minutes",
+                },
+                "async_context_mapping": {
+                    "case_id": "async_context.case_id",
+                    "run_id": "async_context.run_id",
+                    "wait_id": "async_context.wait_id",
+                    "correlation_id": "async_context.correlation_id",
+                    "capability_id": "async_context.capability_id",
+                    "contract_version": "async_context.contract_version",
+                    "expected_event_type": "async_context.expected_event_type",
+                    "idempotency_key_base": "async_context.idempotency_key_base",
+                },
+            },
+        ],
+    }
+
+
 def default_attribute_resolution_profiles() -> dict[str, Any]:
     def candidate_profile(
         profile_id: str,
@@ -10052,7 +9887,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                     resolution_attribute("title", display_name="Должность", source="operator_answer", required=False),
                 ],
                 {
-                    "source_type": "react_call",
+                    "source_type": "capability_call",
                     "tool_name": "search_ad_users",
                     "endpoint_id": "mock",
                     "operation_id": "search_ad_users",
@@ -10080,7 +9915,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 ["device_name"],
                 [resolution_attribute("user_login", display_name="Логин пользователя", source="slot", source_ref="user_login", required=True)],
                 {
-                    "source_type": "react_call",
+                    "source_type": "capability_call",
                     "tool_name": "search_ad_users",
                     "endpoint_id": "mock",
                     "operation_id": "search_ad_users",
@@ -10103,7 +9938,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 ["device_model"],
                 [resolution_attribute("device_id", display_name="ID устройства", source="slot", source_ref="device_id", required=True)],
                 {
-                    "source_type": "react_call",
+                    "source_type": "capability_call",
                     "tool_name": "query_cmdb_object",
                     "endpoint_id": "mock",
                     "operation_id": "query_cmdb_object",
@@ -10121,7 +9956,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 ["subnet"],
                 [resolution_attribute("location", display_name="Локация", source="slot", source_ref="location", required=True)],
                 {
-                    "source_type": "react_call",
+                    "source_type": "capability_call",
                     "tool_name": "query_cmdb_object",
                     "endpoint_id": "mock",
                     "operation_id": "query_cmdb_object",
@@ -10140,7 +9975,7 @@ def default_attribute_resolution_profiles() -> dict[str, Any]:
                 ["user_id"],
                 [resolution_attribute("user_login", display_name="Логин пользователя", source="slot", source_ref="user_login", required=True)],
                 {
-                    "source_type": "react_call",
+                    "source_type": "capability_call",
                     "tool_name": "search_ad_users",
                     "endpoint_id": "mock",
                     "operation_id": "search_ad_users",
@@ -10313,18 +10148,18 @@ def default_orchestrator_policy() -> dict[str, Any]:
         "policies": [
             {
                 "policy_id": f"policy.{item['scenario_id']}",
-                "display_name": f"ReAct-политика: {item['display_name']}",
+                "display_name": f"Политика оркестрации: {item['display_name']}",
                 "max_iterations": 6,
-                "consecutive_tool_errors_to_escalate": 2,
+                "consecutive_capability_errors_to_escalate": 2,
                 "stop_conditions": [
                     "all_required_slots_filled",
-                    "tool_success",
+                    "capability_success",
                     "clarification_required",
                     "handoff_required",
                     "iteration_limit",
-                    "consecutive_tool_errors",
+                    "consecutive_capability_errors",
                 ],
-                "allowed_react_action_groups": [
+                "allowed_orchestration_action_groups": [
                     "read_diagnostics",
                     "knowledge_search",
                     "external_status_check",
@@ -10357,12 +10192,12 @@ def default_prompt_packs() -> dict[str, Any]:
 def _prompt_blocks(display_name: str) -> dict[str, str]:
     return {
         "role_context": f"Ты AI ServiceDesk агент. Текущий сценарий: {display_name}. Работай только в границах утвержденной конфигурации сценария.",
-        "behavior_principles": "Задавай один вопрос за раз. Не раскрывай внутренние ReAct-вызовы клиенту. Пиши без жаргона и фиксируй недостающие данные.",
+        "behavior_principles": "Задавай один вопрос за раз. Не раскрывай внутренние capability-вызовы клиенту. Пиши без жаргона и фиксируй недостающие данные.",
         "slot_schemas": "Собирай слоты в порядке кто -> что -> когда. Используй auto-fill источники до вопроса клиенту. Напоминания, timeout ожидания и действия при отсутствии ответа применяй из выбранного канала взаимодействия.",
         "classification_confidence": "Сначала используй правила классификации с позитивными и негативными признаками. Если confidence ниже 0.85, используй LLM few-shot. Если ниже 0.70, передай человеку с топ-3 категориями. Если ниже 0.50, не принимай финальное решение автоматически.",
-        "react_planning": "Используй цикл Думай -> Действуй -> Наблюдай. Максимум 6 итераций. При двух ошибках ReAct-вызовов подряд запускай действие эскалации выбранного канала.",
-        "tool_rules": "Проверяй required slots и parameter bindings перед каждым ReAct-вызовом ИИ. Action-вызовы в MVP запускаются только после подтверждения оператора.",
-        "escalation_response": "Передавай оператору через канал эскалации полный пакет: слоты, историю ReAct, результаты ReAct-вызовов, гипотезу причины, остаток SLA и текст уведомления клиента.",
+        "orchestration": "Используй цикл оркестрации. Максимум 6 итераций. При двух ошибках capability подряд запускай действие эскалации выбранного канала.",
+        "capability_rules": "Проверяй required slots и parameter bindings перед каждым capability-вызовом. Action-вызовы выполняются только в рамках политики исполнения.",
+        "escalation_response": "Передавай оператору через канал эскалации полный пакет: слоты, историю capability, результаты capability, гипотезу причины, остаток SLA и текст уведомления клиента.",
     }
 
 
@@ -10372,8 +10207,8 @@ def build_prompt_preview(prompt_pack: dict[str, Any]) -> str:
         "behavior_principles": "2. Принципы поведения",
         "slot_schemas": "3. Схемы слотов",
         "classification_confidence": "4. Классификация и confidence",
-        "react_planning": "5. ReAct и планирование",
-        "tool_rules": "6. Правила ReAct-вызовов",
+        "orchestration": "5. Оркестрация",
+        "capability_rules": "6. Правила capability",
         "escalation_response": "7. Эскалация и формат ответа",
     }
     blocks = prompt_pack.get("blocks", {})
@@ -10391,18 +10226,18 @@ def default_escalation_policies() -> dict[str, Any]:
                 "policy_id": f"escalation.{item['scenario_id']}",
                 "display_name": f"Решение и эскалация: {item['display_name']}",
                 "auto_close": {
-                    "requires_tool_success": True,
+                    "requires_capability_success": True,
                 },
                 "handoff_conditions": [
-                    "two_tool_errors",
+                    "two_capability_errors",
                     "iteration_limit",
                     "confidence_below_050",
                     "policy_blocked",
                 ],
                 "handoff_package": [
                     "slots",
-                    "react_history",
-                    "tool_results",
+                    "capability_history",
+                    "capability_results",
                     "agent_hypothesis",
                     "sla_remaining",
                     "user_notification",
@@ -10454,9 +10289,9 @@ def default_prompt_catalog() -> dict[str, Any]:
                 "description": "Целевой prompt для краткого резюме кейса.",
             },
             {
-                "prompt_id": "tool_selection.default",
-                "prompt_type": "tool_selection",
-                "display_name": "Выбор ReAct-вызова ИИ",
+                "prompt_id": "capability_selection.default",
+                "prompt_type": "capability_selection",
+                "display_name": "Выбор capability",
                 "active_version": "dev-static",
                 "status": "planned",
                 "description": "Целевой prompt для выбора proposed action без права исполнения.",
@@ -10534,7 +10369,7 @@ def default_model_routing() -> dict[str, Any]:
             "default": default_alias,
             "classification": default_alias,
             "summarization": default_alias,
-            "tool_selection": default_alias,
+            "capability_selection": default_alias,
             "slot_resolution": default_alias,
         },
         "fallbacks": [
@@ -10551,6 +10386,7 @@ def default_model_routing() -> dict[str, Any]:
             },
             "system_prompts": {
                 "slot_resolution": DEFAULT_SLOT_RESOLUTION_PROMPT_TEMPLATE,
+                "capability_step_assist": DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE,
             },
         },
         "runtime": {

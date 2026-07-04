@@ -3,11 +3,11 @@ PYTHON ?= python3
 
 .PHONY: stage0-config
 stage0-config:
-	$(COMPOSE) config
+	$(COMPOSE) config --quiet
 
 .PHONY: stage0-up
 stage0-up:
-	$(COMPOSE) up -d postgres redis redpanda n8n
+	$(COMPOSE) up -d postgres redis redpanda
 
 .PHONY: stage0-llm-up
 stage0-llm-up:
@@ -45,11 +45,11 @@ stage3-run:
 
 .PHONY: runtime-up
 runtime-up:
-	$(COMPOSE) up -d --build postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+	$(COMPOSE) up -d --build postgres redis redpanda litellm orchestrator async-outbox-publisher async-mcp-worker async-external-event-worker async-agent-task-worker
 
 .PHONY: runtime-up-no-build
 runtime-up-no-build:
-	$(COMPOSE) up -d postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+	$(COMPOSE) up -d postgres redis redpanda litellm orchestrator async-outbox-publisher async-mcp-worker async-external-event-worker async-agent-task-worker
 
 .PHONY: runtime-check
 runtime-check:
@@ -57,11 +57,11 @@ runtime-check:
 
 .PHONY: runtime-ps
 runtime-ps:
-	$(COMPOSE) ps postgres redis redpanda n8n litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+	$(COMPOSE) ps postgres redis redpanda litellm orchestrator async-outbox-publisher async-mcp-worker async-external-event-worker async-agent-task-worker
 
 .PHONY: runtime-logs
 runtime-logs:
-	$(COMPOSE) logs --tail=200 litellm orchestrator async-outbox-publisher async-tool-worker async-external-event-worker async-agent-task-worker
+	$(COMPOSE) logs --tail=200 litellm orchestrator async-outbox-publisher async-mcp-worker async-external-event-worker async-agent-task-worker
 
 .PHONY: async-outbox-publish-once
 async-outbox-publish-once:
@@ -69,11 +69,11 @@ async-outbox-publish-once:
 
 .PHONY: async-outbox-publisher
 async-outbox-publisher:
-	$(PYTHON) -m apps.orchestrator.app.kafka_runtime publisher --topic $${TOOL_COMMAND_TOPIC:-tool.commands} --interval-seconds $${OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime publisher --interval-seconds $${OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
 
-.PHONY: async-tool-worker
-async-tool-worker:
-	$(PYTHON) -m apps.orchestrator.app.kafka_runtime worker --topic $${TOOL_COMMAND_TOPIC:-tool.commands}
+.PHONY: async-mcp-worker
+async-mcp-worker:
+	$(PYTHON) -m apps.orchestrator.app.kafka_runtime mcp-worker --topic $${MCP_COMMAND_TOPIC:-mcp.commands}
 
 .PHONY: async-external-event-worker
 async-external-event-worker:
@@ -321,7 +321,6 @@ stage0-smoke:
 	$(COMPOSE) ps
 	$(COMPOSE) exec -T redis redis-cli ping
 	$(COMPOSE) exec -T postgres psql -U servicedesk -d servicedesk -c "select extname from pg_extension where extname = 'vector';"
-	curl -fsS http://127.0.0.1:$${N8N_PORT:-5678}/healthz
 
 .PHONY: stage0-logs
 stage0-logs:
