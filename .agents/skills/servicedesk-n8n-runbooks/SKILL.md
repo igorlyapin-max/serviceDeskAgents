@@ -24,6 +24,9 @@ If a capability is physically implemented in n8n, that n8n workflow belongs to t
 - Do not expose n8n workflow ids, webhook paths, node names, or `email_result.body` style fields to ServiceDesk scenarios.
 - Express runbook behavior as a capability contract with canonical input/output schemas and `async_event_contracts`.
 - External MCP must return accepted ack for async execution and terminal/progress `ExternalEvent` results.
+- External MCP backed by n8n must honor `async_context.async_diagnostics.level=basic|verbose` and emit compact canonical
+  `progress` ExternalEvent diagnostics for long-running or polling work. Keep n8n node names, workflow ids, webhook paths,
+  credentials, and raw internal payloads out of ServiceDesk-visible diagnostics.
 - For local/dev auth, use MCP environment token references. For production, use OIDC as described by `servicedesk-async-mcp-contract`.
 
 ## When Editing Runbooks

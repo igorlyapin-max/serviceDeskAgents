@@ -73,6 +73,13 @@ SLOT_METHOD_ALLOWED_FIELDS = {
 
 EXTERNAL_EVENT_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 
+CANONICAL_CAPABILITY_INPUT_CONTRACTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "provider_channel_repair_monitor": {
+        "required": ("problem_url", "service_request", "from", "reply_to"),
+        "non_empty_strings": ("problem_url", "service_request", "from", "reply_to"),
+    },
+}
+
 SLOT_METHOD_REQUIRED_FIELD = {
     "user_question": "user_question",
     "case": "case_source_ref",
@@ -224,6 +231,20 @@ DRAFT_VALIDATION_RELATED_DOMAINS = {
     "attribute_resolution_profiles": {"slot_schemas"},
 }
 
+SCENARIO_LINKED_VALIDATION_DOMAINS = (
+    "service_scenarios",
+    "slot_schemas",
+    "attribute_resolution_profiles",
+    "capabilities",
+    "capability_bindings",
+    "mcp_environments",
+    "classification_routes",
+    "prompt_packs",
+    "orchestrator_policy",
+    "escalation_policies",
+    "interaction_channels",
+)
+
 DEFAULT_CHANNEL_CAPABILITIES = {
     "supports_client_questions": True,
     "supports_operator_questions": True,
@@ -273,6 +294,7 @@ SIMULATION_RUN_MODES = {
         "allow_mock_integrations": False,
         "allow_action_with_approval": False,
         "bypass_policy_gates": False,
+        "async_diagnostics_level": "off",
     },
     "llm": {
         "display_name": "С моделью",
@@ -281,6 +303,7 @@ SIMULATION_RUN_MODES = {
         "allow_mock_integrations": False,
         "allow_action_with_approval": False,
         "bypass_policy_gates": False,
+        "async_diagnostics_level": "off",
     },
     "llm_readonly": {
         "display_name": "С моделью и безопасными интеграциями",
@@ -289,6 +312,7 @@ SIMULATION_RUN_MODES = {
         "allow_mock_integrations": True,
         "allow_action_with_approval": False,
         "bypass_policy_gates": False,
+        "async_diagnostics_level": "basic",
     },
     "approval_debug": {
         "display_name": "Отладочный запуск с подтверждениями",
@@ -297,6 +321,7 @@ SIMULATION_RUN_MODES = {
         "allow_mock_integrations": True,
         "allow_action_with_approval": True,
         "bypass_policy_gates": False,
+        "async_diagnostics_level": "basic",
     },
     "operator_full_debug": {
         "display_name": "Полный операторский отладочный прогон",
@@ -305,6 +330,7 @@ SIMULATION_RUN_MODES = {
         "allow_mock_integrations": True,
         "allow_action_with_approval": True,
         "bypass_policy_gates": True,
+        "async_diagnostics_level": "verbose",
     },
 }
 
@@ -815,6 +841,47 @@ def apply_schema_parameter_defaults(
     return coerce_schema_parameter_values(schema, result), applied
 
 
+def normalize_capability_contracts(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = copy.deepcopy(payload)
+    for capability in normalized.get("capabilities") or []:
+        if not isinstance(capability, dict):
+            continue
+        canonical = CANONICAL_CAPABILITY_INPUT_CONTRACTS.get(str(capability.get("capability_id") or ""))
+        if not canonical:
+            continue
+        schema = capability.get("input_schema")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+            capability["input_schema"] = schema
+        schema.setdefault("type", "object")
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+            schema["properties"] = properties
+        required = [
+            str(item)
+            for item in schema.get("required", [])
+            if item not in (None, "")
+        ]
+        for parameter in canonical.get("required", ()):
+            if parameter not in required:
+                required.append(parameter)
+        schema["required"] = required
+        for parameter in canonical.get("non_empty_strings", ()):
+            property_schema = properties.get(parameter)
+            if not isinstance(property_schema, dict):
+                property_schema = {}
+            property_schema.setdefault("type", "string")
+            if property_schema.get("type") == "string":
+                try:
+                    current_min_length = int(property_schema.get("minLength") or 0)
+                except (TypeError, ValueError):
+                    current_min_length = 0
+                property_schema["minLength"] = max(current_min_length, 1)
+            properties[parameter] = property_schema
+    return normalized
+
+
 def constant_source_ref(value: Any) -> str:
     if isinstance(value, bool):
         return f"constant:{str(value).lower()}"
@@ -1224,6 +1291,23 @@ def source_ref_slot_ids(mapping: dict[str, Any] | None) -> list[str]:
         if separator == ":" and source == "slot" and value and value not in slot_ids:
             slot_ids.append(value)
     return slot_ids
+
+
+def required_source_ref_slot_ids(
+    schema: dict[str, Any] | None,
+    mapping: dict[str, Any] | None,
+) -> list[str]:
+    required_inputs = {
+        name
+        for group in schema_required_parameter_groups(schema)
+        for name in group
+    }
+    required_mapping = {
+        str(name): source_ref
+        for name, source_ref in (mapping or {}).items()
+        if str(name) in required_inputs
+    }
+    return source_ref_slot_ids(required_mapping)
 
 
 def contains_transport_delivery_selector(value: Any) -> bool:
@@ -1790,6 +1874,7 @@ def normalize_simulation_options(
     allow_mock_integrations: bool | None = None,
     allow_action_with_approval: bool | None = None,
     bypass_policy_gates: bool | None = None,
+    async_diagnostics_level: str | None = None,
 ) -> dict[str, Any]:
     mode = run_mode or "config_check"
     if mode not in SIMULATION_RUN_MODES:
@@ -1805,6 +1890,9 @@ def normalize_simulation_options(
     ):
         if value is not None:
             options[key] = bool(value)
+    if async_diagnostics_level is not None:
+        level = str(async_diagnostics_level or "").strip().lower()
+        options["async_diagnostics_level"] = level if level in {"off", "basic", "verbose"} else "off"
     return options
 
 
@@ -1987,6 +2075,91 @@ def resolved_dry_run_parameters(
         else:
             parameters[parameter] = value if value not in (None, "") else source_ref
     return parameters
+
+
+def capability_input_resolution_rows(
+    *,
+    schema: dict[str, Any] | None,
+    mapping: dict[str, Any] | None,
+    parameters: dict[str, Any] | None,
+    applied_defaults: dict[str, Any] | None = None,
+    provided: dict[str, Any] | None = None,
+    slot_values: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    bindings = mapping or {}
+    values = parameters or {}
+    defaults = applied_defaults or {}
+    provided_values = provided or {}
+    slots = slot_values or {}
+    input_names: list[str] = []
+    for name in [*schema_properties(schema), *bindings]:
+        if name and name not in input_names:
+            input_names.append(str(name))
+    for group in schema_required_parameter_groups(schema):
+        for name in group:
+            if name and name not in input_names:
+                input_names.append(str(name))
+    rows: list[dict[str, Any]] = []
+    required_inputs = {
+        name
+        for group in schema_required_parameter_groups(schema)
+        for name in group
+    }
+    for input_name in input_names:
+        source_ref = str(bindings.get(input_name) or "")
+        value = copy.deepcopy(values.get(input_name))
+        source, separator, source_value = source_ref.partition(":")
+        missing = not _schema_value_is_present(value)
+        if input_name in defaults:
+            status = "defaulted"
+            value = copy.deepcopy(defaults[input_name])
+        elif source == "slot" and separator == ":":
+            missing = not slot_value_is_filled(slots, provided_values, source_value)
+            status = "missing" if missing else "resolved"
+            if missing:
+                value = None
+        elif source_ref and value == source_ref and source not in {"constant", "secret"}:
+            status = "missing"
+            missing = True
+            value = None
+        else:
+            status = "missing" if missing else "resolved"
+        row = {
+            "input": input_name,
+            "source_ref": source_ref,
+            "value": value,
+            "status": status,
+            "required": input_name in required_inputs,
+        }
+        if source == "slot" and separator == ":":
+            row["slot_id"] = source_value
+        if status == "defaulted":
+            row["defaulted"] = True
+        rows.append(row)
+    return rows
+
+
+def missing_capability_input_resolution(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row.get("status") == "missing"
+        and row.get("required")
+    ]
+
+
+def drop_missing_optional_capability_inputs(
+    parameters: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result = copy.deepcopy(parameters)
+    for row in rows:
+        if row.get("status") != "missing" or row.get("required"):
+            continue
+        input_name = row.get("input")
+        if input_name:
+            result.pop(str(input_name), None)
+    return result
 
 
 def profile_confidence_thresholds(profile: dict[str, Any] | None) -> dict[str, float]:
@@ -2888,6 +3061,8 @@ DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE = (
     "Если constraints.requires_output_mapping=true, заполняй output_mapping только в selected_output_slots. "
     "Если constraints.requires_output_mapping=false, верни output_mapping={} и не подбирай выходы. "
     "Используй descriptions слотов и полей capability как основной источник смысла. "
+    "Возвращай итоговый input_mapping явно; администратор будет проверять deterministic source-ref и resolved values. "
+    "Если descriptions/examples недостаточны или два слота похожи по смыслу, не угадывай: выбери самый явно описанный source-ref и отрази предположение в reason. "
     "Не выдумывай слоты, capability, input/output поля."
 )
 
@@ -3776,7 +3951,7 @@ class ConfigStore:
     def active_payload(self, domain: str) -> dict[str, Any]:
         overrides = _ACTIVE_PAYLOAD_OVERRIDES.get()
         if overrides and domain in overrides:
-            return copy.deepcopy(overrides[domain])
+            return self._normalize_payload(domain, overrides[domain])
         return self.active_config(domain)["payload"]
 
     @contextmanager
@@ -3905,7 +4080,9 @@ class ConfigStore:
             item["scenario_id"]: item["display_name"]
             for item in DEFAULT_SCENARIOS
         }
-        if domain == "service_scenarios":
+        if domain == "capabilities":
+            normalized = normalize_capability_contracts(normalized)
+        elif domain == "service_scenarios":
             for scenario in normalized.get("scenarios", []):
                 scenario.pop("tool_launch_matrix_id", None)
                 scenario.setdefault("default_channel_id", "debug")
@@ -4141,7 +4318,11 @@ class ConfigStore:
             "execution_mode": (binding or {}).get("execution_mode"),
             "action_type": "read_only",
             "parameter_bindings": input_mapping,
-            "required_slots": source_ref_slot_ids(input_mapping),
+            "required_slots": required_source_ref_slot_ids(
+                (capability or {}).get("input_schema") or {},
+                input_mapping,
+            ),
+            "input_schema": copy.deepcopy((capability or {}).get("input_schema") or {}),
             "completion_policy": policy,
             "capability_exists": bool(capability),
             "binding_exists": bool(binding),
@@ -4227,7 +4408,26 @@ class ConfigStore:
                 provided=provided or {},
                 slot_values=slot_values,
             )
+            parameters, applied_parameter_defaults = apply_schema_parameter_defaults(
+                launch.get("input_schema") or {},
+                parameters,
+            )
+            if applied_parameter_defaults:
+                item["applied_parameter_defaults"] = applied_parameter_defaults
+            input_resolution = capability_input_resolution_rows(
+                schema=launch.get("input_schema") or {},
+                mapping=launch.get("parameter_bindings") or {},
+                parameters=parameters,
+                applied_defaults=applied_parameter_defaults,
+                provided=provided or {},
+                slot_values=slot_values,
+            )
+            parameters = drop_missing_optional_capability_inputs(parameters, input_resolution)
             item["parameters"] = copy.deepcopy(parameters)
+            missing_input_resolution = missing_capability_input_resolution(input_resolution)
+            item["input_resolution"] = input_resolution
+            if missing_input_resolution:
+                item["missing_inputs"] = missing_input_resolution
             profile_key = str(launch.get("profile_id") or launch.get("launch_id") or "")
             previous_blocker = blocked_profile_steps.get(profile_key)
             if previous_blocker:
@@ -4260,6 +4460,36 @@ class ConfigStore:
                     continue
             if missing_parameter_slots:
                 item["status"] = "blocked_by_missing_slots"
+                item["block_reasons"] = [
+                    (
+                        f"{row.get('input')} <- {row.get('source_ref')}: значение не заполнено"
+                        if row.get("source_ref")
+                        else f"{row.get('input')}: значение не заполнено"
+                    )
+                    for row in missing_input_resolution
+                    if row.get("slot_id") in missing_parameter_slots
+                ] or [
+                    f"Не заполнены слоты параметров: {', '.join(missing_parameter_slots)}."
+                ]
+                blocked_launches.append(item)
+                if profile_key:
+                    blocked_profile_steps[profile_key] = item
+                continue
+            missing_required_input_groups = missing_required_parameter_groups(
+                launch.get("input_schema") or {},
+                parameters,
+            )
+            if missing_required_input_groups:
+                missing_required_inputs = [
+                    format_required_parameter_group(group)
+                    for group in missing_required_input_groups
+                ]
+                item["status"] = "blocked_by_missing_required_inputs"
+                item["missing_required_inputs"] = missing_required_inputs
+                item["block_reasons"] = [
+                    "Не заполнены обязательные параметры capability: "
+                    f"{', '.join(missing_required_inputs)}."
+                ]
                 blocked_launches.append(item)
                 if profile_key:
                     blocked_profile_steps[profile_key] = item
@@ -4283,6 +4513,18 @@ class ConfigStore:
                 "source_target_slot_id": launch.get("target_slot_id"),
                 "source_output_slots_order": launch.get("output_slots_order"),
             }
+            async_diagnostics_level = str(simulation_options.get("async_diagnostics_level") or "off").lower()
+            if launch.get("completion_policy", {}).get("mode") == "external_event" and async_diagnostics_level != "off":
+                item["async_diagnostics"] = {
+                    "level": async_diagnostics_level,
+                    "source": "scenario_simulation",
+                    "run_mode": simulation_options.get("run_mode"),
+                }
+                action_extensions["async_diagnostics"] = {
+                    "level": async_diagnostics_level,
+                    "source": "scenario_simulation",
+                    "run_mode": simulation_options.get("run_mode"),
+                }
             action_extensions = {
                 key: value
                 for key, value in action_extensions.items()
@@ -5245,6 +5487,49 @@ class ConfigStore:
                     capability.get("input_schema", {}),
                     parameters,
                 )
+                input_resolution = capability_input_resolution_rows(
+                    schema=capability.get("input_schema", {}),
+                    mapping=parameter_sources,
+                    parameters=parameters,
+                    applied_defaults=applied_parameter_defaults,
+                    provided=provided,
+                    slot_values=slot_values,
+                )
+                parameters = drop_missing_optional_capability_inputs(parameters, input_resolution)
+                missing_required_input_groups = missing_required_parameter_groups(
+                    capability.get("input_schema", {}),
+                    parameters,
+                )
+                if missing_required_input_groups:
+                    missing_required_inputs = [
+                        format_required_parameter_group(group)
+                        for group in missing_required_input_groups
+                    ]
+                    append_trace(
+                        execution_trace,
+                        step="1",
+                        status="blocked",
+                        title=f"Обогащение контекста: {enrichment_step.get('step_name') or profile['display_name']}",
+                        message="Не заполнены обязательные параметры capability.",
+                        details={
+                            "capability_id": capability_id,
+                            "parameter_sources": parameter_sources,
+                            "parameters": parameters,
+                            "applied_parameter_defaults": applied_parameter_defaults,
+                            "input_resolution": input_resolution,
+                            "missing_required_inputs": missing_required_inputs,
+                        },
+                    )
+                    return {
+                        **default_result,
+                        "enrichment_step_results": enrichment_step_results,
+                        "status": "blocked_by_missing_required_inputs",
+                        "decision": "handoff",
+                        "reason": (
+                            "Не заполнены обязательные параметры capability: "
+                            f"{', '.join(missing_required_inputs)}."
+                        ),
+                    }
                 mock_output = copy.deepcopy(
                     ((binding.get("extensions") or {}).get("mock_output"))
                     or ((capability.get("extensions") or {}).get("mock_output"))
@@ -5262,6 +5547,7 @@ class ConfigStore:
                             "execution_mode": binding.get("execution_mode"),
                             "parameters": parameters,
                             "applied_parameter_defaults": applied_parameter_defaults,
+                            "input_resolution": input_resolution,
                             "result": {
                                 "status": "ready_for_execution",
                                 "reason": "Capability будет выполнена внешним MCP при анализе заявки.",
@@ -5285,6 +5571,7 @@ class ConfigStore:
                                 "parameter_sources": parameter_sources,
                                 "parameters": parameters,
                                 "applied_parameter_defaults": applied_parameter_defaults,
+                                "input_resolution": input_resolution,
                                 "result": enrichment_step_results[step_id]["result"],
                             },
                         )
@@ -5307,6 +5594,7 @@ class ConfigStore:
                             "parameter_sources": parameter_sources,
                             "parameters": parameters,
                             "applied_parameter_defaults": applied_parameter_defaults,
+                            "input_resolution": input_resolution,
                             "result": {
                                 "status": "not_executed",
                                 "reason": "В режиме проверки без выполнения нужен тестовый ответ capability.",
@@ -5330,6 +5618,7 @@ class ConfigStore:
                     "execution_mode": binding.get("execution_mode"),
                     "parameters": parameters,
                     "applied_parameter_defaults": applied_parameter_defaults,
+                    "input_resolution": input_resolution,
                     "result": mock_output,
                     "completion_policy": launch.get("completion_policy"),
                 }
@@ -5350,6 +5639,7 @@ class ConfigStore:
                         "parameter_sources": parameter_sources,
                         "parameters": parameters,
                         "applied_parameter_defaults": applied_parameter_defaults,
+                        "input_resolution": input_resolution,
                         "result": mock_output,
                     },
                 )
@@ -6069,6 +6359,7 @@ class ConfigStore:
         allow_mock_integrations: bool | None = None,
         allow_action_with_approval: bool | None = None,
         bypass_policy_gates: bool | None = None,
+        async_diagnostics_level: str | None = None,
     ) -> dict[str, Any]:
         detail = self.scenario_detail(scenario_id)
         if channel_id:
@@ -6084,6 +6375,7 @@ class ConfigStore:
             allow_mock_integrations=allow_mock_integrations,
             allow_action_with_approval=allow_action_with_approval,
             bypass_policy_gates=bypass_policy_gates,
+            async_diagnostics_level=async_diagnostics_level,
         )
         execution_trace: list[dict[str, Any]] = []
         append_trace(
@@ -6101,6 +6393,7 @@ class ConfigStore:
                     "allow_mock_integrations",
                     "allow_action_with_approval",
                     "bypass_policy_gates",
+                    "async_diagnostics_level",
                 )
             },
         )
@@ -6910,6 +7203,466 @@ class ConfigStore:
                 if token is not None:
                     _ACTIVE_PAYLOAD_OVERRIDES.reset(token)
         return normalized
+
+    def _latest_operator_payload_or_active(self, domain: str, operator_id: str) -> dict[str, Any]:
+        draft_payload = self._latest_working_draft_payload(
+            domain=domain,
+            created_by=operator_id,
+            base_version_id=self.active_version_id(domain),
+        )
+        return draft_payload or self.active_payload(domain)
+
+    def _linked_scenario_raw_payloads(
+        self,
+        *,
+        scenario: dict[str, Any],
+        operator_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        scenario_id = str(scenario.get("scenario_id") or "").strip()
+        raw_payloads = {
+            domain: self._latest_operator_payload_or_active(domain, operator_id)
+            for domain in SCENARIO_LINKED_VALIDATION_DOMAINS
+        }
+        scenarios_payload = copy.deepcopy(raw_payloads["service_scenarios"])
+        scenarios = list(scenarios_payload.get("scenarios") or [])
+        if scenario_id:
+            scenario_index = next(
+                (index for index, item in enumerate(scenarios) if item.get("scenario_id") == scenario_id),
+                -1,
+            )
+            if scenario_index >= 0:
+                scenarios[scenario_index] = copy.deepcopy(scenario)
+            else:
+                scenarios.append(copy.deepcopy(scenario))
+        scenarios_payload["scenarios"] = scenarios
+        raw_payloads["service_scenarios"] = scenarios_payload
+        return raw_payloads
+
+    def _normalize_linked_scenario_payloads(
+        self,
+        raw_payloads: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        normalized: dict[str, dict[str, Any]] = {}
+        profile_domain = "attribute_resolution_profiles"
+        for domain in SCENARIO_LINKED_VALIDATION_DOMAINS:
+            if domain == profile_domain:
+                continue
+            normalized[domain] = self._normalize_payload(domain, raw_payloads[domain])
+        token = _ACTIVE_PAYLOAD_OVERRIDES.set(normalized) if normalized else None
+        try:
+            normalized[profile_domain] = self._normalize_payload(profile_domain, raw_payloads[profile_domain])
+        finally:
+            if token is not None:
+                _ACTIVE_PAYLOAD_OVERRIDES.reset(token)
+        return normalized
+
+    def _scenario_scoped_validation_payloads(
+        self,
+        payloads: dict[str, dict[str, Any]],
+        scenario_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        scoped = copy.deepcopy(payloads)
+
+        def pick_collection(
+            domain: str,
+            collection_key: str,
+            id_key: str,
+            ids: set[str],
+        ) -> list[dict[str, Any]]:
+            by_id = self._by_id(payloads[domain].get(collection_key) or [], id_key)
+            return [
+                copy.deepcopy(by_id[item_id])
+                for item_id in sorted(ids)
+                if item_id in by_id
+            ]
+
+        scenario = self._by_id(payloads["service_scenarios"].get("scenarios") or [], "scenario_id").get(scenario_id)
+        scoped["service_scenarios"] = {
+            "schema_version": "1.0",
+            "scenarios": [copy.deepcopy(scenario)] if scenario else [],
+        }
+        slot_schema = None
+        if scenario:
+            slot_schema = self._by_id(
+                payloads["slot_schemas"].get("slot_schemas") or [],
+                "slot_schema_id",
+            ).get(scenario.get("slot_schema_id") or "")
+        scoped["slot_schemas"] = {
+            "schema_version": "1.0",
+            "slot_schemas": [copy.deepcopy(slot_schema)] if slot_schema else [],
+        }
+        profile_ids = set(slot_schema_resolution_profile_ids(slot_schema))
+        profile_by_id = self._by_id(
+            payloads["attribute_resolution_profiles"].get("profiles") or [],
+            "profile_id",
+        )
+        profiles = [
+            copy.deepcopy(profile_by_id[profile_id])
+            for profile_id in sorted(profile_ids)
+            if profile_id in profile_by_id
+        ]
+        scoped["attribute_resolution_profiles"] = {
+            "schema_version": "1.0",
+            "profiles": profiles,
+        }
+        capability_ids = {
+            str(step.get("capability_id") or "").strip()
+            for profile in profiles
+            for step in profile.get("enrichment_steps") or []
+            if str(step.get("capability_id") or "").strip()
+        }
+        step_environment_ids = {
+            str(step.get("mcp_environment_id") or "").strip()
+            for profile in profiles
+            for step in profile.get("enrichment_steps") or []
+            if str(step.get("mcp_environment_id") or "").strip()
+        }
+        scoped["capabilities"] = {
+            "schema_version": "1.0",
+            "capabilities": pick_collection("capabilities", "capabilities", "capability_id", capability_ids),
+        }
+        linked_bindings = [
+            copy.deepcopy(binding)
+            for binding in payloads["capability_bindings"].get("bindings") or []
+            if str(binding.get("capability_id") or "").strip() in capability_ids
+        ]
+        scoped["capability_bindings"] = {
+            "schema_version": "1.0",
+            "bindings": linked_bindings,
+        }
+        binding_environment_ids = {
+            str(binding.get("environment_id") or "").strip()
+            for binding in linked_bindings
+            if str(binding.get("environment_id") or "").strip()
+        }
+        scoped["mcp_environments"] = {
+            "schema_version": "1.0",
+            "environments": pick_collection(
+                "mcp_environments",
+                "environments",
+                "environment_id",
+                step_environment_ids | binding_environment_ids,
+            ),
+        }
+        scoped["classification_routes"] = {
+            "schema_version": "1.0",
+            "routes": [],
+        }
+        scoped["prompt_packs"] = {
+            "schema_version": "1.0",
+            "packs": [],
+        }
+        scoped["orchestrator_policy"] = {
+            "schema_version": "1.0",
+            "policies": [],
+        }
+        scoped["escalation_policies"] = {
+            "schema_version": "1.0",
+            "policies": [],
+        }
+        scoped["interaction_channels"] = {
+            "schema_version": "1.0",
+            "channels": [],
+        }
+        if scenario:
+            scoped["classification_routes"] = {
+                "schema_version": "1.0",
+                "routes": pick_collection(
+                    "classification_routes",
+                    "routes",
+                    "route_id",
+                    {str(scenario.get("classification_route_id") or "").strip()},
+                ),
+            }
+            scoped["prompt_packs"] = {
+                "schema_version": "1.0",
+                "packs": pick_collection(
+                    "prompt_packs",
+                    "packs",
+                    "prompt_pack_id",
+                    {str(scenario.get("prompt_pack_id") or "").strip()},
+                ),
+            }
+            scoped["orchestrator_policy"] = {
+                "schema_version": "1.0",
+                "policies": pick_collection(
+                    "orchestrator_policy",
+                    "policies",
+                    "policy_id",
+                    {str(scenario.get("orchestrator_policy_id") or "").strip()},
+                ),
+            }
+            scoped["escalation_policies"] = {
+                "schema_version": "1.0",
+                "policies": pick_collection(
+                    "escalation_policies",
+                    "policies",
+                    "policy_id",
+                    {str(scenario.get("escalation_policy_id") or "").strip()},
+                ),
+            }
+            channel_ids = {
+                str(scenario.get("default_channel_id") or "").strip(),
+                *[
+                    str(channel_id or "").strip()
+                    for channel_id in scenario.get("allowed_channel_ids") or []
+                ],
+            }
+            scoped["interaction_channels"] = {
+                "schema_version": "1.0",
+                "channels": pick_collection("interaction_channels", "channels", "channel_id", channel_ids),
+            }
+        return scoped
+
+    def validate_scenario_linked_structure(
+        self,
+        *,
+        scenario: dict[str, Any],
+        operator_id: str,
+    ) -> dict[str, Any]:
+        scenario_id = str(scenario.get("scenario_id") or "").strip()
+        raw_payloads = self._linked_scenario_raw_payloads(
+            scenario=scenario,
+            operator_id=operator_id,
+        )
+        payloads = self._normalize_linked_scenario_payloads(raw_payloads)
+        validation_payloads = self._scenario_scoped_validation_payloads(payloads, scenario_id)
+        validations = {
+            domain: self.validate_payload(domain, validation_payloads[domain], active_overrides=payloads)
+            for domain in SCENARIO_LINKED_VALIDATION_DOMAINS
+        }
+        domain_errors = [
+            f"{CONFIG_DOMAINS[domain].title}: {error}"
+            for domain, validation in validations.items()
+            for error in validation.get("errors") or []
+        ]
+        hierarchy_errors = self._validate_linked_scenario_hierarchy(payloads, scenario_id)
+        errors = list(dict.fromkeys([*domain_errors, *hierarchy_errors]))
+        return {
+            "schema_version": "1.0",
+            "status": "invalid" if errors else "valid",
+            "scenario_id": scenario_id,
+            "checked_domains": list(SCENARIO_LINKED_VALIDATION_DOMAINS),
+            "errors": errors,
+            "warnings": [],
+            "validations": validations,
+        }
+
+    @staticmethod
+    def _linked_object_label(item: dict[str, Any] | None, id_key: str) -> str:
+        if not item:
+            return "н/д"
+        item_id = str(item.get(id_key) or "")
+        display_name = str(item.get("display_name") or item.get("name") or item_id)
+        return f'"{display_name}" ({item_id})' if item_id and display_name != item_id else item_id or display_name
+
+    def _validate_linked_scenario_hierarchy(
+        self,
+        payloads: dict[str, dict[str, Any]],
+        scenario_id: str,
+    ) -> list[str]:
+        errors: list[str] = []
+        if not scenario_id:
+            return ["Сценарий: scenario_id не заполнен."]
+
+        scenario_by_id = self._by_id(payloads["service_scenarios"].get("scenarios") or [], "scenario_id")
+        scenario = scenario_by_id.get(scenario_id)
+        if not scenario:
+            return [f"Сценарий {scenario_id}: не найден в effective service_scenarios."]
+        scenario_path = f"Сценарий {self._linked_object_label(scenario, 'scenario_id')}"
+
+        linked_catalogs = [
+            (
+                "classification_routes",
+                "routes",
+                "route_id",
+                "classification_route_id",
+                "маршрут классификации",
+            ),
+            ("prompt_packs", "packs", "prompt_pack_id", "prompt_pack_id", "prompt pack"),
+            (
+                "orchestrator_policy",
+                "policies",
+                "policy_id",
+                "orchestrator_policy_id",
+                "политика оркестрации",
+            ),
+            (
+                "escalation_policies",
+                "policies",
+                "policy_id",
+                "escalation_policy_id",
+                "политика эскалации",
+            ),
+        ]
+        for domain, collection_key, id_key, field_name, label in linked_catalogs:
+            ref_id = str(scenario.get(field_name) or "").strip()
+            if not ref_id:
+                errors.append(f"{scenario_path}: {label} не указана: {field_name}.")
+                continue
+            item = self._by_id(payloads[domain].get(collection_key) or [], id_key).get(ref_id)
+            if not item:
+                errors.append(f"{scenario_path}: {label} не найдена: {ref_id}.")
+            elif not config_item_is_active(item):
+                errors.append(f"{scenario_path}: {label} не активна: {ref_id}.")
+
+        channel_by_id = self._by_id(payloads["interaction_channels"].get("channels") or [], "channel_id")
+        channel_refs = [
+            ("канал по умолчанию", str(scenario.get("default_channel_id") or "").strip()),
+            *[
+                ("разрешенный канал", str(channel_id or "").strip())
+                for channel_id in scenario.get("allowed_channel_ids") or []
+            ],
+        ]
+        for label, channel_id in channel_refs:
+            if not channel_id:
+                errors.append(f"{scenario_path}: {label} не указан.")
+                continue
+            channel = channel_by_id.get(channel_id)
+            if not channel:
+                errors.append(f"{scenario_path}: {label} не найден: {channel_id}.")
+            elif not config_item_is_active(channel):
+                errors.append(f"{scenario_path}: {label} не активен: {channel_id}.")
+
+        slot_schema_by_id = self._by_id(payloads["slot_schemas"].get("slot_schemas") or [], "slot_schema_id")
+        profile_by_id = self._by_id(payloads["attribute_resolution_profiles"].get("profiles") or [], "profile_id")
+        capability_by_id = self._by_id(payloads["capabilities"].get("capabilities") or [], "capability_id")
+        environment_by_id = self._by_id(payloads["mcp_environments"].get("environments") or [], "environment_id")
+        bindings = payloads["capability_bindings"].get("bindings") or []
+
+        slot_schema_id = scenario.get("slot_schema_id")
+        slot_schema = slot_schema_by_id.get(slot_schema_id or "")
+        if not slot_schema:
+            errors.append(f"{scenario_path}: схема слотов не найдена: {slot_schema_id}.")
+            return errors
+        if not config_item_is_active(slot_schema):
+            errors.append(f"{scenario_path}: схема слотов не активна: {slot_schema_id}.")
+        slot_schema_path = f"{scenario_path} -> Схема слотов {self._linked_object_label(slot_schema, 'slot_schema_id')}"
+        slot_ids = {
+            slot.get("slot_id")
+            for slot in [*(slot_schema.get("slots") or []), *flatten_slot_schema_slots(slot_schema)]
+            if slot.get("slot_id")
+        }
+
+        profile_refs: list[tuple[str, str]] = []
+        for stage in slot_schema_stages(slot_schema):
+            stage_label = self._linked_object_label(stage, "stage_id")
+            stage_profile_id = stage.get("resolution_profile_id")
+            if stage_profile_id:
+                profile_refs.append((f"{slot_schema_path} -> Этап {stage_label}", stage_profile_id))
+            for slot in stage.get("slots") or []:
+                if slot_fill_method(slot) == "resolution_profile" and slot.get("resolution_profile_id"):
+                    slot_label = self._linked_object_label(slot, "slot_id")
+                    profile_refs.append((f"{slot_schema_path} -> Слот {slot_label}", slot["resolution_profile_id"]))
+        for slot in slot_schema.get("slots") or []:
+            if slot_fill_method(slot) == "resolution_profile" and slot.get("resolution_profile_id"):
+                slot_label = self._linked_object_label(slot, "slot_id")
+                profile_refs.append((f"{slot_schema_path} -> Слот {slot_label}", slot["resolution_profile_id"]))
+
+        checked_profile_ids: set[str] = set()
+        for ref_path, profile_id in profile_refs:
+            profile = profile_by_id.get(profile_id or "")
+            if not profile:
+                errors.append(f"{ref_path}: профиль разрешения не найден: {profile_id}.")
+                continue
+            if not config_item_is_active(profile):
+                errors.append(f"{ref_path}: профиль разрешения не активен: {profile_id}.")
+            if profile.get("slot_schema_id") != slot_schema.get("slot_schema_id"):
+                errors.append(
+                    f"{ref_path}: профиль {profile_id} привязан к другой схеме слотов: "
+                    f"{profile.get('slot_schema_id') or 'не указана'}."
+                )
+            if profile_id in checked_profile_ids:
+                continue
+            checked_profile_ids.add(profile_id)
+            profile_path = f"{slot_schema_path} -> Профиль {self._linked_object_label(profile, 'profile_id')}"
+            for output in profile.get("output_slots_order") or []:
+                output_slot_id = output.get("slot_id")
+                if output_slot_id and output_slot_id not in slot_ids:
+                    errors.append(
+                        f"{profile_path}: выходной слот {output_slot_id} отсутствует в схеме слотов."
+                    )
+            errors.extend(
+                self._validate_linked_profile_capabilities(
+                    profile=profile,
+                    profile_path=profile_path,
+                    capability_by_id=capability_by_id,
+                    environment_by_id=environment_by_id,
+                    bindings=bindings,
+                )
+            )
+        return errors
+
+    def _validate_linked_profile_capabilities(
+        self,
+        *,
+        profile: dict[str, Any],
+        profile_path: str,
+        capability_by_id: dict[str, dict[str, Any]],
+        environment_by_id: dict[str, dict[str, Any]],
+        bindings: list[dict[str, Any]],
+    ) -> list[str]:
+        errors: list[str] = []
+        for index, step in enumerate(profile.get("enrichment_steps") or [], start=1):
+            capability_id = step.get("capability_id")
+            if not capability_id:
+                continue
+            step_path = (
+                f"{profile_path} -> Шаг {index} "
+                f'"{step.get("step_name") or step.get("step_id") or f"step{index}"}"'
+            )
+            capability = capability_by_id.get(capability_id or "")
+            if not capability:
+                errors.append(f"{step_path}: capability не найдена: {capability_id}.")
+                continue
+            if not config_item_is_active(capability):
+                errors.append(f"{step_path}: capability не активна: {capability_id}.")
+            completion_policy = step.get("completion_policy") or capability.get("default_completion_policy") or {}
+            expected_mode = ""
+            if completion_policy.get("mode") == "external_event":
+                expected_mode = "async"
+            elif completion_policy.get("mode") == "sync":
+                expected_mode = "sync"
+            environment_id = step.get("mcp_environment_id")
+            candidates = [
+                binding
+                for binding in bindings
+                if binding.get("capability_id") == capability_id
+                and binding.get("status") == "active"
+                and (not expected_mode or binding.get("execution_mode") == expected_mode)
+                and (not environment_id or binding.get("environment_id") == environment_id)
+            ]
+            if not candidates:
+                mode_text = f"/{expected_mode}" if expected_mode else ""
+                env_text = f" в MCP окружении {environment_id}" if environment_id else ""
+                errors.append(
+                    f"{step_path}: нет active capability binding для {capability_id}{mode_text}{env_text}."
+                )
+                continue
+            if len(candidates) > 1:
+                errors.append(
+                    f"{step_path}: найдено больше одной active capability binding для {capability_id}: "
+                    f"{', '.join(binding.get('binding_id') or 'н/д' for binding in candidates)}."
+                )
+            binding = candidates[0]
+            environment = environment_by_id.get(binding.get("environment_id") or "")
+            if not environment:
+                errors.append(
+                    f"{step_path}: MCP окружение binding {binding.get('binding_id')} не найдено: "
+                    f"{binding.get('environment_id')}."
+                )
+                continue
+            if not config_item_is_active(environment):
+                errors.append(
+                    f"{step_path}: MCP окружение {binding.get('environment_id')} не активно."
+                )
+            allowed_capabilities = set(environment.get("allowed_capabilities") or [])
+            if allowed_capabilities and capability_id not in allowed_capabilities:
+                errors.append(
+                    f"{step_path}: capability {capability_id} не разрешена в MCP окружении "
+                    f"{binding.get('environment_id')}."
+                )
+        return errors
 
     def _bundle_activation_errors(self, payloads: dict[str, dict[str, Any]]) -> list[str]:
         errors: list[str] = []
@@ -9456,13 +10209,13 @@ def default_capabilities() -> dict[str, Any]:
                 "input_schema": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["problem_url", "service_request"],
+                    "required": ["problem_url", "service_request", "from", "reply_to"],
                     "properties": {
                         "problem_url": {"type": "string", "minLength": 1},
                         "service_request": {"type": "string", "minLength": 1},
                         "problem_host": {"type": "string"},
-                        "from": {"type": "string"},
-                        "reply_to": {"type": "string"},
+                        "from": {"type": "string", "minLength": 1},
+                        "reply_to": {"type": "string", "minLength": 1},
                         "template_id": {"type": "string"},
                         "poll_interval_minutes": {"type": "integer", "minimum": 1},
                         "timeout_minutes": {"type": "integer", "minimum": 1},

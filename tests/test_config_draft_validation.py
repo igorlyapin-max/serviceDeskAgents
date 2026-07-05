@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -55,6 +56,14 @@ def mark_draft_ready(store: ConfigStore, draft_id: str) -> dict:
             "gates": [],
         },
     )
+
+
+def custom_scenario(store: ConfigStore, scenario_id: str = "custom_scenario") -> dict:
+    scenario = copy.deepcopy(store.active_payload("service_scenarios")["scenarios"][0])
+    scenario["scenario_id"] = scenario_id
+    scenario["display_name"] = "Проверочный сценарий"
+    scenario["slot_schema_id"] = "slot.custom_copy"
+    return scenario
 
 
 def custom_slot_payload(profile_id: str = "profile.custom.attribute_copy") -> dict:
@@ -167,6 +176,37 @@ def custom_profile_payload(*, output_slot_id: str = "incident_number") -> dict:
             }
         ],
     }
+
+
+def custom_provider_step_profile_payload(*, mcp_environment_id: str = "mcp.provider_ops") -> dict:
+    payload = custom_profile_payload()
+    profile = payload["profiles"][0]
+    profile["output_slots_order"][0][
+        "source_hint"
+    ] = "${step.step1.capability.provider_channel_repair_monitor.output.provider_ticket_number}"
+    profile["enrichment_steps"] = [
+        {
+            "step_id": "step1",
+            "step_name": "Мониторинг провайдера",
+            "capability_id": "provider_channel_repair_monitor",
+            "mcp_environment_id": mcp_environment_id,
+            "input_mapping": {
+                "problem_url": "constant:http://zabbix/problem",
+                "service_request": "slot:incident_number",
+                "from": "constant:monitor@example.test",
+                "reply_to": "constant:monitor@example.test",
+            },
+            "output_mapping": {"incident_number": "provider_ticket_number"},
+            "completion_policy": {
+                "mode": "external_event",
+                "expected_event_type": "provider_channel_repair_monitor.completed",
+                "max_wait_seconds": 1200,
+                "timeout_action": "escalate_operator",
+            },
+            "on_error": "continue_to_llm",
+        }
+    ]
+    return payload
 
 
 def custom_multi_output_profile_payload(profile_id: str = "profile.custom.attribute_copy") -> dict:
@@ -618,6 +658,8 @@ class ConfigDraftValidationTest(unittest.TestCase):
                     "input_mapping": {
                         "problem_url": "constant:http://zabbix/problem",
                         "service_request": "slot:incident_number",
+                        "from": "constant:monitor@example.test",
+                        "reply_to": "constant:monitor@example.test",
                     },
                     "output_mapping": {"incident_number": "provider_ticket_number"},
                     "on_error": "continue_to_llm",
@@ -659,6 +701,8 @@ class ConfigDraftValidationTest(unittest.TestCase):
                     "input_mapping": {
                         "problem_url": "constant:http://zabbix/problem",
                         "service_request": "constant:SR-1",
+                        "from": "constant:monitor@example.test",
+                        "reply_to": "constant:monitor@example.test",
                     },
                     "output_mapping": {
                         "provider_mail_body": "provider_mail_body",
@@ -721,6 +765,8 @@ class ConfigDraftValidationTest(unittest.TestCase):
                     "input_mapping": {
                         "problem_url": "constant:http://zabbix/problem",
                         "service_request": "slot:incident_number",
+                        "from": "constant:monitor@example.test",
+                        "reply_to": "constant:monitor@example.test",
                     },
                     "output_mapping": {"incident_number": "provider_ticket_number"},
                     "on_error": "continue_to_llm",
@@ -1205,6 +1251,159 @@ class ConfigDraftValidationTest(unittest.TestCase):
             self.assertTrue(
                 any("profile.custom.attribute_copy" in error for error in validated["validation"]["errors"]),
                 validated["validation"]["errors"],
+            )
+
+    def test_scenario_linked_validation_uses_current_operator_slot_and_profile_drafts(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(),
+                created_by="admin-1",
+            )
+
+            result = store.validate_scenario_linked_structure(
+                scenario=custom_scenario(store),
+                operator_id="admin-1",
+            )
+
+            self.assertEqual(result["status"], "valid", result["errors"])
+            self.assertIn("slot_schemas", result["checked_domains"])
+            self.assertIn("attribute_resolution_profiles", result["checked_domains"])
+
+    def test_scenario_linked_validation_scopes_unrelated_prompt_and_escalation_drafts(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(),
+                created_by="admin-1",
+            )
+            prompt_payload = copy.deepcopy(store.active_payload("prompt_packs"))
+            unused_pack = copy.deepcopy(prompt_payload["packs"][0])
+            unused_pack["prompt_pack_id"] = "prompt.unused_invalid"
+            unused_pack["blocks"] = {"react_planning": "legacy block"}
+            prompt_payload["packs"].append(unused_pack)
+            create_current_draft(
+                store,
+                domain="prompt_packs",
+                payload=prompt_payload,
+                created_by="admin-1",
+            )
+            escalation_payload = copy.deepcopy(store.active_payload("escalation_policies"))
+            unused_policy = copy.deepcopy(escalation_payload["policies"][0])
+            unused_policy["policy_id"] = "escalation.unused_invalid"
+            unused_policy["handoff_conditions"] = ["two_tool_errors"]
+            escalation_payload["policies"].append(unused_policy)
+            create_current_draft(
+                store,
+                domain="escalation_policies",
+                payload=escalation_payload,
+                created_by="admin-1",
+            )
+
+            result = store.validate_scenario_linked_structure(
+                scenario=custom_scenario(store),
+                operator_id="admin-1",
+            )
+
+            self.assertEqual(result["status"], "valid", result["errors"])
+            self.assertEqual(result["validations"]["prompt_packs"]["status"], "valid")
+            self.assertEqual(result["validations"]["escalation_policies"]["status"], "valid")
+
+    def test_scenario_linked_validation_rejects_invalid_profile_output_slot(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(output_slot_id="other_slot"),
+                created_by="admin-1",
+            )
+
+            result = store.validate_scenario_linked_structure(
+                scenario=custom_scenario(store),
+                operator_id="admin-1",
+            )
+
+            self.assertEqual(result["status"], "invalid")
+            self.assertTrue(
+                any("other_slot" in error and "выходной слот" in error for error in result["errors"]),
+                result["errors"],
+            )
+
+    def test_scenario_linked_validation_ignores_other_operator_drafts(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="other-admin",
+            )
+            create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=custom_profile_payload(),
+                created_by="other-admin",
+            )
+
+            result = store.validate_scenario_linked_structure(
+                scenario=custom_scenario(store),
+                operator_id="admin-1",
+            )
+
+            self.assertEqual(result["status"], "invalid")
+            self.assertTrue(
+                any("slot.custom_copy" in error for error in result["errors"]),
+                result["errors"],
+            )
+
+    def test_scenario_linked_validation_reports_missing_active_binding(self) -> None:
+        with TemporaryDirectory() as tempdir:
+            store = ConfigStore(ContractRegistry(), db_path=Path(tempdir) / "state.sqlite")
+            create_current_draft(
+                store,
+                domain="slot_schemas",
+                payload=custom_slot_payload(),
+                created_by="admin-1",
+            )
+            create_current_draft(
+                store,
+                domain="attribute_resolution_profiles",
+                payload=custom_provider_step_profile_payload(mcp_environment_id="mcp.missing"),
+                created_by="admin-1",
+            )
+
+            result = store.validate_scenario_linked_structure(
+                scenario=custom_scenario(store),
+                operator_id="admin-1",
+            )
+
+            self.assertEqual(result["status"], "invalid")
+            self.assertTrue(
+                any("нет active capability binding" in error for error in result["errors"]),
+                result["errors"],
             )
 
 

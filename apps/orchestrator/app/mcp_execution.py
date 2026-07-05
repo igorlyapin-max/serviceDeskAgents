@@ -8,7 +8,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 
 from .http_client import urlopen_with_retry
 
@@ -33,6 +33,58 @@ REQUIRED_ASYNC_CONTEXT_FIELDS = {
 SERVICE_DESK_METADATA_KEYS = ("servicedesk", "serviceDesk", "service_desk")
 ASYNC_EVENT_STATUSES = {"progress", "success", "error", "timeout", "cancelled"}
 PROD_MCP_AUTH_MODES = {"oidc_client_credentials", "oidc_workload_identity"}
+ASYNC_DIAGNOSTICS_LEVELS = {"basic", "verbose"}
+ASYNC_DIAGNOSTICS_ALLOWED_STRING_KEYS = ("source", "run_mode")
+ASYNC_DIAGNOSTICS_MAX_STRING_LENGTH = 120
+ASYNC_DIAGNOSTICS_SENSITIVE_MARKERS = (
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "key",
+    "apikey",
+    "api_key",
+    "credential",
+    "credentials",
+    "authorization",
+    "auth",
+    "bearer",
+    "секрет",
+    "токен",
+    "пароль",
+    "ключ",
+)
+
+
+def _safe_async_diagnostic_text(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    else:
+        text = str(value)
+    text = text.strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if any(marker in lowered for marker in ASYNC_DIAGNOSTICS_SENSITIVE_MARKERS):
+        return "[redacted]"
+    return text[:ASYNC_DIAGNOSTICS_MAX_STRING_LENGTH]
+
+
+def normalize_async_diagnostics(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    level = str(value.get("level") or "").strip().lower()
+    if level not in ASYNC_DIAGNOSTICS_LEVELS:
+        return None
+    normalized: dict[str, Any] = {"level": level}
+    for key in ASYNC_DIAGNOSTICS_ALLOWED_STRING_KEYS:
+        if key not in value:
+            continue
+        safe_value = _safe_async_diagnostic_text(value.get(key))
+        if safe_value:
+            normalized[key] = safe_value
+    return normalized
 
 
 def _schema_type_set(schema: dict[str, Any]) -> set[str]:
@@ -88,6 +140,26 @@ def coerce_inputs_for_schema(inputs: dict[str, Any], schema: dict[str, Any]) -> 
     return copy.deepcopy(_coerce_value_for_schema(inputs, schema))
 
 
+def capability_input_validation_errors(
+    capability: dict[str, Any],
+    inputs: dict[str, Any],
+) -> tuple[dict[str, Any], list[ValidationError]]:
+    input_schema = capability.get("input_schema") or {}
+    normalized_inputs = coerce_inputs_for_schema(inputs, input_schema)
+    errors = sorted(
+        Draft202012Validator(input_schema).iter_errors(normalized_inputs),
+        key=lambda error: (tuple(error.path), tuple(error.schema_path), error.message),
+    )
+    return normalized_inputs, errors
+
+
+def validate_capability_inputs(capability: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+    normalized_inputs, errors = capability_input_validation_errors(capability, inputs)
+    if errors:
+        raise errors[0]
+    return normalized_inputs
+
+
 def select_capability_binding(
     *,
     capability_id: str,
@@ -125,6 +197,7 @@ def build_async_context(
     result_transport: str,
     callback_url: str | None = None,
     result_topic: str | None = None,
+    async_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = {
         "case_id": case_id,
@@ -141,6 +214,9 @@ def build_async_context(
         context["callback_url"] = callback_url
     if result_topic:
         context["result_topic"] = result_topic
+    normalized_async_diagnostics = normalize_async_diagnostics(async_diagnostics)
+    if normalized_async_diagnostics:
+        context["async_diagnostics"] = normalized_async_diagnostics
     validate_async_context(context)
     return context
 
@@ -167,9 +243,7 @@ def build_mcp_tool_request(
     execution_mode = binding.get("execution_mode")
     if execution_mode not in {"sync", "async"}:
         raise McpExecutionError(f"Unsupported MCP execution_mode: {execution_mode}.")
-    input_schema = capability.get("input_schema") or {}
-    normalized_inputs = coerce_inputs_for_schema(inputs, input_schema)
-    Draft202012Validator(input_schema).validate(normalized_inputs)
+    normalized_inputs = validate_capability_inputs(capability, inputs)
     if execution_mode == "async":
         if not async_context:
             raise McpExecutionError("async MCP execution requires async_context.")

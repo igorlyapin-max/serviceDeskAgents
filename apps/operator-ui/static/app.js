@@ -140,6 +140,8 @@ const visibleLabels = {
   pending: 'ожидает',
   planned: 'запланировано',
   provided: 'заполнено',
+  resolved: 'разрешено',
+  defaulted: 'по умолчанию',
   ready: 'готово',
   ready_for_execution: 'готово к выполнению',
   ready_for_react: 'готово к оркестрации',
@@ -348,6 +350,19 @@ function isSensitiveChannelParameter(parameter = {}) {
     || isSensitiveChannelField(parameter.source || '');
 }
 
+function isSensitiveCapabilityInputResolutionRow(row = {}) {
+  return String(row.source_ref || '').startsWith('secret:')
+    || isSensitiveChannelField(row.input || '')
+    || isSensitiveChannelField(row.source_ref || '');
+}
+
+function capabilityInputResolutionDisplayValue(row = {}) {
+  if (isSensitiveCapabilityInputResolutionRow(row)) {
+    return 'скрыто';
+  }
+  return row.value;
+}
+
 function channelParameterStore(scope = 'single') {
   return scope === 'flow'
     ? state.debugFlowChannelParameterValuesByChannel
@@ -473,6 +488,7 @@ function currentTestRunOptions() {
     allow_mock_integrations: true,
     allow_action_with_approval: true,
     bypass_policy_gates: false,
+    async_diagnostics_level: 'verbose',
   };
 }
 
@@ -1038,6 +1054,21 @@ function formatMap(map) {
   return entries.length
     ? entries.map(([key, value]) => `${escapeHtml(key)} = ${escapeHtml(value)}`).join(', ')
     : 'н/д';
+}
+
+function renderCapabilityInputResolution(rows, fallbackMap = {}) {
+  if (!Array.isArray(rows) || !rows.length) {
+    return formatMap(fallbackMap);
+  }
+  return table(
+    ['Input', 'Источник', 'Статус', 'Значение'],
+    rows.map((row) => [
+      escapeHtml(row.input || 'н/д'),
+      escapeHtml(row.source_ref || 'н/д'),
+      badge(row.status || 'missing'),
+      traceJson(capabilityInputResolutionDisplayValue(row)),
+    ]),
+  );
 }
 
 function normalizeWaitingPolicy(waitingPolicy = {}) {
@@ -2217,20 +2248,24 @@ function renderFiveStepView(detail, simulation, options = {}) {
     const bindingLabel = isCapability
       ? `${launch.mcp_environment_id || 'mcp н/д'} / ${launch.mcp_tool_name || 'tool н/д'}`
       : `${launch.endpoint_id || 'endpoint н/д'} / ${launch.operation_id || 'operation н/д'}`;
-    const blockReasons = [
-      ...(runtime.missing_slots || []).map((slotId) => `не заполнен: ${slotId}`),
-      ...(runtime.missing_parameter_slots || []).map((slotId) => `не заполнен: ${slotId}`),
-      ...(runtime.unknown_required_slots || []).map((slotId) => `нет в схеме: ${slotId}`),
+    const detailedBlockReasons = [
       ...(runtime.block_reasons || []),
       ...(launch.block_reasons || []),
-    ];
+    ].filter(Boolean);
+    const blockReasons = detailedBlockReasons.length
+      ? detailedBlockReasons
+      : [
+        ...(runtime.missing_slots || []).map((slotId) => `не заполнен: ${slotId}`),
+        ...(runtime.missing_parameter_slots || []).map((slotId) => `не заполнен: ${slotId}`),
+        ...(runtime.unknown_required_slots || []).map((slotId) => `нет в схеме: ${slotId}`),
+      ];
     return [
       badge(runtime.status),
       escapeHtml(launchName),
       badge(executionLabel),
       escapeHtml(completionPolicySummary(completionPolicy)),
       escapeHtml(formatList(launch.required_slots)),
-      formatMap(launch.parameter_bindings),
+      renderCapabilityInputResolution(runtime.input_resolution || launch.input_resolution, launch.parameter_bindings),
       escapeHtml(bindingLabel),
       badge(launch.risk_level),
       formatList(blockReasons),
@@ -2643,6 +2678,7 @@ function buildScenarioDebugActions(payload) {
       source_slot_schema_id: launch.slot_schema_id,
       source_target_slot_id: launch.target_slot_id,
       source_output_slots_order: launch.output_slots_order,
+      async_diagnostics: launch.async_diagnostics,
       debug_launch_id: launch.launch_id,
     });
     return {

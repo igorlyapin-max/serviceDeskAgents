@@ -35,7 +35,12 @@ MCP tool должен принимать business inputs и, для async-выз
   "expected_event_type": "provider_channel_repair_monitor.completed",
   "idempotency_key_base": "cmd-1",
   "result_transport": "http_callback",
-  "callback_url": "https://servicedesk.example/external-events/mcp"
+  "callback_url": "https://servicedesk.example/external-events/mcp",
+  "async_diagnostics": {
+    "level": "verbose",
+    "source": "scenario_simulation",
+    "run_mode": "operator_full_debug"
+  }
 }
 ```
 
@@ -51,7 +56,7 @@ MCP tool должен принимать business inputs и, для async-выз
   "description": "Monitor provider channel repair.",
   "inputSchema": {
     "type": "object",
-    "required": ["problem_url", "service_request"],
+    "required": ["problem_url", "service_request", "from", "reply_to"],
     "properties": {
       "problem_url": {
         "type": "string",
@@ -60,6 +65,14 @@ MCP tool должен принимать business inputs и, для async-выз
       "service_request": {
         "type": "string",
         "description": "Номер заявки ServiceDesk для корреляции результата."
+      },
+      "from": {
+        "type": "string",
+        "description": "Адрес отправителя, от имени которого MCP-исполнитель отправляет письмо провайдеру."
+      },
+      "reply_to": {
+        "type": "string",
+        "description": "Адрес для ответа провайдера; используется для поиска и корреляции входящего письма."
       }
     }
   },
@@ -172,6 +185,22 @@ POST /admin/config/mcp-environments/{environment_id}/discover/import-drafts
 ```
 
 Ack не заполняет business outputs и не закрывает ожидание.
+
+## Async diagnostics
+
+`async_context.async_diagnostics.level` управляет детализацией промежуточных статусов внешнего исполнителя:
+
+- `off` - достаточно accepted ack и terminal ExternalEvent;
+- `basic` - отправляйте компактные `progress` ExternalEvent для ключевых стадий;
+- `verbose` - отправляйте `progress` ExternalEvent на каждой важной итерации long-running/polling workflow.
+
+`ServiceDeskAgents` передаёт в MCP только безопасные поля diagnostics: `level`, `source`, `run_mode`.
+Произвольные debug payloads, raw request bodies, credentials, tokens и внутренние идентификаторы workflow должны
+оставаться внутри внешнего исполнителя; подробности выполнения передавайте штатными `progress` ExternalEvent.
+
+Progress diagnostics должны идти тем же canonical ExternalEvent contract, что и terminal results. Для polling workflow
+передавайте stage/current_status, checked resource, iteration, last poll, next poll, match counts и last error. Не
+передавайте secrets, tokens, auth refs, raw credentials, внутренние n8n node/workflow ids или webhook paths.
 
 ## ExternalEvent
 

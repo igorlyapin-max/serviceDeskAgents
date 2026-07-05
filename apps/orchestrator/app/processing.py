@@ -13,7 +13,14 @@ from typing import Any
 
 from .action_gates import DEFAULT_STATE_DB_PATH, utc_now
 from .cases import CaseNotFound, CaseStore
-from .mcp_execution import build_async_context, build_mcp_tool_request, invoke_mcp_tool_request, validate_sync_result
+from .mcp_execution import (
+    build_async_context,
+    build_mcp_tool_request,
+    capability_input_validation_errors,
+    invoke_mcp_tool_request,
+    normalize_async_diagnostics,
+    validate_sync_result,
+)
 from .privacy import redact_for_llm
 
 
@@ -435,6 +442,107 @@ class ProcessingStore:
         )
         return wait
 
+    @staticmethod
+    def _capability_input_value_is_present(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str) and not value.strip():
+            return False
+        return True
+
+    def _validate_capability_inputs_before_dispatch(
+        self,
+        capability: dict[str, Any],
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_parameters, errors = capability_input_validation_errors(
+            capability,
+            copy.deepcopy(parameters or {}),
+        )
+        if not errors:
+            return normalized_parameters
+        capability_id = capability.get("capability_id") or "unknown"
+        input_schema = capability.get("input_schema") if isinstance(capability.get("input_schema"), dict) else {}
+        required_parameters = input_schema.get("required") if isinstance(input_schema.get("required"), list) else []
+        missing_required = [
+            str(parameter)
+            for parameter in required_parameters
+            if not self._capability_input_value_is_present(normalized_parameters.get(str(parameter)))
+        ]
+        if missing_required:
+            raise ProcessingConflict(
+                f"Capability {capability_id} не готова к запуску: отсутствуют обязательные параметры: "
+                f"{', '.join(missing_required)}."
+            )
+        error_messages = sorted({error.message for error in errors})
+        raise ProcessingConflict(
+            f"Capability {capability_id} получила невалидные параметры: "
+            f"{'; '.join(error_messages[:3])}."
+        )
+
+    @staticmethod
+    def _ensure_duplicate_async_command_matches(
+        command: dict[str, Any],
+        *,
+        topic: str,
+        case_id: str,
+        source: str,
+        expected_event_type: str,
+        result_transport: str,
+        result_topic: str,
+        capability_id: Any,
+        mcp_environment_id: Any,
+        mcp_tool_name: Any,
+        parameters: dict[str, Any],
+        async_diagnostics: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(command, dict):
+            raise ProcessingConflict("persisted async command payload должен быть object.")
+        checks = {
+            "command_type": "async_mcp_capability_invocation",
+            "topic": topic,
+            "case_id": case_id,
+            "source": source,
+            "expected_event_type": expected_event_type,
+            "result_transport": result_transport,
+            "result_topic": result_topic,
+            "capability_id": capability_id,
+            "mcp_environment_id": mcp_environment_id,
+            "mcp_tool_name": mcp_tool_name,
+        }
+        mismatched = [
+            key
+            for key, value in checks.items()
+            if value not in (None, "") and command.get(key) != value
+        ]
+        invocation = command.get("invocation") if isinstance(command.get("invocation"), dict) else {}
+        if invocation.get("parameters") != parameters:
+            mismatched.append("invocation.parameters")
+        mcp_request = command.get("mcp_request") if isinstance(command.get("mcp_request"), dict) else {}
+        if mcp_request.get("inputs") != parameters:
+            mismatched.append("mcp_request.inputs")
+        extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        stored_diagnostics = normalize_async_diagnostics(extensions.get("async_diagnostics"))
+        if stored_diagnostics != async_diagnostics:
+            mismatched.append("invocation.extensions.async_diagnostics")
+        async_context = extensions.get("async_context") if isinstance(extensions.get("async_context"), dict) else {}
+        stored_context_diagnostics = normalize_async_diagnostics(async_context.get("async_diagnostics"))
+        if stored_context_diagnostics != async_diagnostics:
+            mismatched.append("invocation.extensions.async_context.async_diagnostics")
+        mcp_async_context = (
+            mcp_request.get("async_context")
+            if isinstance(mcp_request.get("async_context"), dict)
+            else {}
+        )
+        stored_mcp_context_diagnostics = normalize_async_diagnostics(mcp_async_context.get("async_diagnostics"))
+        if stored_mcp_context_diagnostics != async_diagnostics:
+            mismatched.append("mcp_request.async_context.async_diagnostics")
+        if mismatched:
+            raise ProcessingConflict(
+                "async capability command idempotency conflict: "
+                f"{', '.join(sorted(dict.fromkeys(mismatched)))}."
+            )
+
     def enqueue_async_capability_command(
         self,
         invocation: dict[str, Any],
@@ -464,13 +572,42 @@ class ProcessingStore:
         event_topic = result_topic or os.getenv("EXTERNAL_EVENT_TOPIC", DEFAULT_EXTERNAL_EVENT_TOPIC)
         invocation_id = invocation.get("invocation_id") or str(uuid.uuid4())
         command_idempotency_key = f"{case_id}:capability_command:{invocation_id}"
+        invocation = copy.deepcopy(invocation)
+        invocation["parameters"] = self._validate_capability_inputs_before_dispatch(
+            capability,
+            invocation.get("parameters") or {},
+        )
+        invocation_extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
+        invocation_extensions = copy.deepcopy(invocation_extensions)
+        async_diagnostics = normalize_async_diagnostics(invocation_extensions.get("async_diagnostics"))
+        if async_diagnostics:
+            invocation_extensions["async_diagnostics"] = copy.deepcopy(async_diagnostics)
+        else:
+            invocation_extensions.pop("async_diagnostics", None)
+        invocation["extensions"] = invocation_extensions
         existing_message = self.outbox_message_by_idempotency_key(command_idempotency_key)
         if existing_message:
             existing_command = existing_message.get("payload") or {}
+            self._ensure_duplicate_async_command_matches(
+                existing_command,
+                topic=command_topic,
+                case_id=case_id,
+                source=source,
+                expected_event_type=expected_event_type,
+                result_transport=result_transport,
+                result_topic=event_topic,
+                capability_id=capability.get("capability_id"),
+                mcp_environment_id=environment.get("environment_id"),
+                mcp_tool_name=binding.get("mcp_tool_name"),
+                parameters=invocation.get("parameters") or {},
+                async_diagnostics=async_diagnostics,
+            )
+            if not existing_command.get("wait_id"):
+                raise ProcessingConflict("persisted async command payload не содержит wait_id.")
             return {
                 "schema_version": "1.0",
                 "wait": self.require_wait(existing_command["wait_id"]),
-                "command": existing_command,
+                "command": copy.deepcopy(existing_command),
                 "duplicate": True,
             }
 
@@ -481,7 +618,6 @@ class ProcessingStore:
         }
         if contract_snapshot:
             wait_payload["contract_snapshot"] = copy.deepcopy(contract_snapshot)
-        invocation_extensions = invocation.get("extensions") if isinstance(invocation.get("extensions"), dict) else {}
         wait_origin = {
             "kind": "capability",
             "capability_id": capability.get("capability_id"),
@@ -492,6 +628,8 @@ class ProcessingStore:
             "result_transport": result_transport,
             "result_topic": event_topic,
         }
+        if async_diagnostics:
+            wait_origin["async_diagnostics"] = copy.deepcopy(async_diagnostics)
         for key in (
             "source_profile_id",
             "source_step_id",
@@ -527,6 +665,7 @@ class ProcessingStore:
             result_transport=result_transport,
             callback_url=callback_url if result_transport in {"http_callback", "both"} else None,
             result_topic=event_topic if result_transport in {"kafka_event", "both"} else None,
+            async_diagnostics=async_diagnostics,
         )
         mcp_request = build_mcp_tool_request(
             capability=capability,
@@ -3220,11 +3359,15 @@ class ProcessingStore:
         invocation_id: str | None = None,
     ) -> dict[str, Any]:
         invocation_id = invocation_id or f"{run['run_id']}:{launch.get('launch_id')}"
+        parameters = self._validate_capability_inputs_before_dispatch(
+            capability,
+            action.get("parameters") or {},
+        )
         mcp_request = build_mcp_tool_request(
             capability=capability,
             environment=environment,
             binding=binding,
-            inputs=copy.deepcopy(action.get("parameters") or {}),
+            inputs=parameters,
         )
         mcp_result = invoke_mcp_tool_request(
             environment=environment,
@@ -3287,6 +3430,37 @@ class ProcessingStore:
         wait = queued["wait"]
         command = queued["command"]
         source_extensions = ProcessingStore._source_extensions_from_action(action)
+        command_extensions = (
+            command.get("invocation", {}).get("extensions", {})
+            if isinstance(command.get("invocation", {}).get("extensions"), dict)
+            else {}
+        )
+        async_diagnostics = (
+            copy.deepcopy(command_extensions.get("async_diagnostics"))
+            if isinstance(command_extensions.get("async_diagnostics"), dict)
+            else None
+        )
+        async_wait = {
+            "wait_id": wait["wait_id"],
+            "run_id": wait["run_id"],
+            "correlation_id": wait["correlation_id"],
+            "event_type": command["expected_event_type"],
+            "callback_url": command["callback_url"],
+            "command_id": command["command_id"],
+            "topic": command["topic"],
+            "completion_policy": copy.deepcopy(completion_policy),
+        }
+        extensions = {
+            **source_extensions,
+            "mock": False,
+            "capability_id": command["capability_id"],
+            "mcp_environment_id": command["mcp_environment_id"],
+            "mcp_tool_name": command["mcp_tool_name"],
+            "async_wait": async_wait,
+        }
+        if async_diagnostics is not None:
+            extensions["async_diagnostics"] = copy.deepcopy(async_diagnostics)
+            async_wait["async_diagnostics"] = copy.deepcopy(async_diagnostics)
         return {
             "schema_version": "1.0",
             "invocation_id": command["invocation"]["invocation_id"],
@@ -3310,23 +3484,7 @@ class ProcessingStore:
                 "invocation_id": command["invocation"]["invocation_id"],
                 "action_id": action.get("action_id"),
             },
-            "extensions": {
-                **source_extensions,
-                "mock": False,
-                "capability_id": command["capability_id"],
-                "mcp_environment_id": command["mcp_environment_id"],
-                "mcp_tool_name": command["mcp_tool_name"],
-                "async_wait": {
-                    "wait_id": wait["wait_id"],
-                    "run_id": wait["run_id"],
-                    "correlation_id": wait["correlation_id"],
-                    "event_type": command["expected_event_type"],
-                    "callback_url": command["callback_url"],
-                    "command_id": command["command_id"],
-                    "topic": command["topic"],
-                    "completion_policy": copy.deepcopy(completion_policy),
-                },
-            },
+            "extensions": extensions,
         }
 
     def _dispatch_ready_tool_launches_after_external_event(

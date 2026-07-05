@@ -35,6 +35,7 @@ const state = {
   orchestrationGraphZoom: 0.78,
   orchestrationGraphPanX: 24,
   orchestrationGraphPanY: 34,
+  scenarioLinkedValidation: null,
   processingCaseId: '',
   modelRoutingBaseVersionId: '',
   configSubmitAction: null,
@@ -420,6 +421,8 @@ const DEFAULT_CAPABILITY_STEP_ASSIST_PROMPT_TEMPLATE = [
   'Если constraints.requires_output_mapping=true, заполняй output_mapping только в selected_output_slots.',
   'Если constraints.requires_output_mapping=false, верни output_mapping={} и не подбирай выходы.',
   'Используй descriptions слотов и полей capability как основной источник смысла.',
+  'Возвращай итоговый input_mapping явно; администратор будет проверять deterministic source-ref и resolved values.',
+  'Если descriptions/examples недостаточны или два слота похожи по смыслу, не угадывай: выбери самый явно описанный source-ref и отрази предположение в reason.',
   'Не выдумывай слоты, capability, input/output поля.',
 ].join(' ');
 
@@ -853,6 +856,7 @@ async function renderScenarios() {
     section(
       'Сценарий обработки',
       `${scenarioToolbar(context)}
+      ${scenarioLinkedValidationPanel()}
       <div class="scenario-menu">
         <button type="button" class="${state.scenarioOperation === 'create' ? 'primary' : ''}" data-action="scenario-operation" data-operation="create">Создать</button>
         <button type="button" class="${state.scenarioOperation === 'modify' ? 'primary' : ''}" data-action="scenario-operation" data-operation="modify">Модифицировать</button>
@@ -1314,17 +1318,52 @@ function scenarioToolbar(context) {
       }>${escapeHtml(labelWithDraftState(scenario, scenario.display_name || scenario.scenario_id))}</option>`,
     )
     .join('');
+  const linkedValidationDisabled = state.scenarioOperation === 'delete'
+    ? 'disabled title="Проверка связей доступна в режимах создания и модификации"'
+    : '';
   return `<div class="toolbar compact">
     <label>Сценарий<select id="scenarioSelect">${scenarioOptions}</select></label>
     <label>Готовность<input value="${escapeHtml(context.detail?.readiness?.status || 'н/д')}" readonly></label>
+    <button type="button" data-action="scenario-linked-validation" ${linkedValidationDisabled}>Валидировать связанные объекты</button>
   </div>`;
 }
 
 function attachScenarioSelect() {
   document.getElementById('scenarioSelect')?.addEventListener('change', (event) => {
     state.scenarioId = event.target.value;
+    state.scenarioLinkedValidation = null;
     renderView(state.activeView).catch((error) => setNotice(error.message || String(error), 'error'));
   });
+}
+
+function scenarioLinkedValidationPanel() {
+  const result = state.scenarioLinkedValidation;
+  if (!result) {
+    return '<div data-scenario-linked-validation-result></div>';
+  }
+  const type = result.status === 'valid' ? 'success' : 'error';
+  const checkedDomains = (result.checked_domains || []).join(', ') || 'не указаны';
+  const errors = Array.from(new Set(result.errors || []));
+  const title = result.status === 'valid'
+    ? `Связанные объекты валидны. Проверены домены: ${checkedDomains}.`
+    : `Найдены ошибки в связанных объектах. Проверены домены: ${checkedDomains}.`;
+  return `
+    <div class="config-draft-status" data-type="${escapeHtml(type)}" data-scenario-linked-validation-result>
+      <div>${escapeHtml(title)}</div>
+      ${errors.length ? `<ul class="usage-list">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join('')}</ul>` : ''}
+    </div>
+  `;
+}
+
+function clearScenarioLinkedValidationForScenarioForm(target) {
+  if (!target?.closest?.('form[data-form="scenario-editor"]') || !state.scenarioLinkedValidation) {
+    return;
+  }
+  state.scenarioLinkedValidation = null;
+  const panel = document.querySelector('[data-scenario-linked-validation-result]');
+  if (panel) {
+    panel.outerHTML = scenarioLinkedValidationPanel();
+  }
 }
 
 function blockCatalogControls({ selectId, label, items, idKey, selectedId, labelKey, actionPrefix, operation }) {
@@ -3467,6 +3506,100 @@ function renderEnrichmentStepCard(step = {}, index = 0, previousSteps = [], slot
   `;
 }
 
+function renderEnrichmentSavedStructurePreview(step = {}, completionPolicy = {}, binding = {}) {
+  const savedStructure = {
+    step_id: step.step_id || '',
+    step_name: step.step_name || '',
+    capability_id: step.capability_id || '',
+    mcp_environment_id: binding.environment_id || step.mcp_environment_id || '',
+    mcp_tool_name: binding.mcp_tool_name || '',
+    execution_mode: binding.execution_mode || '',
+    input_mapping: step.input_mapping || {},
+    output_mapping: step.output_mapping || {},
+    completion_policy: completionPolicy || {},
+  };
+  return `
+    <details class="message-block" data-enrichment-saved-structure-preview>
+      <summary>Итоговая структура перед сохранением</summary>
+      <div class="grid two">
+        <div>
+          <div class="metric-label">Input mapping</div>
+          <pre class="trace-payload">${escapeHtml(jsonPretty(savedStructure.input_mapping))}</pre>
+        </div>
+        <div>
+          <div class="metric-label">Output mapping</div>
+          <pre class="trace-payload">${escapeHtml(jsonPretty(savedStructure.output_mapping))}</pre>
+        </div>
+        <div>
+          <div class="metric-label">Completion policy</div>
+          <pre class="trace-payload">${escapeHtml(jsonPretty(savedStructure.completion_policy))}</pre>
+        </div>
+        <div>
+          <div class="metric-label">Binding / environment</div>
+          <pre class="trace-payload">${escapeHtml(jsonPretty({
+            capability_id: savedStructure.capability_id,
+            mcp_environment_id: savedStructure.mcp_environment_id,
+            mcp_tool_name: savedStructure.mcp_tool_name,
+            execution_mode: savedStructure.execution_mode,
+          }))}</pre>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function enrichmentStepPreviewFromCard(card, index) {
+  const capabilityId = card.querySelector('[data-enrichment-capability-id]')?.value?.trim() || '';
+  const capability = (state.lastData.capabilities || []).find((item) => item.capability_id === capabilityId) || null;
+  const requestedCompletionMode = card.querySelector('[data-enrichment-completion-mode]')?.value
+    || capability?.default_completion_policy?.mode
+    || 'sync';
+  const requestedEnvironmentId = card.querySelector('[data-enrichment-mcp-environment-id]')?.value?.trim() || '';
+  const binding = activeCapabilityBindingForUi(capabilityId, {
+    executionMode: capabilityExecutionModeForCompletionMode(requestedCompletionMode),
+    environmentId: requestedEnvironmentId,
+  }) || {};
+  let completionPolicy = {};
+  try {
+    completionPolicy = enrichmentCapabilityCompletionPolicyFromCard(card, index, capability).completionPolicy;
+  } catch {
+    completionPolicy = {
+      mode: requestedCompletionMode,
+      max_wait_seconds: parseInt(card.querySelector('[data-enrichment-max-wait-seconds]')?.value || '0', 10),
+      timeout_action: card.querySelector('[data-enrichment-timeout-action]')?.value || '',
+    };
+  }
+  let outputMapping = {};
+  try {
+    outputMapping = parseSelectedEnrichmentOutputMapping(card, index);
+  } catch {
+    outputMapping = {};
+  }
+  const step = {
+    step_id: card.querySelector('[data-enrichment-step-id]')?.value?.trim() || normalizeEnrichmentStepId('', index),
+    step_name: card.querySelector('[data-enrichment-step-name]')?.value?.trim() || `Шаг ${index + 1}`,
+    capability_id: capabilityId,
+    mcp_environment_id: binding.environment_id || '',
+    input_mapping: parseEnrichmentParameterMapping(card),
+    output_mapping: outputMapping,
+  };
+  return { step, completionPolicy, binding };
+}
+
+function refreshEnrichmentSavedStructurePreview(card) {
+  const preview = card?.querySelector?.('[data-enrichment-saved-structure-preview]');
+  if (!preview) return;
+  const list = card.closest('[data-enrichment-step-list]');
+  const cards = Array.from(list?.querySelectorAll('[data-enrichment-step-card]') || []);
+  const index = Math.max(cards.indexOf(card), Number(card.dataset.enrichmentStepIndex || 0));
+  const { step, completionPolicy, binding } = enrichmentStepPreviewFromCard(card, index);
+  preview.outerHTML = renderEnrichmentSavedStructurePreview(step, completionPolicy, binding);
+}
+
+function refreshEnrichmentSavedStructurePreviewFromTarget(target) {
+  refreshEnrichmentSavedStructurePreview(target?.closest?.('[data-enrichment-step-card]'));
+}
+
 function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], slotContext = { slots: [] }, outputRules = [], tools = [], endpoints = [], capabilities = [], bindings = []) {
   const capability = (capabilities || []).find((item) => item.capability_id === step.capability_id) || capabilities[0] || null;
   const stepId = normalizeEnrichmentStepId(step.step_id, index);
@@ -3475,6 +3608,10 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
   const completionMode = completionState.mode;
   const completionMaxWaitSeconds = completionPolicy.max_wait_seconds ?? (completionMode === 'external_event' ? 3600 : 0);
   const completionTimeoutAction = completionPolicy.timeout_action || (completionMode === 'external_event' ? 'escalate_operator' : 'resume_agent');
+  const selectedBinding = activeCapabilityBindingForUi(step.capability_id || capability?.capability_id || '', {
+    executionMode: capabilityExecutionModeForCompletionMode(completionMode),
+    environmentId: step.mcp_environment_id || '',
+  }) || {};
   const configurationInstructionPlaceholder = 'Вызови ${Capability.provider_channel_repair_monitor}. В параметр problem_url передай ${paramCapability.provider_channel_repair_monitor.input.problem_url} <- ${slot.zabbix_url}.';
   return `
     <div class="enrichment-step-editor" data-enrichment-step-editor>
@@ -3491,6 +3628,11 @@ function renderEnrichmentStepEditor(step = {}, index = 0, previousSteps = [], sl
           <button type="button" data-action="resolution-step-compile">Сформировать структуру шага</button>
           <span class="meta" data-resolution-step-compile-status>Будут обновлены capability, входные параметры и запись результата в выходные слоты.</span>
         </div>
+        ${renderEnrichmentSavedStructurePreview(
+          { ...step, step_id: stepId, capability_id: step.capability_id || capability?.capability_id || '' },
+          completionPolicy,
+          selectedBinding,
+        )}
       </fieldset>
       <details class="launch-editor">
         <summary>Параметры выполнения</summary>
@@ -9607,12 +9749,12 @@ function parseExistingScenarioTags(value) {
   }
 }
 
-async function saveScenarioForm(form) {
+function scenarioPayloadFromForm(form) {
   const data = new FormData(form);
   const orchestratorPolicyId = String(
     data.get('orchestrator_policy_select') || data.get('orchestrator_policy_id') || '',
   ).trim();
-  const scenario = compactScenarioPayload({
+  return compactScenarioPayload({
     scenario_id: data.get('scenario_id'),
     display_name: data.get('display_name'),
     status: data.get('status'),
@@ -9628,6 +9770,11 @@ async function saveScenarioForm(form) {
     log_required: data.get('log_required') === 'true',
     tags: parseExistingScenarioTags(data.get('existing_tags')),
   });
+}
+
+async function saveScenarioForm(form) {
+  const data = new FormData(form);
+  const scenario = scenarioPayloadFromForm(form);
   const orchestrationPolicySettings = {
     max_iterations: parseInt(data.get('orchestration_max_iterations'), 10),
     consecutive_capability_errors_to_escalate: parseInt(data.get('orchestration_consecutive_capability_errors_to_escalate'), 10),
@@ -9637,6 +9784,28 @@ async function saveScenarioForm(form) {
     scenario.escalation_policy_id = await ensureScenarioEscalationPolicy(scenario);
   }
   await applyScenarioMutation(state.scenarioOperation, scenario);
+}
+
+async function validateScenarioLinkedObjects() {
+  const form = document.querySelector('form[data-form="scenario-editor"]');
+  if (!form) {
+    throw new Error('Откройте создание или модификацию сценария для проверки связанных объектов.');
+  }
+  const scenario = scenarioPayloadFromForm(form);
+  const result = await api('/admin/scenarios/validate-linked', {
+    method: 'POST',
+    body: JSON.stringify({ operator_id: state.actorId, scenario }),
+  });
+  state.scenarioLinkedValidation = result;
+  const panel = document.querySelector('[data-scenario-linked-validation-result]');
+  if (panel) {
+    panel.outerHTML = scenarioLinkedValidationPanel();
+  }
+  if (result.status === 'valid') {
+    setNotice('Связанные объекты сценария валидны.', 'success');
+  } else {
+    setNotice(`Связанные объекты сценария невалидны: ${(result.errors || []).join('; ') || 'ошибки не указаны'}`, 'error');
+  }
 }
 
 async function deleteScenarioForm() {
@@ -13620,8 +13789,11 @@ function initEvents() {
       } else if (action === 'graph-config-link') {
         applyGraphConfigRefSelection(target.dataset.graphDomain, target.dataset.graphRefId);
         await loadView(target.dataset.graphView || 'scenarios');
+      } else if (action === 'scenario-linked-validation') {
+        await validateScenarioLinkedObjects();
       } else if (action === 'scenario-operation') {
         state.scenarioOperation = target.dataset.operation;
+        state.scenarioLinkedValidation = null;
         await renderScenarios();
       } else if (action === 'slot-schema-operation') {
         state.slotSchemaOperation = target.dataset.operation;
@@ -13789,6 +13961,7 @@ function initEvents() {
 
   document.addEventListener('change', async (event) => {
     const target = event.target;
+    clearScenarioLinkedValidationForScenarioForm(target);
     if (target?.matches?.('[data-confidence-override-enabled]')) {
       syncConfidenceOverrideBlock(target.closest('[data-confidence-override]'));
       return;
@@ -13851,6 +14024,11 @@ function initEvents() {
     }
     if (target?.matches?.('[data-enrichment-param-source-mode]')) {
       syncEnrichmentSourceCustom(target.closest('[data-enrichment-param-row]'));
+      refreshEnrichmentSavedStructurePreviewFromTarget(target);
+      return;
+    }
+    if (target?.matches?.('[data-enrichment-completion-mode], [data-enrichment-expected-event-type], [data-enrichment-result-transport], [data-enrichment-timeout-action], [data-enrichment-on-error]')) {
+      refreshEnrichmentSavedStructurePreviewFromTarget(target);
       return;
     }
     if (target?.matches?.('[name="technical_agent_type"], [name="technical_task_topic_template"]')) {
@@ -13861,8 +14039,13 @@ function initEvents() {
 
   document.addEventListener('input', (event) => {
     const target = event.target;
+    clearScenarioLinkedValidationForScenarioForm(target);
     if (isReferenceAutocompleteTextarea(target)) {
       renderReferenceAutocomplete(target);
+      return;
+    }
+    if (target?.matches?.('[data-enrichment-step-name], [data-enrichment-max-wait-seconds], [data-enrichment-result-topic], [data-enrichment-param-source-custom]')) {
+      refreshEnrichmentSavedStructurePreviewFromTarget(target);
       return;
     }
     if (target?.matches?.('[name="technical_agent_type"], [name="technical_task_topic_template"]')) {

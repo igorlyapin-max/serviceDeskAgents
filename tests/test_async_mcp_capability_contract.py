@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import copy
 import unittest
 
-from apps.orchestrator.app.config_registry import ConfigStore, normalize_simulation_options
+from apps.orchestrator.app.config_registry import ConfigStore, normalize_capability_contracts, normalize_simulation_options
 from apps.orchestrator.app.contracts import ContractRegistry
 from apps.orchestrator.app.config_assistant import compile_attribute_resolution_step
 
@@ -215,6 +215,143 @@ class AsyncMcpCapabilityContractTest(unittest.TestCase):
         tempdir = TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         return ConfigStore(ContractRegistry(), db_path=Path(tempdir.name) / "state.sqlite")
+
+    def test_default_provider_monitor_contract_requires_contact_inputs(self) -> None:
+        store = self.make_store()
+
+        capabilities = store.active_payload("capabilities")["capabilities"]
+        capability = next(
+            item
+            for item in capabilities
+            if item["capability_id"] == "provider_channel_repair_monitor"
+        )
+
+        self.assertEqual(
+            capability["input_schema"]["required"],
+            ["problem_url", "service_request", "from", "reply_to"],
+        )
+        self.assertEqual(capability["input_schema"]["properties"]["from"]["minLength"], 1)
+        self.assertEqual(capability["input_schema"]["properties"]["reply_to"]["minLength"], 1)
+
+    def test_provider_monitor_contract_normalizer_handles_non_numeric_min_length(self) -> None:
+        payload = capability_payload()
+        payload["capabilities"][0]["input_schema"]["properties"]["from"]["minLength"] = "bad"
+
+        normalized = normalize_capability_contracts(payload)
+
+        self.assertEqual(
+            normalized["capabilities"][0]["input_schema"]["properties"]["from"]["minLength"],
+            1,
+        )
+
+    def test_profile_missing_required_capability_inputs_is_invalid(self) -> None:
+        store = self.make_store()
+        profile = capability_profile()
+        profile["enrichment_steps"][0]["input_mapping"].pop("from")
+        profile["enrichment_steps"][0]["input_mapping"].pop("reply_to")
+        payload = {"schema_version": "1.0", "profiles": [profile]}
+
+        validation = store.validate_payload(
+            "attribute_resolution_profiles",
+            payload,
+            active_overrides={
+                "capabilities": capability_payload(),
+                "mcp_environments": environment_payload(),
+                "capability_bindings": binding_payload(),
+                "attribute_resolution_profiles": payload,
+            },
+        )
+
+        self.assertEqual(validation["status"], "invalid")
+        self.assertTrue(any("from" in error for error in validation["errors"]))
+        self.assertTrue(any("reply_to" in error for error in validation["errors"]))
+
+    def test_profile_launch_blocks_when_required_capability_inputs_are_missing(self) -> None:
+        store = self.make_store()
+        profile = capability_profile()
+        profile["enrichment_steps"][0]["input_mapping"].pop("from")
+        profile["enrichment_steps"][0]["input_mapping"].pop("reply_to")
+
+        with store.active_payload_overrides(
+            {
+                "capabilities": capability_payload(),
+                "mcp_environments": environment_payload(),
+                "capability_bindings": binding_payload(),
+            }
+        ):
+            launches = store._profile_tool_launches([profile])
+            ready, blocked, actions = store._simulate_profile_launches(
+                launches,
+                slot_values={"problem_url": {"value": "http://zabbix/problem"}},
+                provided={"case": {"ticket_id": "T-1"}},
+                missing_slots=[],
+                simulation_options=normalize_simulation_options(run_mode="operator_full_debug"),
+            )
+
+        self.assertEqual(ready, [])
+        self.assertEqual(actions, [])
+        self.assertEqual([item["status"] for item in blocked], ["blocked_by_missing_required_inputs"])
+        self.assertEqual(blocked[0]["missing_required_inputs"], ["from", "reply_to"])
+
+    def test_operator_full_debug_capability_launch_requests_verbose_async_diagnostics(self) -> None:
+        store = self.make_store()
+
+        with store.active_payload_overrides(
+            {
+                "capabilities": capability_payload(),
+                "mcp_environments": environment_payload(),
+                "capability_bindings": binding_payload(),
+            }
+        ):
+            launches = store._profile_tool_launches([capability_profile()])
+            ready, blocked, actions = store._simulate_profile_launches(
+                launches,
+                slot_values={"problem_url": {"value": "http://zabbix/problem"}},
+                provided={"case": {"ticket_id": "T-1"}},
+                missing_slots=[],
+                simulation_options=normalize_simulation_options(run_mode="operator_full_debug"),
+            )
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(ready[0]["async_diagnostics"]["level"], "verbose")
+        self.assertEqual(actions[0]["extensions"]["async_diagnostics"]["level"], "verbose")
+        service_request = next(row for row in ready[0]["input_resolution"] if row["input"] == "service_request")
+        self.assertEqual(service_request["source_ref"], "case:ticket_id")
+        self.assertEqual(service_request["status"], "resolved")
+        self.assertEqual(service_request["value"], "T-1")
+
+    def test_optional_slot_bound_capability_input_does_not_block_launch(self) -> None:
+        store = self.make_store()
+        profile = capability_profile()
+        profile["enrichment_steps"][0]["input_mapping"]["problem_host"] = "slot:incident_number"
+
+        with store.active_payload_overrides(
+            {
+                "capabilities": capability_payload(),
+                "mcp_environments": environment_payload(),
+                "capability_bindings": binding_payload(),
+            }
+        ):
+            launches = store._profile_tool_launches([profile])
+            ready, blocked, actions = store._simulate_profile_launches(
+                launches,
+                slot_values={"problem_url": {"value": "http://zabbix/problem"}},
+                provided={"case": {"ticket_id": "T-1"}},
+                missing_slots=["incident_number"],
+                simulation_options=normalize_simulation_options(run_mode="operator_full_debug"),
+            )
+
+        self.assertEqual(blocked, [])
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(len(actions), 1)
+        self.assertNotIn("problem_host", ready[0]["parameters"])
+        self.assertNotIn("problem_host", actions[0]["parameters"])
+        problem_host = next(row for row in ready[0]["input_resolution"] if row["input"] == "problem_host")
+        self.assertFalse(problem_host["required"])
+        self.assertEqual(problem_host["status"], "missing")
+        self.assertEqual(problem_host["source_ref"], "slot:incident_number")
 
     def test_valid_async_capability_environment_and_binding(self) -> None:
         store = self.make_store()
@@ -535,6 +672,14 @@ class AsyncMcpCapabilityContractTest(unittest.TestCase):
         self.assertEqual(ready, [])
         self.assertEqual(actions, [])
         self.assertEqual([item["status"] for item in blocked], ["blocked_by_missing_slots", "blocked_by_previous_step"])
+        self.assertTrue(
+            any("service_request <- slot:incident_number" in reason for reason in blocked[0]["block_reasons"]),
+            blocked[0].get("block_reasons"),
+        )
+        service_request = next(row for row in blocked[0]["input_resolution"] if row["input"] == "service_request")
+        self.assertEqual(service_request["source_ref"], "slot:incident_number")
+        self.assertEqual(service_request["status"], "missing")
+        self.assertIsNone(service_request["value"])
         self.assertEqual(blocked[1]["previous_launch_id"], "profile.provider.two_step.step1")
 
     def test_operator_full_debug_capability_resolution_waits_for_live_mcp_execution(self) -> None:

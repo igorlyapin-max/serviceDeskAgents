@@ -23,6 +23,8 @@ Async MCP calls must include:
 - `expected_event_type`
 - `idempotency_key_base`
 - delivery parameters selected by the wait policy, such as callback URL or event topic
+- optional `async_diagnostics` for operator/debug runs. `ServiceDeskAgents` forwards only `level: basic|verbose`
+  plus compact `source` and `run_mode`; unknown fields are dropped and sensitive strings are redacted.
 
 ## Accepted Acknowledgement
 
@@ -39,6 +41,16 @@ Async tools return only an acknowledgement:
 ```
 
 The acknowledgement does not fill business outputs and does not close the wait.
+
+## Async Diagnostics
+
+When `async_context.async_diagnostics.level` is `basic` or `verbose`, the MCP environment should emit canonical
+`progress` ExternalEvent records before terminal completion. Diagnostics must be compact, redacted, and provider-neutral.
+Use fields such as current stage, checked resource, iteration, last poll, next poll, match counts, and last error.
+
+`verbose` may include richer payload shape and business/contact fields, but must still avoid tokens, passwords, auth refs,
+raw secrets, and implementation-private workflow identifiers. `ServiceDeskAgents` displays diagnostics only from
+wait state, receipts, and ExternalEvent payloads.
 
 ## ExternalEvent
 

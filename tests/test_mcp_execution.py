@@ -21,12 +21,13 @@ from apps.orchestrator.app.mcp_execution import (
     invoke_mcp_tool_request,
     invoke_mcp_tools_list,
     mcp_auth_headers,
+    normalize_async_diagnostics,
     normalize_mcp_tool_result,
     select_capability_binding,
     validate_async_ack,
     validate_sync_result,
 )
-from apps.orchestrator.app.processing import ProcessingStore
+from apps.orchestrator.app.processing import ProcessingConflict, ProcessingStore
 from apps.orchestrator.app.workflow import TicketWorkflow
 
 
@@ -158,7 +159,12 @@ class McpExecutionTest(unittest.TestCase):
                 "tool_name": "provider_channel_repair_monitor",
                 "action_id": "profile.provider.step1.action",
                 "action_type": "read_only",
-                "parameters": {"problem_url": "http://zabbix/problem"},
+                "parameters": {
+                    "problem_url": "http://zabbix/problem",
+                    "service_request": "ticket-initial-mcp-1",
+                    "from": "monitor@example.test",
+                    "reply_to": "monitor@example.test",
+                },
                 "reason": "Проверочный запуск MCP capability.",
                 "risk_level": "low",
                 "expected_effect": "Будет вызвана MCP capability.",
@@ -266,6 +272,223 @@ class McpExecutionTest(unittest.TestCase):
             self.assertEqual(outbox["topic"], "mcp.commands")
             self.assertEqual(outbox["payload"]["command_type"], "async_mcp_capability_invocation")
 
+    def test_async_capability_enqueue_rejects_missing_required_inputs_before_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = Path(tempdir) / "state.sqlite"
+            contracts = ContractRegistry()
+            config_store = ConfigStore(contracts, db_path=db_path)
+            case_store = CaseStore(contracts, db_path=db_path)
+            processing_store = ProcessingStore(case_store, config_store=config_store, db_path=db_path)
+            ticket_input = {
+                "ticket_id": "ticket-missing-capability-inputs-1",
+                "user": "ivanov",
+                "service": "provider",
+                "description": "Проверить канал провайдера.",
+            }
+            analysis = {
+                "ticket_id": "ticket-missing-capability-inputs-1",
+                "workflow_state": {
+                    "id": "running",
+                    "category": "processing",
+                    "terminal": False,
+                    "can_advance": True,
+                    "requires_operator_action": False,
+                },
+                "ai_decision": {
+                    "schema_version": "1.0",
+                    "decision": {
+                        "type": "answer_proposed",
+                        "summary": "Запустить capability.",
+                        "confidence": 0.8,
+                    },
+                    "operator_message": "Capability запускается.",
+                    "internal_reasoning_summary": "Unit test.",
+                    "citations": [],
+                    "proposed_actions": [],
+                },
+                "approval_requests": [],
+                "rag_trace": {},
+                "tool_trace": [],
+                "tool_results": [],
+            }
+            case = case_store.create_from_analysis(ticket_input, analysis)
+            processing_store.record_analysis(ticket_input, {**analysis, "case_id": case["case_id"]})
+            cap = capability()
+            cap["input_schema"]["required"] = ["problem_url", "from", "reply_to"]
+            cap["input_schema"]["properties"]["from"] = {"type": "string", "minLength": 1}
+            cap["input_schema"]["properties"]["reply_to"] = {"type": "string", "minLength": 1}
+            environment = {
+                "environment_id": "mcp.provider_ops",
+                "auth_mode": "dev_bearer_token",
+                "auth_ref": "env:MCP_TOKEN",
+            }
+            binding = {
+                "binding_id": "binding.provider",
+                "capability_id": cap["capability_id"],
+                "environment_id": environment["environment_id"],
+                "mcp_tool_name": "provider_channel_repair_monitor",
+                "execution_mode": "async",
+                "status": "active",
+            }
+            invocation_id = "inv-missing-required-inputs"
+            idempotency_key = f"{case['case_id']}:capability_command:{invocation_id}"
+
+            with self.assertRaisesRegex(ProcessingConflict, "from, reply_to"):
+                processing_store.enqueue_async_capability_command(
+                    {
+                        "invocation_id": invocation_id,
+                        "case_id": case["case_id"],
+                        "parameters": {"problem_url": "http://zabbix/problem"},
+                    },
+                    capability=cap,
+                    environment=environment,
+                    binding=binding,
+                    expected_event_type="provider_channel_repair_monitor.completed",
+                    callback_base_url="http://127.0.0.1:18088",
+                )
+
+            self.assertIsNone(processing_store.active_wait_by_correlation(idempotency_key, case_id=case["case_id"]))
+            self.assertIsNone(processing_store.outbox_message_by_idempotency_key(idempotency_key))
+
+    def test_normalize_async_diagnostics_whitelists_and_redacts_fields(self) -> None:
+        normalized = normalize_async_diagnostics(
+            {
+                "level": "Verbose",
+                "source": "scenario_simulation",
+                "run_mode": "operator_full_debug",
+                "token": "secret-token",
+                "payload": {"password": "raw"},
+            }
+        )
+
+        self.assertEqual(
+            normalized,
+            {
+                "level": "verbose",
+                "source": "scenario_simulation",
+                "run_mode": "operator_full_debug",
+            },
+        )
+        self.assertIsNone(normalize_async_diagnostics({"level": "off"}))
+
+    def test_async_capability_enqueue_sanitizes_diagnostics_and_rejects_idempotency_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = Path(tempdir) / "state.sqlite"
+            contracts = ContractRegistry()
+            config_store = ConfigStore(contracts, db_path=db_path)
+            case_store = CaseStore(contracts, db_path=db_path)
+            processing_store = ProcessingStore(case_store, config_store=config_store, db_path=db_path)
+            ticket_input = {
+                "ticket_id": "ticket-async-diagnostics-1",
+                "user": "ivanov",
+                "service": "provider",
+                "description": "Проверить канал провайдера.",
+            }
+            analysis = {
+                "ticket_id": "ticket-async-diagnostics-1",
+                "workflow_state": {
+                    "id": "running",
+                    "category": "processing",
+                    "terminal": False,
+                    "can_advance": True,
+                    "requires_operator_action": False,
+                },
+                "ai_decision": {
+                    "schema_version": "1.0",
+                    "decision": {
+                        "type": "answer_proposed",
+                        "summary": "Запустить capability.",
+                        "confidence": 0.8,
+                    },
+                    "operator_message": "Capability запускается.",
+                    "internal_reasoning_summary": "Unit test.",
+                    "citations": [],
+                    "proposed_actions": [],
+                },
+                "approval_requests": [],
+                "rag_trace": {},
+                "tool_trace": [],
+                "tool_results": [],
+            }
+            case = case_store.create_from_analysis(ticket_input, analysis)
+            processing_store.record_analysis(ticket_input, {**analysis, "case_id": case["case_id"]})
+            run = processing_store.latest_run(case["case_id"])
+            assert run is not None
+            run["status"] = "running"
+            run["completed_at"] = None
+            processing_store._save_run(run)
+            cap = capability()
+            environment = {
+                "environment_id": "mcp.provider_ops",
+                "auth_mode": "dev_bearer_token",
+                "auth_ref": "env:MCP_TOKEN",
+            }
+            binding = {
+                "binding_id": "binding.provider",
+                "capability_id": cap["capability_id"],
+                "environment_id": environment["environment_id"],
+                "mcp_tool_name": "provider_channel_repair_monitor",
+                "execution_mode": "async",
+                "status": "active",
+            }
+            invocation = {
+                "invocation_id": "inv-diagnostics-1",
+                "case_id": case["case_id"],
+                "parameters": {"problem_url": "http://zabbix/problem"},
+                "extensions": {
+                    "async_diagnostics": {
+                        "level": "verbose",
+                        "source": "scenario_simulation",
+                        "run_mode": "operator_full_debug",
+                        "token": "raw-secret-token",
+                    }
+                },
+            }
+
+            queued = processing_store.enqueue_async_capability_command(
+                invocation,
+                capability=cap,
+                environment=environment,
+                binding=binding,
+                expected_event_type="provider_channel_repair_monitor.completed",
+                callback_base_url="http://127.0.0.1:18088",
+            )
+
+            diagnostics = queued["command"]["invocation"]["extensions"]["async_diagnostics"]
+            async_context = queued["command"]["invocation"]["extensions"]["async_context"]
+            self.assertEqual(
+                diagnostics,
+                {
+                    "level": "verbose",
+                    "source": "scenario_simulation",
+                    "run_mode": "operator_full_debug",
+                },
+            )
+            self.assertEqual(async_context["async_diagnostics"], diagnostics)
+            self.assertEqual(queued["wait"]["origin"]["async_diagnostics"], diagnostics)
+
+            duplicate = processing_store.enqueue_async_capability_command(
+                invocation,
+                capability=cap,
+                environment=environment,
+                binding=binding,
+                expected_event_type="provider_channel_repair_monitor.completed",
+                callback_base_url="http://127.0.0.1:18088",
+            )
+            self.assertTrue(duplicate["duplicate"])
+
+            conflicting_invocation = copy.deepcopy(invocation)
+            conflicting_invocation["parameters"]["problem_url"] = "http://zabbix/other"
+            with self.assertRaisesRegex(ProcessingConflict, "idempotency conflict"):
+                processing_store.enqueue_async_capability_command(
+                    conflicting_invocation,
+                    capability=cap,
+                    environment=environment,
+                    binding=binding,
+                    expected_event_type="provider_channel_repair_monitor.completed",
+                    callback_base_url="http://127.0.0.1:18088",
+                )
+
     def test_build_async_mcp_tool_request(self) -> None:
         cap = capability()
         environment = {
@@ -291,6 +514,11 @@ class McpExecutionTest(unittest.TestCase):
             idempotency_key_base="cmd-1",
             result_transport="http_callback",
             callback_url="http://127.0.0.1/external-events/mcp",
+            async_diagnostics={
+                "level": "verbose",
+                "source": "scenario_simulation",
+                "run_mode": "operator_full_debug",
+            },
         )
 
         request = build_mcp_tool_request(
@@ -303,6 +531,7 @@ class McpExecutionTest(unittest.TestCase):
 
         self.assertEqual(request["mcp_tool_name"], "provider_channel_repair_monitor")
         self.assertEqual(request["async_context"]["wait_id"], "wait-1")
+        self.assertEqual(request["async_context"]["async_diagnostics"]["level"], "verbose")
 
     def test_build_async_mcp_tool_request_coerces_string_constants_by_input_schema(self) -> None:
         cap = capability()
@@ -638,6 +867,13 @@ class McpExecutionTest(unittest.TestCase):
                     "invocation_id": "inv-mcp-1",
                     "case_id": case["case_id"],
                     "parameters": {"problem_url": "http://zabbix/problem"},
+                    "extensions": {
+                        "async_diagnostics": {
+                            "level": "verbose",
+                            "source": "scenario_simulation",
+                            "run_mode": "operator_full_debug",
+                        }
+                    },
                 },
                 capability=capability(),
                 environment=environment,
@@ -664,6 +900,9 @@ class McpExecutionTest(unittest.TestCase):
         self.assertEqual(command["mcp_request"]["async_context"]["wait_id"], wait["wait_id"])
         self.assertEqual(command["mcp_request"]["async_context"]["correlation_id"], wait["correlation_id"])
         self.assertEqual(command["mcp_request"]["async_context"]["expected_event_type"], "profile.provider.step1.completed")
+        self.assertEqual(wait["origin"]["async_diagnostics"]["level"], "verbose")
+        self.assertEqual(command["invocation"]["extensions"]["async_diagnostics"]["level"], "verbose")
+        self.assertEqual(command["mcp_request"]["async_context"]["async_diagnostics"]["level"], "verbose")
         self.assertEqual(claim["status"], "claimed")
         self.assertEqual(dispatch_started["status"], "dispatch_started")
         self.assertEqual(completed["status"], "completed")

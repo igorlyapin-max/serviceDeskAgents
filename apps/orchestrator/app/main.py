@@ -17,6 +17,7 @@ from .cases import CaseNotFound
 from .config_assistant import compile_attribute_resolution_step
 from .config_registry import (
     CONFIG_DOMAINS,
+    SCENARIO_LINKED_VALIDATION_DOMAINS,
     ConfigDraftNotFound,
     ConfigRegistryError,
     ConfigStore,
@@ -147,6 +148,11 @@ class AdminConfigDraftBundleRequest(BaseModel):
     limit: int | None = Field(default=None)
 
 
+class AdminScenarioLinkedValidationRequest(BaseModel):
+    operator_id: str = Field(default="admin-1")
+    scenario: dict[str, Any] = Field()
+
+
 class AdminLegacySlotResolutionCleanupRequest(BaseModel):
     operator_id: str = Field(default="admin-1")
     slot_schema_id: str = Field(min_length=1, max_length=160)
@@ -201,6 +207,7 @@ class AdminScenarioSimulationRequest(BaseModel):
     allow_mock_integrations: bool | None = Field(default=None)
     allow_action_with_approval: bool | None = Field(default=None)
     bypass_policy_gates: bool | None = Field(default=None)
+    async_diagnostics_level: str | None = Field(default=None)
 
 
 class AdminModelSecretUpdateRequest(BaseModel):
@@ -226,6 +233,7 @@ class OperatorScenarioSimulationRequest(BaseModel):
     allow_mock_integrations: bool | None = Field(default=None)
     allow_action_with_approval: bool | None = Field(default=None)
     bypass_policy_gates: bool | None = Field(default=None)
+    async_diagnostics_level: str | None = Field(default=None)
 
 
 class DebugSimulationPrepareRequest(BaseModel):
@@ -365,7 +373,7 @@ async def request_context_and_security_headers(request: Request, call_next):
     https_enabled = https_enabled or is_production_environment()
     for header, value in security_headers(https_enabled=https_enabled).items():
         response.headers.setdefault(header, value)
-    if request.url.path == "/admin/static/app.js":
+    if request.url.path in {"/admin/static/app.js", "/debug/static/app.js", "/operator/static/app.js"}:
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -961,6 +969,7 @@ def operator_simulate_scenario(
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
             bypass_policy_gates=request.bypass_policy_gates,
+            async_diagnostics_level=request.async_diagnostics_level,
         )
         audit_success(
             context,
@@ -1038,6 +1047,7 @@ def debug_simulate_scenario(
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
             bypass_policy_gates=request.bypass_policy_gates,
+            async_diagnostics_level=request.async_diagnostics_level,
         )
         audit_success(
             context,
@@ -2458,6 +2468,59 @@ def admin_scenarios(
     return config_store.scenario_overview()
 
 
+@app.post("/admin/scenarios/validate-linked")
+def admin_validate_scenario_linked_structure(
+    request: AdminScenarioLinkedValidationRequest,
+    http_request: Request,
+    context: SecurityContext = Depends(context_or_raise),
+) -> dict[str, Any]:
+    permission = "workflow.read"
+    operator_id = context.actor_id
+    try:
+        permissions: dict[str, str] = {}
+        for domain in SCENARIO_LINKED_VALIDATION_DOMAINS:
+            permissions[domain] = require_config_permission(
+                context,
+                http_request,
+                domain=domain,
+                mode="read",
+                action="admin.scenarios.validate_linked",
+            )
+        permission = ",".join(sorted(set(permissions.values())))
+        result = config_store.validate_scenario_linked_structure(
+            scenario=request.scenario,
+            operator_id=operator_id,
+        )
+        audit_success(
+            context,
+            http_request,
+            action="admin.scenarios.validate_linked",
+            resource_type="scenario",
+            resource_id=str(request.scenario.get("scenario_id") or ""),
+            permission=permission,
+            details={
+                "operator_id": operator_id,
+                "scenario_id": result.get("scenario_id"),
+                "status": result.get("status"),
+                "error_count": len(result.get("errors") or []),
+                "checked_domains": result.get("checked_domains", []),
+            },
+        )
+        return result
+    except ConfigRegistryError as error:
+        audit_error(
+            context,
+            http_request,
+            action="admin.scenarios.validate_linked",
+            resource_type="scenario",
+            resource_id=str(request.scenario.get("scenario_id") or ""),
+            permission=permission,
+            status_code=400,
+            message=str(error),
+        )
+        raise config_error_response(error) from error
+
+
 @app.get("/admin/scenarios/{scenario_id}")
 def admin_scenario_detail(
     scenario_id: str,
@@ -2524,6 +2587,7 @@ def admin_simulate_scenario(
             allow_mock_integrations=request.allow_mock_integrations,
             allow_action_with_approval=request.allow_action_with_approval,
             bypass_policy_gates=request.bypass_policy_gates,
+            async_diagnostics_level=request.async_diagnostics_level,
         )
         audit_success(
             context,
